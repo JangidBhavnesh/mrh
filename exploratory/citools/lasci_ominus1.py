@@ -109,6 +109,9 @@ def make_rdm12 (fci, fcivec, norb, nelec, **kwargs):
         dm2 += d2
     return dm1, dm2
 
+def make_rdm2(fci, fcivec, norb, nelec, **kwargs):
+    return make_rdm12 (fci, fcivec, norb, nelec, **kwargs)[1]
+
 def make_rdm12s (fci, fcivec, norb, nelec, **kwargs):
     dm1 = np.zeros ((2,norb,norb))
     dm2 = np.zeros ((3,norb,norb,norb,norb))
@@ -622,6 +625,7 @@ class FCISolver (direct_spin1.FCISolver):
     make_rdm1 = make_rdm1
     make_rdm1s = make_rdm1s
     make_rdm12 = make_rdm12
+    make_rdm2 = make_rdm2
     make_rdm12s = make_rdm12s
     get_init_guess = get_init_guess
     spin_square = spin_square
