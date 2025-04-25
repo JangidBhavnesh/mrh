@@ -3,9 +3,9 @@ from scipy import linalg
 from pyscf import lib
 from pyscf.lib import logger
 from pyscf.fci import cistring 
-from mrh.my_pyscf.lassi.op_o1 import stdm, frag, hams2ovlp
+from mrh.my_pyscf.lassi.op_o1 import stdm, frag, hams2ovlp, hsi
 from mrh.my_pyscf.lassi.op_o1.utilities import *
-from mrh.my_pyscf.lassi.citools import get_lroots
+from mrh.my_pyscf.lassi.citools import get_lroots, hci_dot_sivecs
 
 class ContractHamCI (stdm.LSTDM):
     __doc__ = stdm.LSTDM.__doc__ + '''
@@ -34,6 +34,7 @@ class ContractHamCI (stdm.LSTDM):
     # Handling for 1s1c: need to do both a'.sm.b and b'.sp.a explicitly
     all_interactions_full_square = True
     interaction_has_spin = ('_1c_', '_1c1d_', '_1s1c_', '_2c_')
+    ltri_ambiguous = False
 
     def _init_vecs (self):
         hci_fr_pabq = []
@@ -404,7 +405,7 @@ class ContractHamCI (stdm.LSTDM):
         return self.hci_fr_pabq, t0
 
 def contract_ham_ci (las, h1, h2, ci_fr_ket, nelec_frs_ket, ci_fr_bra, nelec_frs_bra,
-                     soc=0, orbsym=None, wfnsym=None):
+                     si_bra=None, si_ket=None, h0=0, soc=0, orbsym=None, wfnsym=None):
     '''Evaluate the action of the state interaction Hamiltonian on a set of ket CI vectors,
     projected onto a basis of bra CI vectors, leaving one fragment of the bra uncontracted.
 
@@ -428,8 +429,14 @@ def contract_ham_ci (las, h1, h2, ci_fr_ket, nelec_frs_ket, ci_fr_bra, nelec_frs
             fragment for the bra vectors
 
     Kwargs:
+        si_bra : ndarray of shape (ndim_bra, *)
+            SI vectors for the bra. If provided, the p dimension on the return object is contracted
+        si_ket : ndarray of shape (ndim_ket, *)
+            SI vectors for the bra. If provided, the q dimension on the return object is contracted
         soc : integer
             Order of spin-orbit coupling included in the Hamiltonian
+        h0 : float
+            Constant term in the Hamiltonian
         orbsym : list of int of length (ncas)
             Irrep ID for each orbital
         wfnsym : int
@@ -471,12 +478,21 @@ def contract_ham_ci (las, h1, h2, ci_fr_ket, nelec_frs_ket, ci_fr_bra, nelec_frs
     if nfrags>1:
         for ifrag in range (nfrags):
             gen_hket = gen_contract_ham_ci_const (ifrag, nbra, las, h1, h2, ci, nelec_frs, soc=soc,
-                                                  orbsym=orbsym, wfnsym=wfnsym)
+                                                  h0=h0, orbsym=orbsym, wfnsym=wfnsym)
             for ibra, hket_pabq in enumerate (gen_hket):
                 hket_fr_pabq[ifrag][ibra][:] += hket_pabq[:]
-    return hket_fr_pabq
+    elif h0:
+        for ibra in range (nbra):
+            nelec_bra = tuple (nelec_frs_bra[0,ibra])
+            for iket in range (nket):
+                i, j = contracter.offs_lroots[iket]
+                nelec_ket = tuple (nelec_frs_ket[0,iket])
+                if nelec_bra==nelec_ket:
+                    h0ket = h0 * ci_fr_ket[0][iket].transpose (1,2,0)
+                    hket_fr_pabq[0][ibra][0,:,:,i:j] += h0ket
+    return hci_dot_sivecs (hket_fr_pabq, si_bra, si_ket, get_lroots (ci_fr_bra))
 
-def gen_contract_ham_ci_const (ifrag, nbra, las, h1, h2, ci, nelec_frs, soc=0, orbsym=None,
+def gen_contract_ham_ci_const (ifrag, nbra, las, h1, h2, ci, nelec_frs, soc=0, h0=0, orbsym=None,
                                wfnsym=None):
     '''Constant-term parts of contract_ham_ci for fragment ifrag'''
     log = lib.logger.new_logger (las, las.verbose)
@@ -510,11 +526,12 @@ def gen_contract_ham_ci_const (ifrag, nbra, las, h1, h2, ci, nelec_frs, soc=0, o
 
     # Fix sign convention for omitted fragment
     nelec_rf = nelec_frs.sum (-1).T
-    class HamS2Ovlp (hams2ovlp.HamS2Ovlp):
+    class HamS2Ovlp (hsi.HamS2OvlpOperators):
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
             self.spin_shuffle = [fermion_spin_shuffle (nelec_frs[:,i,0], nelec_frs[:,i,1])
                                  for i in range (nroots)]
+            self.log.verbose = 0
         def fermion_frag_shuffle (self, iroot, frags):
             frags = [f if f<ifrag else f+1 for f in frags]
             return fermion_frag_shuffle (nelec_rf[iroot], frags)
@@ -522,12 +539,16 @@ def gen_contract_ham_ci_const (ifrag, nbra, las, h1, h2, ci, nelec_frs, soc=0, o
     # Get the intermediate object, rather than just the ham matrix, so that I can use the members
     # of the intermediate to keep track of the difference between the full-system indices and the
     # nfrag-1--system indices
-    outerprod = hams2ovlp.ham (las, h1, h2, ci_jfrag, nelec_frs_j, nlas=nlas_j,
-                               _HamS2Ovlp_class=HamS2Ovlp, _do_kernel=False)
-    ham = outerprod.kernel ()[0]
+    outerprod = hsi.gen_contract_op_si_hdiag (las, h1, h2, ci_jfrag, nelec_frs_j, nlas=nlas_j,
+                                              _HamS2Ovlp_class=HamS2Ovlp, _return_int=True)
+    ham_op = outerprod.get_ham_op ()
+    ovlp_op = outerprod.get_ovlp_op ()
 
     for ibra in range (nket, nroots):
         i, j = outerprod.offs_lroots[ibra]
+        eye = np.zeros ((ham_op.shape[0], j-i), dtype=ham_op.dtype)
+        eye[i:j,:] = np.eye (j-i)
+        ham_ij = ham_op (eye) + (h0 * ovlp_op (eye))
         nelec_i = nelec_i_rs[ibra]
         ndeta = cistring.num_strings (norb_i, nelec_i[0])
         ndetb = cistring.num_strings (norb_i, nelec_i[1])
@@ -540,10 +561,10 @@ def gen_contract_ham_ci_const (ifrag, nbra, las, h1, h2, ci, nelec_frs, soc=0, o
             if ci_i_iket.ndim == 2: ci_i_iket = ci_i_iket[None,...]
             nq1, na, nb = ci_i_iket.shape
             k, l = outerprod.offs_lroots[iket]
-            np1, nq2 = ham[i:j,k:l].shape
+            nq2, np1 = ham_ij[k:l].shape
             n = m + nq1*nq2
             if tuple (nelec_i_rs[iket]) != tuple (nelec_i): continue
-            hket = np.multiply.outer (ci_i_iket, ham[i:j,k:l]) # qabpq
+            hket = np.multiply.outer (ci_i_iket, ham_ij[k:l,:].conj ().T) # qabpq
             new_shape = [nq1,na,nb,np1] + list (outerprod.lroots[::-1,iket])
             hket = np.moveaxis (hket.reshape (new_shape), 0, -(1+ifrag))
             new_shape = [na,nb,np1,nq1*nq2]
