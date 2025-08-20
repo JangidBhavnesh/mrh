@@ -301,9 +301,14 @@ def kernel_ms1(fci, h1e, eri, norb, nelec, ci0=None, link_index=None,
     if max_space is None: max_space = fci.max_space
     tol_residual = getattr(fci, 'conv_tol_residual', None)
 
+    # Currently, I will do this hack to solve. Will write the cleaner version soon.
+    link_indexa, link_indexb = _unpack(norb, nelec, link_index)
+    na = link_indexa.shape[0]
+    nb = link_indexb.shape[0]
+
     ci0 = init_guess() if callable(ci0) else ci0
-    ci0 = np.asarray(ci0).reshape(2,2).astype(np.complex128)
-    hop = hop(ci0).reshape(2,2)
+    ci0 = np.asarray(ci0).reshape(na,nb).astype(np.complex128)
+    hop = hop(ci0).reshape(na,nb)
     with lib.with_omp_threads(fci.threads):
         e, c = fci.eig(hop, ci0, precond, tol=tol, lindep=lindep,
                        max_cycle=max_cycle, max_space=max_space, nroots=nroots,
