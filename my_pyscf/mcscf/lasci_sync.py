@@ -269,41 +269,47 @@ def ci_cycle (las, mo, ci0, veff, h2eff_sub, casdm1frs, log):
     for isub, (fcibox, ncas, nelecas, h1e, fcivec) in enumerate (zip (las.fciboxes, las.ncas_sub,
                                                                       las.nelecas_sub, h1eff_sub,
                                                                       ci0)):
-        eri_cas = las.get_h2eff_slice (h2eff_sub, isub, compact=8)
-        max_memory = max(400, las.max_memory-lib.current_memory()[0])
-        orbsym = getattr (mo, 'orbsym', None)
-        if orbsym is not None:
-            i = ncas_cum[isub]
-            j = ncas_cum[isub+1]
-            orbsym = orbsym[i:j]
-            orbsym_io = orbsym.copy ()
-            if np.issubdtype (orbsym.dtype, np.integer):
-                orbsym_io = np.asarray ([symm.irrep_id2name (las.mol.groupname, x)
-                                         for x in orbsym])
-            log.info ("LASCI subspace {} with orbsyms {}".format (isub, orbsym_io))
-        else:
-            log.info ("LASCI subspace {} with no orbsym information".format (isub))
-        if log.verbose > lib.logger.DEBUG: 
-         for state, solver in enumerate (fcibox.fcisolvers):
-            wfnsym = getattr (solver, 'wfnsym', None)
-            if (wfnsym is not None) and (orbsym is not None):
-                if isinstance (wfnsym, str):
-                    wfnsym_str = wfnsym
-                else:
-                    wfnsym_str = symm.irrep_id2name (las.mol.groupname, wfnsym)
-                log.debug1 ("LASCI subspace {} state {} with wfnsym {}".format (isub, state,
-                                                                                wfnsym_str))
+        if isub < 100: 
+            eri_cas = las.get_h2eff_slice (h2eff_sub, isub, compact=8)
+            max_memory = max(400, las.max_memory-lib.current_memory()[0])
+            orbsym = getattr (mo, 'orbsym', None)
+            if orbsym is not None:
+                i = ncas_cum[isub]
+                j = ncas_cum[isub+1]
+                orbsym = orbsym[i:j]
+                orbsym_io = orbsym.copy ()
+                if np.issubdtype (orbsym.dtype, np.integer):
+                    orbsym_io = np.asarray ([symm.irrep_id2name (las.mol.groupname, x)
+                                            for x in orbsym])
+                log.info ("LASCI subspace {} with orbsyms {}".format (isub, orbsym_io))
+            else:
+                log.info ("LASCI subspace {} with no orbsym information".format (isub))
+            
+            if log.verbose > lib.logger.DEBUG: 
+                for state, solver in enumerate (fcibox.fcisolvers):
+                    wfnsym = getattr (solver, 'wfnsym', None)
+                    if (wfnsym is not None) and (orbsym is not None):
+                        if isinstance (wfnsym, str):
+                            wfnsym_str = wfnsym
+                        else:
+                            wfnsym_str = symm.irrep_id2name (las.mol.groupname, wfnsym)
+                        log.debug1 ("LASCI subspace {} state {} with wfnsym {}".format (isub, state,
+                                                                                        wfnsym_str))
 
-        if isub not in frozen_ci:
-            e_sub, fcivec = fcibox.kernel(h1e, eri_cas, ncas, nelecas,
-                                          ci0=fcivec, verbose=log,
-                                          max_memory = max_memory,
-                                          ecore=e0, orbsym=orbsym)
+            if isub not in frozen_ci:
+                e_sub, fcivec = fcibox.kernel(h1e, eri_cas, ncas, nelecas,
+                                            ci0=fcivec, verbose=log,
+                                            max_memory = max_memory,
+                                            ecore=e0, orbsym=orbsym)
+            else:
+                e_sub = 0 # TODO: proper energy calculation (probably doesn't matter tho)
+            e_cas.append (e_sub)
+            ci1.append (fcivec)
+            t1 = log.timer ('FCI box for subspace {}'.format (isub), *t1)
         else:
-            e_sub = 0 # TODO: proper energy calculation (probably doesn't matter tho)
-        e_cas.append (e_sub)
-        ci1.append (fcivec)
-        t1 = log.timer ('FCI box for subspace {}'.format (isub), *t1)
+            e_cas.append(e_cas[0])
+            ci1.append(ci1[0])
+            t1 = log.timer ('FCI box for subspace {}'.format (isub), *t1)
     return e_cas, ci1
 
 def all_nonredundant_idx (nmo, ncore, ncas_sub):

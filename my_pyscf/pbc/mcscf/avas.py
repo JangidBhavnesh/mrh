@@ -384,10 +384,11 @@ class AVAS(lib.StreamObject):
 
     def kernel(self):
         self.dump_flags()
-        if self.nkpts == 1:
+        totkpt = sum([np.sum(np.abs(totkpt)) for totkpt in self._scf.kpts])
+        if self.nkpts == 1 and totkpt < 1e-9:
             self.ncas, self.nelecas, self.mo_coeff, \
                     self.occ_weights, self.vir_weights = _kernelGamma(self)
-        elif self.nkpts > 1:
+        elif self.nkpts >= 1 and totkpt > 1e-9:
             self.ncas, self.nelecas, self.mo_coeff, \
                     self.occ_weights, self.vir_weights = _kernelKpoints(self)
             # Some sanity checks should be here.

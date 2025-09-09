@@ -57,7 +57,7 @@ cell.output = f"PAChain.{2}.{nC}.log"
 cell.build()
 
 # Set the number of k-points
-nk = [3,1,1]
+nk = [5,1,1]
 kpts = cell.make_kpts(nk)
 
 # SCF
@@ -70,7 +70,6 @@ kmf.conv_tol = 1e-12
 kmf.kernel()
 
 ref_energy = kmf.energy_elec()[0]
-
 
 '''
 print(len(kmf.mo_coeff)) : 3
