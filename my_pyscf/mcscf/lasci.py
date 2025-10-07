@@ -862,7 +862,6 @@ def run_lasci (las, mo_coeff=None, ci0=None, lroots=None, lweights=None, verbose
     e_tot = np.dot (las.weights, e_states)
     return converged, e_tot, e_states, e_cas, e_lexc, ci1
 
-
 def get_nelec_frs (las):
     ''' Getter function for all electron occupancies in all fragments in all rootspaces.
 
@@ -945,7 +944,19 @@ class LASCINoSymm (casci.CASCI):
         self.e_states = [0.0]
         self.e_lexc = [[np.array ([0]),],]
 
-    def _init_fcibox (self, smult, nel): 
+    def _init_fcibox (self, smult, nel):
+        '''
+        Initialize a FCISolverBox for a fragment with spin multiplicity `smult`
+        and number of electrons `nel`.
+        Args:
+            smult: int
+                Spin multiplicity of the fragment
+            nel: tuple of two ints
+                Number of alpha and beta electrons in the fragment
+        Returns:
+            fcibox: FCISolverBox instance
+                FCISolverBox instance for the fragment
+        '''
         s = csf_solver (self.mol, smult=smult)
         s.spin = nel[0] - nel[1] 
         return get_h1e_zipped_fcisolver (state_average_n_mix (self, [s], [1.0]).fcisolver)
@@ -954,6 +965,18 @@ class LASCINoSymm (casci.CASCI):
     def nfrags (self): return len (self.ncas_sub)
 
     def get_mo_slice (self, idx, mo_coeff=None):
+        '''
+        Get the Active space MO coefficients corresponding to fragment `idx`.
+        Args:
+            idx: int
+                Index of the fragment
+            mo_coeff: ndarray of shape (nao,nmo)
+                MO coefficients; defaults to self.mo_coeff
+        Returns:
+            mo: ndarray of shape (nao,ncas_sub[idx])
+                MO coefficients corresponding to fragment `idx`
+        TODO: Write this in simpler way without for loop.
+        '''
         if mo_coeff is None: mo_coeff = self.mo_coeff
         mo = mo_coeff[:,self.ncore:]
         for offs in self.ncas_sub[:idx]:
@@ -982,14 +1005,30 @@ class LASCINoSymm (casci.CASCI):
     get_grad_ci = get_grad_ci
     _hop = lasci_sync.LASCI_HessianOperator
     _kern = lasci_sync.kernel
+
     def get_hop (self, mo_coeff=None, ci=None, ugg=None, **kwargs):
+        '''
+        Initialize and return a Hessian operator for LASCI orbital optimization.
+        Args:
+            mo_coeff: ndarray of shape (nao,nmo)
+                MO coefficients; defaults to self.mo_coeff
+            ci: list (length nfrags) of list (length nroots) of ndarrays
+                Contains CI vectors; defaults to self.ci
+            ugg: unitary group generators for the LAS
+                If None, calculated with self.get_ugg()
+        Returns:
+            hop: LASCI_HessianOperator instance
+                Hessian operator for LASCI orbital optimization
+        '''
         if mo_coeff is None: mo_coeff = self.mo_coeff
         if ci is None: ci = self.ci
         if ugg is None: ugg = self.get_ugg ()
         return self._hop (self, ugg, mo_coeff=mo_coeff, ci=ci, **kwargs)
+    
     canonicalize = canonicalize
 
     def _finalize(self):
+        ''' Print out final energies '''
         log = lib.logger.new_logger (self, self.verbose)
         nroots_prt = len (self.e_states)
         if self.verbose <= lib.logger.INFO:
@@ -1005,9 +1044,11 @@ class LASCINoSymm (casci.CASCI):
             log.info ("LASCI energy = %.15g", self.e_tot)
         return
 
-
     def kernel(self, mo_coeff=None, ci0=None, casdm0_fr=None, conv_tol_grad=None,
             assert_no_dupes=False, verbose=None, _kern=None):
+        '''
+        Kernel
+        '''
         if mo_coeff is None:
             mo_coeff = self.mo_coeff
         else:
@@ -1047,17 +1088,16 @@ class LASCINoSymm (casci.CASCI):
         return self.e_tot, self.e_cas, self.ci, self.mo_coeff, self.mo_energy, h2eff_sub, veff
 
     def states_make_casdm1s_sub (self, ci=None, ncas_sub=None, nelecas_sub=None, **kwargs):
-        ''' Get spin-separated, rootspace-separated, locally state-averaged 1-RDMs of the active
+        '''
+        Get spin-separated, rootspace-separated, locally state-averaged 1-RDMs of the active
         orbitals for each fragment in sequence.
-
         Kwargs:
             ci: list of list of ndarrays
                 Contains CI vectors
             ncas_sub: sequence of integers
                 number of orbitals in each fragment
             nelecas_sub: sequence of integers
-                number of orbitals in each fragment in the reference rootspace 
-
+                number of orbitals in each fragment in the reference rootspace
         Returns:
             casdm1frs: list of ndarray of shape (nroots, 2, ncas_sub[i], ncas_sub[i])
                 Spin-separated 1-body reduced density matrices for each fragment for each
@@ -1079,7 +1119,8 @@ class LASCINoSymm (casci.CASCI):
 
     def make_casdm1s_sub (self, ci=None, ncas_sub=None, nelecas_sub=None,
             casdm1frs=None, w=None, **kwargs):
-        ''' Get spin-separated, rootspace- and state-averaged 1-RDMs of the active orbitals for
+        '''
+        Get spin-separated, rootspace- and state-averaged 1-RDMs of the active orbitals for
         each fragment in sequence.
 
         Kwargs:
@@ -1102,9 +1143,9 @@ class LASCINoSymm (casci.CASCI):
 
     def states_make_casdm1s (self, ci=None, ncas_sub=None, nelecas_sub=None,
             casdm1frs=None, **kwargs):
-        ''' Get spin-separated, rootspace-separated, locally state-averaged 1-RDMs of all active
+        '''
+        Get spin-separated, rootspace-separated, locally state-averaged 1-RDMs of all active
         orbitals collectively.
-
         Kwargs:
             ci: list of list of ndarrays
                 Contains CI vectors
@@ -1114,7 +1155,6 @@ class LASCINoSymm (casci.CASCI):
                 number of orbitals in each fragment in the reference rootspace 
             casdm1frs: sequence of ndarrays of shape (nroots, 2, ncas_sub[i], ncas_sub[i])
                 output of states_make_casdm1s_sub
-
         Returns:
             casdm1rs: ndarray of shape (nroots, 2, ncas, ncas)
                 Spin-separated 1-body reduced density matrix for the active orbitals for each
@@ -1176,7 +1216,6 @@ class LASCINoSymm (casci.CASCI):
         return [np.einsum ('rijkl,r->ijkl', dm2, box.weights)
                 for dm2, box in zip (casdm2fr, self.fciboxes)]
 
-
     def make_casdm2s_sub(self, ci=None, ncas_sub=None, nelecas_sub=None,
             casdm2frs=None, w=None, **kwargs):
         if casdm2frs is None: casdm2frs = self.states_make_casdm2s_sub (ci=ci,
@@ -1200,7 +1239,6 @@ class LASCINoSymm (casci.CASCI):
             casdm2s.append (np.stack ([dm2aa, dm2ab, dm2bb], axis=1))
         return casdm2s
     
-
     def states_make_casdm3_sub (self, ci=None, ncas_sub=None, nelecas_sub=None, **kwargs):
         ''' Spin-separated 3-RDMs in the MO basis for each subspace in sequence, currently this
         does not have weights so it's not really a STATES '''
@@ -1282,7 +1320,7 @@ class LASCINoSymm (casci.CASCI):
 
     def make_rdm1s_sub (self, mo_coeff=None, ci=None, ncas_sub=None,
             nelecas_sub=None, include_core=False, casdm1s_sub=None, **kwargs):
-        ''' Get spin-separated, rootspace- and state-averaged 1-RDMs of the active orbitals iun the
+        ''' Get spin-separated, rootspace- and state-averaged 1-RDMs of the active orbitals in the
         AO basis for each fragment in sequence. This function is suboptimal but retained for
         compatibility with the old DMET-based LASSCF implementation.
 
@@ -1352,13 +1390,11 @@ class LASCINoSymm (casci.CASCI):
 
     def make_rdm1s (self, mo_coeff=None, ncore=None, **kwargs):
         ''' Get spin-separated, rootspace- and locally state-averaged 1-RDMs in the AO basis.
-
         Kwargs:
             mo_coeff: ndarray of shape (nao,nmo)
                 Contains MO coefficients
             ncore: integer
                 Number of core orbitals
-
         Returns:
             dm1s: ndarray of shape (2,nao,nao)
                 Rootspace- and locally state-averaged, spin-separated 1-RDM
@@ -1379,7 +1415,6 @@ class LASCINoSymm (casci.CASCI):
                 Contains MO coefficients
             ci: list of list of ndarrays
                 Contains CI vectors
-
         Returns:
             dm1: ndarray of shape (nao,nao)
                 Rootspace- and locally state-averaged, spin-summed 1-RDM
@@ -1389,7 +1424,6 @@ class LASCINoSymm (casci.CASCI):
     def make_casdm1s (self, ci=None, **kwargs):
         ''' Get spin-separated, rootspace- and state-averaged 1-RDMs of all active
         orbitals collectively.
-
         Kwargs:
             ci: list of list of ndarrays
                 Contains CI vectors
@@ -1397,7 +1431,6 @@ class LASCINoSymm (casci.CASCI):
                 number of orbitals in each fragment
             nelecas_sub: sequence of integers
                 number of orbitals in each fragment in the reference rootspace 
-
         Returns:
             casdm1s: ndarray of shape (2, ncas, ncas)
                 Spin-separated, rootspace- and state-averaged 1-body reduced density matrix for the
@@ -1606,7 +1639,6 @@ class LASCINoSymm (casci.CASCI):
                 casdm2s[spin][k:l, i:j, i:j, k:l] = casdm2s[spin][i:j, k:l, k:l, i:j].transpose (1,0,3,2)
         return casdm2s
 
-
     def make_casdm2 (self, ci=None, ncas_sub=None, nelecas_sub=None, 
             casdm2r=None, casdm2f=None, casdm1frs=None, casdm2fr=None,
             **kwargs):
@@ -1803,7 +1835,6 @@ class LASCINoSymm (casci.CASCI):
             _transpose_dm3_(i,j, i,j, i,j, k,l, k,l, i,j)
 
         return casdm3
-
 
     def make_casdm3s (self, ci=None, ncas_sub=None, nelecas_sub=None,
             casdm3r=None, casdm3f=None, casdm2frs=None, casdm3fr=None, casdm2r=None, casdm2f=None,
@@ -2053,8 +2084,10 @@ class LASCINoSymm (casci.CASCI):
         return casdm3s
 
     def get_veff (self, mol=None, dm=None, hermi=1, spin_sep=False, dm1s=None, **kwargs):
-        ''' Returns a spin-summed veff! If dm isn't provided, builds from self.mo_coeff, self.ci
-            etc. '''
+        '''
+        Returns a spin-summed veff! If dm isn't provided, builds from self.mo_coeff, self.ci
+        etc.
+        '''
         if dm is None and dm1s is not None:
             import warnings
             kwarg_warn = "The kwarg on get_veff has been renamed from dm1s to dm"
@@ -2116,7 +2149,6 @@ class LASCINoSymm (casci.CASCI):
         veffb = veff_c - veff_s
         return np.stack ([veffa, veffb], axis=0)
          
-
     def states_energy_elec (self, mo_coeff=None, ncore=None, ncas=None,
             ncas_sub=None, nelecas_sub=None, ci=None, h2eff=None, veff=None, 
             casdm1frs=None, casdm2fr=None, veff_core=None, **kwargs):
@@ -2314,10 +2346,6 @@ class LASCINoSymm (casci.CASCI):
 
     def lassi(self, mo_coeff=None, ci=None, veff_c=None, h2eff_sub=None, orbsym=None,
               soc=False, break_symmetry=False, opt=1, **kwargs):
-        #import warnings
-        #lassi_kernel_warn = "Now LASSI have kernel, which takes las instance as input. This [las.lassi()] function " \
-        #                    "will be removed soon."
-        #warnings.warn(lassi_kernel_warn, stacklevel=3)
         from mrh.my_pyscf.lassi import lassi
         mylassi = lassi.LASSI(self, mo_coeff=mo_coeff, ci=ci, soc=soc, opt=opt,
                               break_symmetry=break_symmetry, **kwargs)
@@ -2360,13 +2388,13 @@ class LASCINoSymm (casci.CASCI):
     @property
     def converged (self):
         return all (self.states_converged)
+    
     @converged.setter
     def converged (self, x):
         if hasattr (x, '__len__'):
             self.states_converged = list (x)
         else:
             self.states_converged = [x,]*self.nroots
-
 
     def dump_spaces (self, nroots=None, sort_energy=False):
         log = lib.logger.new_logger (self, self.verbose)
