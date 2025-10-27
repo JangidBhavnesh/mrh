@@ -19,6 +19,16 @@ class ProductStateFCISolver (StateAverageNMixFCISolver, lib.StreamObject):
     '''
 
     def __init__(self, fcisolvers, stdout=None, verbose=0, **kwargs):
+        '''
+        Args:
+            fcisolvers: list of FCISolver objects
+                One FCISolver object per fragment.
+            stdout: file-like object or None
+                Where to send the output.
+            verbose: int or bool
+                Verbosity level.
+        Kwargs:
+        '''
         self.fcisolvers = fcisolvers
         self.verbose = verbose
         self.stdout = stdout
@@ -27,11 +37,36 @@ class ProductStateFCISolver (StateAverageNMixFCISolver, lib.StreamObject):
     def kernel (self, h1, h2, norb_f, nelec_f, ecore=0, ci0=None, orbsym=None,
             conv_tol_grad=1e-4, conv_tol_self=1e-10, max_cycle_macro=50,
             serialfrag=False, **kwargs):
+        r'''Run the Product-State fixed-point CI iteration.
+        h1: (ncas,ncas) or (2,ncas,ncas)
+            One-electron Hamiltonian
+        h2: (ncas,ncas,ncas,ncas)
+            Two-electron Hamiltonian
+        norb_f: list of length nfrag of integers
+            Number of orbitals in each fragment
+        nelec_f: list of length nfrag of integers
+            Number of electrons (in reference state) in each fragment
+        ecore: float
+            Core energy
+        ci0: list of length nfrag or None
+            Guess CI vectors for each fragment. If None, a guess will be generated.
+        orbsym: list of length ncas or None
+            Irrep symmetry labels for each orbital. If None, no symmetry is used.
+        conv_tol_grad: float
+            Convergence threshold for the maximum gradient element.
+        conv_tol_self: float
+            Convergence threshold for the energy change.
+        max_cycle_macro: int
+            Maximum number of macro iterations.
+        serialfrag: bool
+        '''
+        
         log = self.log
         converged = False
         e_sigma = 0
-        e = [0 for n in norb_f]
+        e = [0,]*len(norb_f)
         ci1 = ci0
+
         log.info ('Entering product-state fixed-point CI iteration')
         for it in range (max_cycle_macro):
             ci0 = self.get_init_guess (ci1, norb_f, nelec_f, h1, h2)
@@ -57,11 +92,12 @@ class ProductStateFCISolver (StateAverageNMixFCISolver, lib.StreamObject):
             e_sigma = np.amax (e) - np.amin (e)
         conv_str = ['NOT converged','converged'][int (converged)]
         log.info (('Product_state fixed-point CI iteration {} after {} '
-                   'cycles').format (conv_str, it))
+                   'cycles').format (conv_str, it+1))
         if not converged:
             ci1 = self.get_init_guess (ci1, norb_f, nelec_f, h1, h2)
             # Issue #86: see above, same problem
             self._debug_csfs (log, ci0, ci1, norb_f, nelec_f, grad)
+        # Final energy evaluation
         energy_elec = self.energy_elec (h1, h2, ci1, norb_f, nelec_f,
             ecore=ecore, efinal=e, **kwargs)
         return converged, energy_elec, ci1
@@ -87,7 +123,7 @@ class ProductStateFCISolver (StateAverageNMixFCISolver, lib.StreamObject):
             ci1: list of length nfrag of ndarrays
                 Orthonormal guess CI vectors. Any vectors present in ci0 are preserved unaltered.
         '''
-        if ci0 is None: ci0 = [None for i in range (len (norb_f))]
+        if ci0 is None: ci0 = [None,]*len (norb_f)
         ci1 = [c for c in ci0] # reference safety
         if h1.ndim < 3: h1 = np.stack ([h1, h1], axis=0)
         for ix, (no, ne, solver) in enumerate (zip (norb_f, nelec_f, self.fcisolvers)):
@@ -185,6 +221,35 @@ class ProductStateFCISolver (StateAverageNMixFCISolver, lib.StreamObject):
 
     def _1shot (self, it, h0eff, h1eff, h2, e0, ci0, norb_f, nelec_f, orbsym=None,
                 serialfrag=False, **kwargs):
+        '''
+        Solving the FCI problem for all fragments once each.
+        Args:
+            it: int
+                Macro iteration number
+            h0eff: list of length nfrag of floats
+                Core Energy/constant term for each fragment
+            h1eff: list of length nfrag of (2,nf,nf) ndarrays
+                Effective one-electron Hamiltonian for each fragment
+            h2: (ncas,ncas,ncas,ncas) ndarray
+                Full two-electron Hamiltonian for all fragments combined
+            e0: list of length nfrag of floats
+                Previous energies for each fragment
+            ci0: list of length nfrag of ndarrays
+                Guess CI vectors for each fragment.
+            norb_f: list of length nfrag of integers
+                Number of orbitals in each fragment
+            nelec_f: list of length nfrag of integers
+                Number of electrons (in reference state) in each fragment
+            orbsym: list of length ncas or None
+                Irrep symmetry labels for each orbital. If None, no symmetry is used.
+            serialfrag: bool
+               ?
+        Returns:
+            e1: list of length nfrag of floats
+                Updated energies for each fragment
+            ci1: list of length nfrag of ndarrays
+                Updated CI vectors for each fragment
+        '''
         nfrag = len (norb_f)
         nj = np.cumsum (norb_f)
         ni = nj - norb_f
@@ -237,6 +302,23 @@ class ProductStateFCISolver (StateAverageNMixFCISolver, lib.StreamObject):
         return np.concatenate (grad)
 
     def energy_elec (self, h1, h2, ci, norb_f, nelec_f, ecore=0, **kwargs):
+        '''
+        Evaluate the electronic energy of the product-state wave function.
+        Args:
+            h1: (ncas,ncas) or (2,ncas,ncas) ndarray
+                One-electron Hamiltonian
+            h2: (ncas,ncas,ncas,ncas) ndarray
+                Two-electron Hamiltonian
+            ci: list of length nfrag of ndarrays
+                CI vectors for each fragment
+            norb_f: list of length nfrag of integers
+            nelec_f: list of length nfrag of integers
+            ecore: float
+                Core energy
+        Returns:
+            float
+                Electronic energy
+        '''
         dm1s = np.stack (self.make_rdm1s (ci, norb_f, nelec_f), axis=0)
         if h1.ndim < 3: h1 = np.stack ([h1, h1], axis=0)
         dm2 = self.make_rdm2 (ci, norb_f, nelec_f)
