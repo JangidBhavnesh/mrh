@@ -44,3 +44,6 @@ test_all.sh
 *.tab
 *.txt
 
+# Integrals 
+*.gdf
+*.h5
