@@ -167,7 +167,7 @@ def kernel (las, mo_coeff=None, ci0=None, casdm0_fr=None, conv_tol_grad=1e-4,
                 log.info ('LASCI micro %d : |x_orb| = %.15g ; |x_ci| = %.15g', microit[0],
                           norm_xorb, norm_xci)
             if abs(x_max)>.5: # Nonphysical step vector element
-                if last_x[0] == 0:
+                if np.all(last_x[0] == 0):
                     x[np.abs (x)>.5*np.pi] = 0
                     last_x[0] = x
                 raise MicroIterInstabilityException ("|x[i]| > pi/2")
