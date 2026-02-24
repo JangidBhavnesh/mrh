@@ -222,7 +222,8 @@ def density_fit (las, auxbasis=None, with_df=None):
     return new_las
 
 def h1e_for_las (las, mo_coeff=None, ncas=None, ncore=None, nelecas=None, ci=None, ncas_sub=None,
-                 nelecas_sub=None, veff=None, h2eff_sub=None, casdm1s_sub=None, casdm1frs=None):
+                 nelecas_sub=None, veff=None, h2eff_sub=None, casdm1s_sub=None, casdm1frs=None,
+                 eri_cas=None):
     ''' Effective one-body Hamiltonians (plural) for a LASCI problem
 
     Args:
@@ -267,8 +268,8 @@ def h1e_for_las (las, mo_coeff=None, ncas=None, ncore=None, nelecas=None, ci=Non
     if casdm1s_sub is None: casdm1s_sub = [np.einsum ('rsij,r->sij',dm,las.weights)
                                            for dm in casdm1frs]
     if veff is None:
-        veff = las.get_veff (dm = las.make_rdm1 (mo_coeff=mo_coeff, ci=ci))
-        veff = las.split_veff (veff, h2eff_sub, mo_coeff=mo_coeff, ci=ci, casdm1s_sub=casdm1s_sub)
+        veff = las.get_veff (dm = las.make_rdm1 (mo_coeff=mo_coeff, casdm1s_sub=casdm1s_sub))
+        veff = las.split_veff (veff, h2eff_sub, mo_coeff=mo_coeff, casdm1s_sub=casdm1s_sub)
 
     # First pass: split by root  
     nocc = ncore + ncas
@@ -277,8 +278,12 @@ def h1e_for_las (las, mo_coeff=None, ncas=None, ncore=None, nelecas=None, ci=Non
     moH_cas = mo_cas.conj ().T 
     h1e = moH_cas @ (las.get_hcore ()[None,:,:] + veff) @ mo_cas
     h1e_r = np.empty ((las.nroots, 2, ncas, ncas), dtype=h1e.dtype)
-    h2e = lib.numpy_helper.unpack_tril (h2eff_sub.reshape (nmo*ncas,
-        ncas*(ncas+1)//2)).reshape (nmo, ncas, ncas, ncas)[ncore:nocc,:,:,:]
+    if eri_cas is None:
+        eri_cas = lib.numpy_helper.unpack_tril (h2eff_sub.reshape (nmo*ncas,
+            ncas*(ncas+1)//2)).reshape (nmo, ncas, ncas, ncas)[ncore:nocc,:,:,:]
+    else:
+        assert (eri_cas.shape==(ncas,ncas,ncas,ncas))
+    h2e = eri_cas
     avgdm1s = np.stack ([linalg.block_diag (*[dm[spin] for dm in casdm1s_sub])
                          for spin in range (2)], axis=0)
     for state in range (las.nroots):
@@ -296,7 +301,7 @@ def h1e_for_las (las, mo_coeff=None, ncas=None, ncore=None, nelecas=None, ci=Non
         p = sum (las.ncas_sub[:ix])
         q = p + las.ncas_sub[ix]
         h1e = h1e_r[:,:,p:q,p:q]
-        h2e = las.get_h2eff_slice (h2eff_sub, ix)
+        h2e = eri_cas[p:q,p:q,p:q,p:q]
         j = np.tensordot (casdm1s_r, h2e, axes=((2,3),(2,3)))
         k = np.tensordot (casdm1s_r, h2e, axes=((2,3),(2,1)))
         h1e_fr.append (h1e - j - j[:,::-1] + k)
@@ -492,7 +497,73 @@ def canonicalize (las, mo_coeff=None, ci=None, casdm1fs=None, natorb_casdm1=None
 
     return mo_coeff, mo_ene, mo_occ, ci, h2eff_sub
 
-def get_init_guess_ci (las, mo_coeff=None, h2eff_sub=None, ci0=None, eri_cas=None):
+def get_init_guess_ci (las, mo_coeff=None, h2eff_sub=None, ci0=None, eri_cas=None, gtype=None):
+    if gtype is None: gtype = las.init_guess_ci
+    if 'aufbau1' in gtype.lower ():
+        return get_init_guess_ci_aufbau1 (las, mo_coeff=mo_coeff, h2eff_sub=h2eff_sub, ci0=ci0,
+                                          eri_cas=eri_cas)
+    elif 'aufbau' in gtype.lower ():
+        return get_init_guess_ci_aufbau0 (las, mo_coeff=mo_coeff, ci0=ci0)
+    elif 'vac' in gtype.lower ():
+        return get_init_guess_ci_vac (las, mo_coeff=mo_coeff, h2eff_sub=h2eff_sub, ci0=ci0,
+                                      eri_cas=eri_cas)
+    else:
+        raise NotImplementedError ("CI init guess of type {}".format (gtype))
+
+def get_init_guess_ci_aufbau0 (las, mo_coeff=None, ci0=None):
+    if mo_coeff is None: mo_coeff = las.mo_coeff
+    if ci0 is None: ci0 = [[None for i in range (las.nroots)] for j in range (las.nfrags)]
+    nmo = mo_coeff.shape[-1]
+    ncore, ncas = las.ncore, las.ncas
+    nocc = ncore + ncas
+    casdm1frs = []
+    for ix, (fcibox, norb, nelecas) in enumerate (zip (las.fciboxes,las.ncas_sub,las.nelecas_sub)):
+        i = sum (las.ncas_sub[:ix])
+        j = i + norb
+        orbsym = getattr (mo_coeff, 'orbsym', None)
+        if orbsym is not None: orbsym=orbsym[ncore+i:ncore+j]
+        ci0g = fcibox.get_aufbau_guess (norb, nelecas, orbsym=orbsym)
+        for iy, solver in enumerate (fcibox.fcisolvers):
+            nelec = fcibox._get_nelec (solver, nelecas)
+            if hasattr (mo_coeff, 'orbsym'):
+                solver.orbsym = mo_coeff.orbsym[ncore+i:ncore+j]
+            ci0[ix][iy] = las._combine_init_guess_ci (ci0[ix][iy], ci0g[iy], norb, nelec,
+                                                      solver.nroots)
+    return ci0
+
+def get_init_guess_ci_aufbau1 (las, mo_coeff=None, h2eff_sub=None, ci0=None, eri_cas=None):
+    if mo_coeff is None: mo_coeff = las.mo_coeff
+    if ci0 is None: ci0 = [[None for i in range (las.nroots)] for j in range (las.nfrags)]
+    ci1 = [[ci0_ij for ci0_ij in ci0_i] for ci0_i in ci0]
+    ci1 = get_init_guess_ci_aufbau0 (las, mo_coeff=mo_coeff, ci0=ci1)
+    nmo = mo_coeff.shape[-1]
+    ncore, ncas = las.ncore, las.ncas
+    nocc = ncore + ncas
+    if eri_cas is None:
+        if h2eff_sub is None: h2eff_sub = las.get_h2eff (mo_coeff)
+        eri_cas = lib.numpy_helper.unpack_tril (h2eff_sub.reshape (nmo*ncas, ncas*(ncas+1)//2))
+        eri_cas = eri_cas.reshape (nmo, ncas, ncas, ncas)
+        eri_cas = eri_cas[ncore:nocc]
+    h1eff = las.get_h1eff (mo_coeff=mo_coeff, ci=ci1, eri_cas=eri_cas)
+    for ix, (fcibox, norb, nelecas) in enumerate (zip (las.fciboxes,las.ncas_sub,las.nelecas_sub)):
+        i = sum (las.ncas_sub[:ix])
+        j = i + norb
+        mo = mo_coeff[:,ncore+i:ncore+j]
+        moH = mo.conj ().T
+        h1e = h1eff[ix]
+        eri = eri_cas[i:j,i:j,i:j,i:j]
+        for iy, solver in enumerate (fcibox.fcisolvers):
+            nelec = fcibox._get_nelec (solver, nelecas)
+            if hasattr (mo_coeff, 'orbsym'):
+                solver.orbsym = mo_coeff.orbsym[ncore+i:ncore+j]
+            max_memory = max (400, las.max_memory - lib.current_memory()[0])
+            hdiag_csf = solver.make_hdiag_csf (h1e, eri, norb, nelec, max_memory=max_memory)
+            ci0g = solver.get_init_guess (norb, nelec, solver.nroots, hdiag_csf)
+            ci0[ix][iy] = las._combine_init_guess_ci (ci0[ix][iy], ci0g, norb, nelec,
+                                                      solver.nroots)
+    return ci0
+
+def get_init_guess_ci_vac (las, mo_coeff=None, h2eff_sub=None, ci0=None, eri_cas=None):
     if mo_coeff is None: mo_coeff = las.mo_coeff
     if ci0 is None: ci0 = [[None for i in range (las.nroots)] for j in range (las.nfrags)]
     nmo = mo_coeff.shape[-1]
@@ -524,12 +595,15 @@ def get_init_guess_ci (las, mo_coeff=None, h2eff_sub=None, ci0=None, eri_cas=Non
                                                       solver.nroots)
     return ci0
 
+
 def _combine_init_guess_ci (las, ci0i, ci0g, norb, nelec, nroots):
     ''' Function to handle the combination of a generated set of guess CI vectors (ci0g) with
     existing CI vectors (ci0i) already stored. '''
     nroots0 = 0
     ndet = tuple ([cistring.num_strings (norb, n) for n in nelec])
     ci0g = np.asarray (ci0g) # TODO: this leads to deprecated behavior in lasscf_rdm
+    if isinstance (ci0g, np.ndarray) and ci0g.size % ndet[0]*ndet[1] == 0:
+        ci0g = ci0g.reshape (-1, ndet[0], ndet[1])
     if isinstance (ci0i, np.ndarray) and ci0i.size % ndet[0]*ndet[1] == 0:
         ci0i = ci0i.reshape (-1, ndet[0], ndet[1])
         nroots0 = ci0i.shape[0]
@@ -563,7 +637,19 @@ def get_space_info (las):
         except ValueError as e:
             wfnsyms[iroot,ifrag] = symm.irrep_name2id (las.mol.groupname, solver.wfnsym)
     return charges, spins, smults, wfnsyms
-   
+  
+def get_smults_fr (las):
+    return las.get_space_info ()[2].T
+
+def get_nelec_frs (las):
+    charges_rf, spins_rf = las.get_space_info ()[:2]
+    nelec_f = np.asarray ([np.sum (nelec) for nelec in las.nelecas_sub])
+    nelec_fr = nelec_f - charges_rf.T
+    nelec_frs = np.stack ([nelec_fr + spins_rf.T,
+                           nelec_fr - spins_rf.T],
+                          axis=-1) // 2
+    return nelec_frs
+
 def assert_no_duplicates (las, tab=None):
     log = lib.logger.new_logger (las, las.verbose)
     if tab is None: tab = np.stack (get_space_info (las), axis=-1)
@@ -903,10 +989,32 @@ def get_sym_fr (las):
         sym_fr.append (sym_r)
     return np.asarray (sym_fr)
 
+def _shift_svals (l, sv, r, rng):
+    k = len (sv)
+    if rng is not None:
+        idx = np.argsort (-sv)
+        l[:,:k] = l[:,:k][:,idx]
+        sv = sv[idx]
+        r[:,:k] = r[:,:k][:,idx]
+        if rng[0] >= 0:
+            sv[:min (len (sv), rng[0])] += 1
+        if (rng[1] >=0) and (rng[1] < len (sv)):
+            sv[rng[1]:] -= 1
+        idx = np.argsort (-sv)
+        l[:,:k] = l[:,:k][:,idx]
+        sv = sv[idx]
+        r[:,:k] = r[:,:k][:,idx]
+    return l, sv, r
+
 class LASCINoSymm (casci.CASCI):
+
+    get_space_info = get_space_info
+    get_smults_fr = get_smults_fr
+    get_nelec_frs = get_nelec_frs
 
     def __init__(self, mf, ncas, nelecas, ncore=None, spin_sub=None, frozen=None, frozen_ci=None, **kwargs):
         self.use_gpu = kwargs.get('use_gpu', None)
+        self.init_guess_ci = 'aufbau1'
         if isinstance(ncas,int):
             ncas = [ncas]
         ncas_tot = sum (ncas)
@@ -2343,15 +2451,17 @@ class LASCINoSymm (casci.CASCI):
     _combine_init_guess_ci = _combine_init_guess_ci
     localize_init_guess=lasscf_guess.localize_init_guess
 
-    def _svd (self, mo_lspace, mo_rspace, s=None, mo_occ=None, **kwargs):
+    def _svd (self, mo_lspace, mo_rspace, s=None, mo_occ=None, rngs=None, **kwargs):
         # if mo_occ is nontrivial, then I don't care about the lvecs
         if mo_occ is None: mo_occ = np.ones (mo_rspace.shape[1], dtype=int)
+        if rngs is None: rngs = [None,None,None]
         mo_occ1 = []
         svals = []
         mo_rvecs = []
         for m in np.unique (mo_occ):
             idx = (mo_occ==m)
-            l, sv, r = self._svd1 (mo_lspace, mo_rspace[:,idx], s=s, **kwargs)
+            l, sv, r = self._svd1 (mo_lspace, mo_rspace[:,idx], s=s, rng=rngs[int(round(m))],
+                                   **kwargs)
             k = min (len (sv), np.count_nonzero (idx))
             mo_lvecs = l
             svals.append (sv[:k])
@@ -2368,10 +2478,11 @@ class LASCINoSymm (casci.CASCI):
         mo_rvecs = mo_rvecs[:,idx]
         return mo_lvecs, svals, mo_rvecs, mo_occ1
 
-    def _svd1 (self, mo_lspace, mo_rspace, s=None, **kwargs):
+    def _svd1 (self, mo_lspace, mo_rspace, s=None, rng=None, **kwargs):
         if s is None: s = self._scf.get_ovlp ()
-        return matrix_svd_control_options (s, lspace=mo_lspace, rspace=mo_rspace,
-                                           full_matrices=True)[:4]
+        l, sv, r = matrix_svd_control_options (s, lspace=mo_lspace, rspace=mo_rspace,
+                                               full_matrices=True)[:4]
+        return _shift_svals (l, sv, r, rng)
 
     def dump_flags (self, verbose=None, _method_name='LASCI'):
         log = lib.logger.new_logger (self, verbose)
@@ -2562,16 +2673,18 @@ class LASCISymm (casci_symm.CASCI, LASCINoSymm):
         
     @lib.with_doc(LASCINoSymm.localize_init_guess.__doc__)
     def localize_init_guess (self, frags_atoms, mo_coeff=None, spin=None, lo_coeff=None, fock=None,
-                             mo_occ=None, freeze_cas_spaces=False):
+                             mo_occ=None, freeze_cas_spaces=False, smults_f=None, nelec_f=None):
         if mo_coeff is None:
             mo_coeff = self.mo_coeff
         mo_coeff = casci_symm.label_symmetry_(self, mo_coeff)
         return LASCINoSymm.localize_init_guess (self, frags_atoms, mo_coeff=mo_coeff, spin=spin,
-            lo_coeff=lo_coeff, fock=fock, mo_occ=mo_occ, freeze_cas_spaces=freeze_cas_spaces)
+            lo_coeff=lo_coeff, fock=fock, mo_occ=mo_occ, freeze_cas_spaces=freeze_cas_spaces,
+            smults_f=smults_f, nelec_f=nelec_f)
 
-    def _svd (self, mo_lspace, mo_rspace, s=None, mo_occ=None, **kwargs):
+    def _svd (self, mo_lspace, mo_rspace, s=None, mo_occ=None, rngs=None, **kwargs):
         # if mo_occ is nontrivial, then I don't care about the lvecs
         if mo_occ is None: mo_occ = np.ones (mo_rspace.shape[1], dtype=int)
+        if rngs is None: rngs = [None,None,None]
         lsymm = getattr (mo_lspace, 'orbsym', None)
         if lsymm is None:
             mo_lspace = symm.symmetrize_space (self.mol, mo_lspace)
@@ -2588,7 +2701,8 @@ class LASCISymm (casci_symm.CASCI, LASCINoSymm):
         rsymm1 = []
         for m in np.unique (mo_occ):
             idx = (mo_occ==m)
-            l, sv, r = self._svd1 (mo_lspace, mo_rspace[:,idx], lsymm, rsymm[idx], s=s, **kwargs)
+            l, sv, r = self._svd1 (mo_lspace, mo_rspace[:,idx], lsymm, rsymm[idx], s=s, 
+                                   rng=rngs[int(round(m))], **kwargs)
             mo_lvecs = l
             k = min (len (sv), np.count_nonzero (idx))
             svals.append (sv[:k])
@@ -2610,7 +2724,7 @@ class LASCISymm (casci_symm.CASCI, LASCINoSymm):
         mo_lvecs = lib.tag_array (mo_lvecs, orbsym=lsymm)
         return mo_lvecs, svals, mo_rvecs, mo_occ1
 
-    def _svd1 (self, mo_lspace, mo_rspace, lsymm, rsymm, s=None, **kwargs):
+    def _svd1 (self, mo_lspace, mo_rspace, lsymm, rsymm, s=None, rng=None, **kwargs):
         if s is None: s = self._scf.get_ovlp ()
         decomp = matrix_svd_control_options (s,
             lspace=mo_lspace, rspace=mo_rspace,
@@ -2619,5 +2733,5 @@ class LASCISymm (casci_symm.CASCI, LASCINoSymm):
         mo_lvecs, svals, mo_rvecs, lsymm, rsymm = decomp
         mo_lvecs = lib.tag_array (mo_lvecs, orbsym=lsymm)
         mo_rvecs = lib.tag_array (mo_rvecs, orbsym=rsymm)
-        return mo_lvecs, svals, mo_rvecs
+        return _shift_svals (mo_lvecs, svals, mo_rvecs, rng)
      

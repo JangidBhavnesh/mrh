@@ -127,9 +127,14 @@ def kernel (las, mo_coeff=None, ci0=None, conv_tol_grad=1e-4,
     log.info ('LASSCF E = %.15g ; |g| = %.15g', e_tot,
               norm_gvec)
     t1 = log.timer ('LASSCF final energy', *t1)
-    mo_coeff, mo_energy, mo_occ, ci1, h2eff_sub = las.canonicalize (mo_coeff, ci1, veff=veff,
-                                                                    h2eff_sub=h2eff_sub)
-    t1 = log.timer ('LASSCF canonicalization', *t1)
+    if las.canonicalization:
+        mo_coeff, mo_energy, mo_occ, ci1, h2eff_sub = las.canonicalize (
+            mo_coeff, ci1, veff=veff, h2eff_sub=h2eff_sub)
+        t1 = log.timer ('LASSCF canonicalization', *t1)
+    else:
+        fock = mo_coeff.conjugate ().T @ las.get_fock (mo_coeff=mo_coeff, ci=ci1,
+                                                       veff=veff)
+        mo_energy = (fock * mo_coeff).sum (0)
     t0 = log.timer ('LASSCF kernel function', *t0)
 
     e_cas = None # TODO: get rid of this worthless, meaningless variable
@@ -247,6 +252,26 @@ class LASSCFNoSymm (lasci.LASCINoSymm):
                 If false, this step is skipped and mo_coeff is returned unaltered
             frags_by_AOs: logical
                 If True, interpret integer frags_atoms as AOs rather than atoms
+            mo_occ: ndarray of shape (nmo)
+                If passed, only orbitals with the same occupancies are mixed with
+                each other to localize them and freeze_cas_spaces is automatically
+                set to True.
+            freeze_cas_spaces: logical
+                If true, then active orbitals are mixed only among themselves
+                when localizing, which leaves the inactive and external sectors
+                unchanged (to within numerical precision). Otherwise, active
+                orbitals are projected into the localized-orbital space and
+                the inactive and external orbitals are reconstructed as closely
+                as possible using SVD.
+            smults_f: ndarray of ints of shape (nfrag,)
+                Used to constrain how many singly-occupied orbitals (per mo_occ)
+                are assigned to each fragment, if possible. If las is a single-state
+                calculation, its quantum numbers are used as default values.
+            nelec_f: ndarray of ints of shape (nfrag,)
+                Used to constrain how many doubly-occupied orbitals (per mo_occ)
+                are assigned to each fragment, if possible. If las is a single-state
+                calculation, its quantum numbers are used as default values.
+
     
         Returns:
             mo_coeff: ndarray of shape (nao,nmo)

@@ -48,6 +48,51 @@ def state_average_n_mix_(casscf, fcisolvers, weights=(0.5,0.5)):
 class H1EZipFCISolver (object):
     pass
 
+def get_aufbau_guess (solvers_r, norb, nelec_r, orbsym=None):
+    '''Get the spin-adapted CI vector that corresponds to spin-alpha and spin-beta
+    orbitals being separately filled in Aufbau order from the bottom up, under
+    constraints of point-group symmetry if applicable. In the determinant basis
+    and C1 point group this is just ci[0,0] = 1, but in the CSF basis electron
+    configurations are not necessarily in that order so we have to look up some
+    stuff.
+
+    Args:
+        solvers_r: list (length nfrag) of CSF FCI solvers
+        norb : integer
+        nelec_r : list (length nfrag) of integers
+            Numbers of electrons in each fragment
+
+    Kwargs:
+        orbsym: sequence (length norb)
+            Irreps of the orbitals
+
+    Returns:
+        ci: ndarray
+            CI vector
+    '''
+    ci = []
+    for solver, nelec in zip (solvers_r, nelec_r):
+        solver.norb, solver.nelec = norb, nelec
+        if orbsym is not None:
+            solver.orbsym = orbsym
+        solver.check_transformer_cache ()
+        t = solver.transformer
+        c = np.zeros ((t.ncsf,), dtype=float)
+        # TODO: either reverse the order of configurations in csf_fci, or else
+        # move this logic onto the CSFTransformer class
+        for i in range (t.ndeta*t.ndetb):
+            # Find the earliest configuration with correct symmetry
+            j = t.econf_det_mask[i]
+            if (t.wfnsym is None) or (t._orbsym is None) or (t.confsym[j]==t.wfnsym):
+                break
+        for ix in range (t.ncsf):
+            # Find the first CSF of that configuration
+            if t.econf_csf_mask[ix] == j:
+                break
+        c[ix] = 1.0
+        ci.append (t.vec_csf2det (c, normalize=True))
+    return ci
+
 def get_h1e_zipped_fcisolver (fcisolver):
     ''' Wrap a state-average-mix FCI solver to take a list of h1es to apply to each solver. '''
 
@@ -59,6 +104,11 @@ def get_h1e_zipped_fcisolver (fcisolver):
     has_spin_square = getattr(fcisolver, 'states_spin_square', None)
 
     class FCISolver (fcisolver.__class__, H1EZipFCISolver):
+
+        def get_aufbau_guess (self, norb, nelec0, orbsym=None):
+            solvers = self.fcisolvers
+            nelec_r = [self._get_nelec (solver, nelec0) for solver in solvers]
+            return get_aufbau_guess (solvers, norb, nelec_r, orbsym=orbsym)
 
         # This is a hack designed to, i.e., set
         # self.fcisolvers[i].nroots = 1 for all i
