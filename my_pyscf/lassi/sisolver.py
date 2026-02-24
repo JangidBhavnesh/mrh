@@ -184,6 +184,7 @@ def kernel_Davidson (sisolver, e0, h1, h2, norb_f, ci_fr, nelec_frs, smult_fr, d
     raw2orth = basis.get_orth_basis (ci_fr, norb_f, nelec_frs, _get_ovlp=_get_ovlp,
                                      smult_fr=smult_fr, smult_si=smult, disc_fr=disc_fr)
     raw2orth.log_debug1_hdiag_raw (log, hdiag_raw)
+    log.info ('%d/%d linearly independent model states', raw2orth.shape[0], raw2orth.shape[1])
     orth2raw = raw2orth.H
     mem_orth = raw2orth.get_nbytes () / 1e6
     t0 = log.timer ('LASSI get orthogonal basis ({:.2f} MB)'.format (mem_orth), *t0)
