@@ -44,7 +44,7 @@ nU = 1
 d = 2.47
 basis = '6-31G'
 pseudo = None
-maxMem = 120000
+maxMem = 100000
 
 cell = pgto.Cell(atom = get_xyz(nU, d),
                  a = np.diag([d*nU, 17.5, 17.5]),
@@ -81,10 +81,22 @@ from mrh.my_pyscf.pbc import mcscf
 kmc = mcscf.CASCI(kmf, 2, 2)
 kmc.kernel(mo_coeff)
 
-
 # Spin-summed and spin-separated 1-RDMs in the AO basis.
 dm1 = kmc.make_rdm1()
 print("dm1 shape", dm1.shape)
 
 dm1s = kmc.make_rdm1s()
 print("dm1s shape", dm1s[0].shape)
+
+# Example to use the DMRGCIComplex solver.
+# This is running but
+# 1. This is very slow.
+# 2. I need to test the total energy and the 1-RDMs to make sure they are correct.
+
+# from mrh.my_pyscf.pbc.fci import DMRGCIComplex
+# kmc_dmrg = mcscf.CASCI(kmf, 2, 2)
+# kmc_dmrg.fcisolver = DMRGCIComplex(kmf.cell)
+# kmc_dmrg.fcisolver.memory = int(maxMem/1000)
+# kmc_dmrg.fcisolver.threads = 36
+# kmc_dmrg.fcisolver.maxM = 100
+# kmc_dmrg.kernel(kmf.mo_coeff)
