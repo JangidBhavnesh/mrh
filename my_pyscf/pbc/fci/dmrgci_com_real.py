@@ -9,12 +9,10 @@
 
 
 # DMRG-CI with complex spatial integrals for c-CASCI and c-CASSCF calculations.
-
-import cmd
 import os
+import numpy as np     
 from pyscf import lib
 from pyscf.tools.fcidump import write_head, DEFAULT_FLOAT_FORMAT, TOL
-import numpy as np                    
 
 logger = lib.logger
 
@@ -64,7 +62,6 @@ def from_integrals(integralFile, h1e, h2e, ncas, nelec, nuc=0, ms=0, orbsym=None
         write_hcore(fout, h1e, ncas, tol=tol, float_format=float_format)
         output_format = f"{float_format}{float_format}  0  0  0  0\n"
         fout.write(output_format % (nuc.real, nuc.imag))
-
 
 def writeDMRGConfFile(DMRGCIobj, nelec, Restart,
                     maxIter=None, with_2pdm=True, extraline=[]):
@@ -172,7 +169,6 @@ def writeIntegralFile(DMRGCIobj, h1e, eri, ncas, nelec, ecore=0):
                                 orbsym=DMRGCIobj.orbsym)
     return integralFile
     
-
 class DMRGCIComplex(DMRGCI):
 
     def kernel(self, h1e, eri, norb, nelec, fciRestart=None, ecore=0, **kwargs):
