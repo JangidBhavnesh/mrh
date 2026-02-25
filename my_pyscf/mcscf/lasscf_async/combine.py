@@ -183,7 +183,7 @@ def select_aa_block (las, frags1, frags2, fock1, max_frags=None):
     gradient block with the largest norm
 
     Args:
-        las : object of :class:`LASCINoSymm`
+        las : object of :class:`LASPSCFNoSymm`
         frags1 : sequence of integers
         frags2 : sequence of integers
         fock1 : ndarray of shape (nmo,nmo)
@@ -271,7 +271,7 @@ def combine_o1_kappa_rigid (las, kf1, kf2, kf_ref):
     with respect to a third reference keyframe democratically
 
     Args:
-        las : object of :class:`LASCINoSymm`
+        las : object of :class:`LASPSCFNoSymm`
         kf1 : object of :class:`LASKeyframe`
         kf2 : object of :class:`LASKeyframe`
         kf_ref : object of :class:`LASKeyframe`

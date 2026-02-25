@@ -138,7 +138,7 @@ def get_rootspace_central_moment (las, space_weights, n=1):
     defined)
 
     Args:
-        las: instance of :class:`LASCINoSymm`
+        las: instance of :class:`LASPSCFNoSymm`
         space_weights: ndarray of shape (las.nroots,nvec)
             Rootspace coefficients from a LASSI wave function
             (see `decompose_sivec_by_rootspace`)
@@ -209,7 +209,7 @@ def analyze (las, si, ci=None, state=0, print_all_but=1e-8, lbasis='primitive', 
     and density matrix analyses of the lroots in each rootspace
 
     Args:
-        las: instance of :class:`LASCINoSymm`
+        las: instance of :class:`LASPSCFNoSymm`
         si: ndarray of shape (nstates,nstates)
 
     Kwargs:
@@ -482,7 +482,7 @@ def analyze_ham (las, si, e_roots, ci=None, state=0, soc=0, print_all_but=1e-8):
     elements
 
     Args:
-        las: instance of :class:`LASCINoSymm`
+        las: instance of :class:`LASPSCFNoSymm`
         si: ndarray of shape (nstates,nstates)
             SI vectors
         e_roots: sequence of length (nstates,)

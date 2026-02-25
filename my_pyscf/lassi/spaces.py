@@ -609,10 +609,10 @@ def all_single_excitations (las, verbose=None, filter_shuffles=False, mask=None)
     not altered in-place. For orbital optimization, all new states have weight = 0; all weights
     of existing states are unchanged.'''
     from mrh.my_pyscf.mcscf.lasci import get_space_info
-    from mrh.my_pyscf.mcscf.lasci import LASCISymm
+    from mrh.my_pyscf.mcscf.lasci import LASPSCFSymm
     if verbose is None: verbose=las.verbose
     log = logger.new_logger (las, verbose)
-    if isinstance (las, LASCISymm):
+    if isinstance (las, LASPSCFSymm):
         raise NotImplementedError ("Point-group symmetry for LASSI state generator")
     ref_states = [SingleLASRootspace (las, m, s, c, 0) for c,m,s,w in zip (*get_space_info (las))]
     for weight, state in zip (las.weights, ref_states): state.weight = weight
@@ -717,10 +717,10 @@ def spin_shuffle (las, verbose=None, equal_weights=False):
     should never be any reason to call this function more than once. For orbital optimization,
     all new states have weight == 0; all weights of existing states are unchanged.'''
     from mrh.my_pyscf.mcscf.lasci import get_space_info
-    from mrh.my_pyscf.mcscf.lasci import LASCISymm
+    from mrh.my_pyscf.mcscf.lasci import LASPSCFSymm
     if verbose is None: verbose=las.verbose
     log = logger.new_logger (las, verbose)
-    if isinstance (las, LASCISymm):
+    if isinstance (las, LASPSCFSymm):
         raise NotImplementedError ("Point-group symmetry for LASSI state generator")
     ref_states = [SingleLASRootspace (las, m, s, c, 0) for c,m,s,w in zip (*get_space_info (las))]
     for weight, state in zip (las.weights, ref_states): state.weight = weight
@@ -845,7 +845,7 @@ def filter_spaces (las, max_charges=None, min_charges=None, max_smults=None, min
     '''Remove rootspaces from a LASSCF method instance that do not satisfy supplied constraints
 
     Args:
-        las : instance of :class:`LASCINoSymm`
+        las : instance of :class:`LASPSCFNoSymm`
 
     Kwargs:
         max_charges: integer or ndarray of shape (nfrags,)
@@ -864,7 +864,7 @@ def filter_spaces (las, max_charges=None, min_charges=None, max_smults=None, min
             of the supplied integers are removed
 
     Returns:
-        las : instance of :class:`LASCINoSymm`
+        las : instance of :class:`LASPSCFNoSymm`
             A copy is created
     '''
     log = logger.new_logger (las, las.verbose)

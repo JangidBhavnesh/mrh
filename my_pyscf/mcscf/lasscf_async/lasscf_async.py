@@ -144,7 +144,7 @@ def get_grad (las, mo_coeff=None, ci=None, ugg=None, kf=None):
     '''Return energy gradient for orbital rotation and CI relaxation.
 
     Args:
-        las : instance of :class:`LASCINoSymm`
+        las : instance of :class:`LASPSCFNoSymm`
 
     Kwargs:
         mo_coeff : ndarray of shape (nao,nmo)
@@ -189,7 +189,7 @@ class SortedIndexDict (dict):
         else:
             return dict.get (self, key)
 
-class LASSCFNoSymm (lasci.LASCINoSymm):
+class LASSCFNoSymm (lasci.LASPSCFNoSymm):
     '''Extra attributes:
 
     frags_orbs : list of length nfrags of list of integers
@@ -206,7 +206,7 @@ class LASSCFNoSymm (lasci.LASCINoSymm):
         Maximum number of frags to simultaneously relax during the combine_pair step.
     '''
     def __init__(self, mf, ncas, nelecas, ncore=None, spin_sub=None, **kwargs):
-        lasci.LASCINoSymm.__init__(self, mf, ncas, nelecas, ncore=ncore, spin_sub=spin_sub,
+        lasci.LASPSCFNoSymm.__init__(self, mf, ncas, nelecas, ncore=ncore, spin_sub=spin_sub,
                                    **kwargs)
         self.impurity_params = {}
         for i in range (self.nfrags):
@@ -285,7 +285,7 @@ class LASSCFNoSymm (lasci.LASCINoSymm):
                                                  frags_by_AOs=True, **kwargs) 
         return mo_coeff
     def dump_flags (self, verbose=None, _method_name='LASSCF'):
-        lasci.LASCINoSymm.dump_flags (self, verbose=verbose, _method_name=_method_name)
+        lasci.LASPSCFNoSymm.dump_flags (self, verbose=verbose, _method_name=_method_name)
     def _finalize(self):
         log = lib.logger.new_logger (self, self.verbose)
         nroots_prt = len (self.e_states)
@@ -302,9 +302,9 @@ class LASSCFNoSymm (lasci.LASCINoSymm):
             log.info ("LASSCF energy = %.15g", self.e_tot)
         return
 
-class LASSCFSymm (lasci.LASCISymm):
+class LASSCFSymm (lasci.LASPSCFSymm):
     def __init__(self, mf, ncas, nelecas, ncore=None, spin_sub=None, **kwargs):
-        lasci.LASCISymm.__init__(self, mf, ncas, nelecas, ncore=ncore, spin_sub=spin_sub, **kwargs)
+        lasci.LASPSCFSymm.__init__(self, mf, ncas, nelecas, ncore=ncore, spin_sub=spin_sub, **kwargs)
         self.impurity_params = [{} for i in range (self.nfrags)]
         self.relax_params = {}
         keys = set (('frags_orbs','impurity_params','relax_params'))

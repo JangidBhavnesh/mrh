@@ -996,7 +996,7 @@ class ImpurityLASCI_HessianOperator (lasci_sync.LASCI_HessianOperator):
             kappa2 += w * (fock1 - fock1.T)
         return kappa2
 
-class ImpurityLASCI (lasci.LASCINoSymm, ImpuritySolver):
+class ImpurityLASCI (lasci.LASPSCFNoSymm, ImpuritySolver):
     _hop = ImpurityLASCI_HessianOperator
 
     def _update_impurity_hamiltonian_(self, mo_coeff, ci, h2eff_sub=None, e_states=None, veff=None,
@@ -1024,7 +1024,7 @@ class ImpurityLASCI (lasci.LASCINoSymm, ImpuritySolver):
         )
 
     def get_grad_orb (self, **kwargs):
-        gorb = lasci.LASCINoSymm.get_grad_orb (self, **kwargs)
+        gorb = lasci.LASPSCFNoSymm.get_grad_orb (self, **kwargs)
         mo_coeff = kwargs.get ('mo_coeff', self.mo_coeff)
         ci = kwargs.get ('ci', self.ci)
         hermi = kwargs.get ('hermi', -1)
@@ -1048,7 +1048,7 @@ class ImpurityLASCI (lasci.LASCINoSymm, ImpuritySolver):
             raise ValueError ("kwarg 'hermi' must = -1, 0, or +1")
 
     def h1e_for_las (self, mo_coeff=None, **kwargs):
-        h1e_fr = lasci.LASCINoSymm.h1e_for_las (self, mo_coeff=mo_coeff, **kwargs)
+        h1e_fr = lasci.LASPSCFNoSymm.h1e_for_las (self, mo_coeff=mo_coeff, **kwargs)
         ncas_sub = kwargs.get ('ncas_sub', self.ncas_sub)
         dh1_rs = np.dot (self.get_hcore_rs () - self.get_hcore ()[None,None,:,:], mo_coeff)
         dh1_rs = np.tensordot (mo_coeff.conj (), dh1_rs, axes=((0),(2))).transpose (1,2,0,3)
@@ -1060,7 +1060,7 @@ class ImpurityLASCI (lasci.LASCINoSymm, ImpuritySolver):
     get_h1eff = get_h1las = h1e_for_las = h1e_for_las
 
     def states_energy_elec (self, **kwargs):
-        energy_elec = lasci.LASCINoSymm.states_energy_elec (self, **kwargs)
+        energy_elec = lasci.LASPSCFNoSymm.states_energy_elec (self, **kwargs)
         mo_coeff = kwargs.get ('mo_coeff', self.mo_coeff)
         ci = kwargs.get ('ci', self.ci)
         ncore = kwargs.get ('ncore', self.ncore)

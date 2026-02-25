@@ -36,7 +36,7 @@ def ham_2q (las, mo_coeff, veff_c=None, h2eff_sub=None, soc=0):
     a LASSCF calculation.
 
     Args:
-        las : instance of :class:`LASCINoSymm`
+        las : instance of :class:`LASPSCFNoSymm`
         mo_coeff: ndarray of shape (nao,nmo)
             Contains MO coefficients
 
@@ -114,7 +114,7 @@ def las_symm_tuple (las, spaces=None, break_spin=False, break_symmetry=False, ve
     diagonal symmetry blocks.
 
     Args:
-        las : instance of :class:`LASCINoSymm`
+        las : instance of :class:`LASPSCFNoSymm`
 
     Kwargs:
         spaces : list of instances of :class:`SingleLASRootspace`
@@ -772,8 +772,8 @@ class LASSI(lib.StreamObject):
     '''
     def __init__(self, las, mo_coeff=None, ci=None, soc=False, break_symmetry=False, opt=1,
                  davidson_only=False, nroots_si=None, **kwargs):
-        from mrh.my_pyscf.mcscf.lasci import LASCINoSymm
-        if isinstance(las, LASCINoSymm): self._las = las
+        from mrh.my_pyscf.mcscf.lasci import LASPSCFNoSymm
+        if isinstance(las, LASPSCFNoSymm): self._las = las
         else: raise RuntimeError("LASSI requires las instance")
         if mo_coeff is None: mo_coeff = las.mo_coeff
         if ci is None: ci = las.ci

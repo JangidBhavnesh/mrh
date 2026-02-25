@@ -596,7 +596,7 @@ class LASSIS (LASSI):
                  crash_locmin=False, opt=1, **kwargs):
         '''
         Key attributes:
-            _las : instance of class `LASCINoSymm`
+            _las : instance of class `LASPSCFNoSymm`
                 The encapsulated LASSCF wave function. The CI vectors of the reference state are,
                 i.e., _las.get_single_state_las (state=0).ci.
             ci_spin_flips : doubly nested list of ndarrays

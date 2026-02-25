@@ -491,7 +491,7 @@ class LASCI_UnitaryGroupGenerators (object):
     def nvar_tot (self):
         return self.nvar_orb + self.ncsf_sub.sum ()
 
-class LASCISymm_UnitaryGroupGenerators (LASCI_UnitaryGroupGenerators):
+class LASPSCFSymm_UnitaryGroupGenerators (LASCI_UnitaryGroupGenerators):
     __doc__ = LASCI_UnitaryGroupGenerators.__doc__ + '''
 
     Symmetry subclass forbids rotations between orbitals of different point groups or CSFs of
@@ -557,7 +557,7 @@ class LASCI_HessianOperator (sparse_linalg.LinearOperator):
     e = self.e_tot + np.dot (self.get_grad (), x) + (.5 * np.dot (self._matvec (x), x))
 
     Args:
-        las : instance of :class:`LASCINoSymm`
+        las : instance of :class:`LASPSCFNoSymm`
         ugg : instance of :class:`LASCI_UnitaryGroupGenerators`
 
     Kwargs:

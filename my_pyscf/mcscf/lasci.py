@@ -24,9 +24,9 @@ def LASCI (mf_or_mol, ncas_sub, nelecas_sub, **kwargs):
     else:
         mf = mf_or_mol
     if mf.mol.symmetry: 
-        las = LASCISymm (mf, ncas_sub, nelecas_sub, **kwargs)
+        las = LASPSCFSymm (mf, ncas_sub, nelecas_sub, **kwargs)
     else:
-        las = LASCINoSymm (mf, ncas_sub, nelecas_sub, **kwargs)
+        las = LASPSCFNoSymm (mf, ncas_sub, nelecas_sub, **kwargs)
     if getattr (mf, 'with_df', None):
         las = density_fit (las, with_df = mf.with_df) 
     return las
@@ -36,7 +36,7 @@ def get_grad (las, mo_coeff=None, ci=None, ugg=None, h1eff_sub=None, h2eff_sub=N
     '''Return energy gradient for orbital rotation and CI relaxation.
 
     Args:
-        las : instance of :class:`LASCINoSymm`
+        las : instance of :class:`LASPSCFNoSymm`
 
     Kwargs:
         mo_coeff : ndarray of shape (nao,nmo)
@@ -95,7 +95,7 @@ def get_grad_orb (las, mo_coeff=None, ci=None, h2eff_sub=None, veff=None, dm1s=N
     '''Return energy gradient for orbital rotation.
 
     Args:
-        las : instance of :class:`LASCINoSymm`
+        las : instance of :class:`LASPSCFNoSymm`
 
     Kwargs:
         mo_coeff : ndarray of shape (nao,nmo)
@@ -161,7 +161,7 @@ def get_grad_ci (las, mo_coeff=None, ci=None, h1eff_sub=None, h2eff_sub=None, ve
     '''Return energy gradient for CI relaxation.
 
     Args:
-        las : instance of :class:`LASCINoSymm`
+        las : instance of :class:`LASPSCFNoSymm`
 
     Kwargs:
         mo_coeff : ndarray of shape (nao,nmo)
@@ -200,7 +200,7 @@ def get_grad_ci (las, mo_coeff=None, ci=None, h1eff_sub=None, h2eff_sub=None, ve
 
 def density_fit (las, auxbasis=None, with_df=None):
     ''' Here I ONLY need to attach the tag and the df object because I put conditionals in
-        LASCINoSymm to make my life easier '''
+        LASPSCFNoSymm to make my life easier '''
     las_class = las.__class__
     if with_df is None:
         if (getattr(las._scf, 'with_df', None) and
@@ -342,7 +342,7 @@ def _eig_inactive_virtual (las, fock, orbsym=None):
     '''Generate the unitary matrix canonicalizing the inactive and virtual orbitals only.
 
     Args:
-        las : object of :class:`LASCINoSymm`
+        las : object of :class:`LASPSCFNoSymm`
         fock : ndarray of shape (nmo,nmo)
             Contains Fock matrix in MO basis
 
@@ -900,7 +900,7 @@ def run_lasci (las, mo_coeff=None, ci0=None, lroots=None, lweights=None, verbose
     nelecas_sub = las.nelecas_sub
     orbsym = getattr (mo_coeff, 'orbsym', None)
     if orbsym is not None: orbsym=orbsym[ncore:nocc]
-    elif isinstance (las, LASCISymm):
+    elif isinstance (las, LASPSCFSymm):
         mo_coeff = las.label_symmetry_(mo_coeff)
         orbsym = mo_coeff.orbsym[ncore:nocc]
     log = lib.logger.new_logger (las, verbose)
@@ -1006,7 +1006,7 @@ def _shift_svals (l, sv, r, rng):
         r[:,:k] = r[:,:k][:,idx]
     return l, sv, r
 
-class LASCINoSymm (casci.CASCI):
+class LASPSCFNoSymm (casci.CASCI):
 
     get_space_info = get_space_info
     get_smults_fr = get_smults_fr
@@ -2593,11 +2593,11 @@ class LASCINoSymm (casci.CASCI):
     dump_chk = chkfile.dump_las
     load_chk = load_chk_ = chkfile.load_las_
 
-class LASCISymm (casci_symm.CASCI, LASCINoSymm):
+class LASPSCFSymm (casci_symm.CASCI, LASPSCFNoSymm):
 
     def __init__(self, mf, ncas, nelecas, ncore=None, spin_sub=None, wfnsym_sub=None, frozen=None,
                  **kwargs):
-        LASCINoSymm.__init__(self, mf, ncas, nelecas, ncore=ncore, spin_sub=spin_sub,
+        LASPSCFNoSymm.__init__(self, mf, ncas, nelecas, ncore=ncore, spin_sub=spin_sub,
                              frozen=frozen, **kwargs)
         if getattr (self.mol, 'groupname', None) in ('Dooh', 'Coov'):
             raise NotImplementedError ("LASSCF support for cylindrical point group {}".format (
@@ -2609,14 +2609,14 @@ class LASCISymm (casci_symm.CASCI, LASCINoSymm):
                 wfnsym = symm.irrep_name2id (self.mol.groupname, wfnsym)
             frag.fcisolvers[0].wfnsym = wfnsym
 
-    make_rdm1s = LASCINoSymm.make_rdm1s
-    make_rdm1 = LASCINoSymm.make_rdm1
-    get_veff = LASCINoSymm.get_veff
+    make_rdm1s = LASPSCFNoSymm.make_rdm1s
+    make_rdm1 = LASPSCFNoSymm.make_rdm1
+    get_veff = LASPSCFNoSymm.get_veff
     get_h1eff = get_h1las = h1e_for_las
-    dump_flags = LASCINoSymm.dump_flags
-    dump_spaces = LASCINoSymm.dump_spaces
-    check_sanity = LASCINoSymm.check_sanity
-    _ugg = lasci_sync.LASCISymm_UnitaryGroupGenerators
+    dump_flags = LASPSCFNoSymm.dump_flags
+    dump_spaces = LASPSCFNoSymm.dump_spaces
+    check_sanity = LASPSCFNoSymm.check_sanity
+    _ugg = lasci_sync.LASPSCFSymm_UnitaryGroupGenerators
 
     @property
     def wfnsym (self):
@@ -2643,7 +2643,7 @@ class LASCISymm (casci_symm.CASCI, LASCINoSymm):
                                 "symmetry of the whole molecule but not of the individual "
                                 "subspaces"))
         mo_coeff = self.mo_coeff = self.label_symmetry_(mo_coeff)
-        return LASCINoSymm.kernel(self, mo_coeff=mo_coeff, ci0=ci0,
+        return LASPSCFNoSymm.kernel(self, mo_coeff=mo_coeff, ci0=ci0,
             casdm0_fr=casdm0_fr, verbose=verbose, assert_no_dupes=assert_no_dupes)
 
     def canonicalize (self, mo_coeff=None, ci=None, casdm1fs=None, natorb_casdm1=None, veff=None,
@@ -2671,13 +2671,13 @@ class LASCISymm (casci_symm.CASCI, LASCINoSymm):
         mo_coeff = lib.tag_array (mo_coeff, orbsym=orbsym)
         return mo_coeff
         
-    @lib.with_doc(LASCINoSymm.localize_init_guess.__doc__)
+    @lib.with_doc(LASPSCFNoSymm.localize_init_guess.__doc__)
     def localize_init_guess (self, frags_atoms, mo_coeff=None, spin=None, lo_coeff=None, fock=None,
                              mo_occ=None, freeze_cas_spaces=False, smults_f=None, nelec_f=None):
         if mo_coeff is None:
             mo_coeff = self.mo_coeff
         mo_coeff = casci_symm.label_symmetry_(self, mo_coeff)
-        return LASCINoSymm.localize_init_guess (self, frags_atoms, mo_coeff=mo_coeff, spin=spin,
+        return LASPSCFNoSymm.localize_init_guess (self, frags_atoms, mo_coeff=mo_coeff, spin=spin,
             lo_coeff=lo_coeff, fock=fock, mo_occ=mo_occ, freeze_cas_spaces=freeze_cas_spaces,
             smults_f=smults_f, nelec_f=nelec_f)
 

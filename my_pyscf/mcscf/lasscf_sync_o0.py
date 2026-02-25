@@ -25,8 +25,8 @@ class LASSCF_UnitaryGroupGenerators (lasci_sync.LASCI_UnitaryGroupGenerators):
         # artifact of backwards-compatibility with the old LASSCF implementation
 
 class LASSCFSymm_UnitaryGroupGenerators (LASSCF_UnitaryGroupGenerators):
-    __init__ = lasci_sync.LASCISymm_UnitaryGroupGenerators.__init__
-    _init_ci = lasci_sync.LASCISymm_UnitaryGroupGenerators._init_ci
+    __init__ = lasci_sync.LASPSCFSymm_UnitaryGroupGenerators.__init__
+    _init_ci = lasci_sync.LASPSCFSymm_UnitaryGroupGenerators._init_ci
     def _init_orb (self, las, mo_coeff, ci, orbsym):
         LASSCF_UnitaryGroupGenerators._init_orb (self, las, mo_coeff, ci)
         self.symm_forbid = (orbsym[:,None] ^ orbsym[None,:]).astype (np.bool_)
@@ -143,7 +143,7 @@ class LASSCF_HessianOperator (lasci_sync.LASCI_HessianOperator):
     def _update_h2eff_sub (self, mo1, umat, h2eff_sub):
         return self.las.ao2mo (mo1)
 
-class LASSCFNoSymm (lasci.LASCINoSymm):
+class LASSCFNoSymm (lasci.LASPSCFNoSymm):
     _ugg = LASSCF_UnitaryGroupGenerators
     _hop = LASSCF_HessianOperator
     as_scanner = mc1step.as_scanner
@@ -168,7 +168,7 @@ class LASSCFNoSymm (lasci.LASCINoSymm):
         veff = np.stack ([veff_a, veff_b], axis=0)
         return veff
     def dump_flags (self, verbose=None, _method_name='LASSCF'):
-        lasci.LASCINoSymm.dump_flags (self, verbose=verbose, _method_name=_method_name)
+        lasci.LASPSCFNoSymm.dump_flags (self, verbose=verbose, _method_name=_method_name)
     #SV
     def nuc_grad_method(self):
         from mrh.my_pyscf.grad import lasscf
@@ -177,7 +177,7 @@ class LASSCFNoSymm (lasci.LASCINoSymm):
     #SV
     Gradients = nuc_grad_method
     
-class LASSCFSymm (lasci.LASCISymm):
+class LASSCFSymm (lasci.LASPSCFSymm):
     _ugg = LASSCFSymm_UnitaryGroupGenerators    
     _hop = LASSCF_HessianOperator
     split_veff = LASSCFNoSymm.split_veff

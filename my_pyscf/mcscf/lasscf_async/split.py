@@ -13,7 +13,7 @@ class LASImpurityOrbitalCallable (object):
     AO basis of a specified collection of atoms.
 
     Constructor args:
-        las : object of :class:`LASCINoSymm`
+        las : object of :class:`LASPSCFNoSymm`
             Mined for basic configuration info about the problem: `mole` object, _scf, ncore,
             ncas_sub, with_df, mo_coeff. The last is copied at construction and should be any
             othornormal basis (las.mo_coeff.conj ().T @ mol.get_ovlp () @ las.mo_coeff = a unit
@@ -403,7 +403,7 @@ def get_impurity_space_constructor (las, frag_id, frag_atoms=None, frag_orbs=Non
     AO basis of a specified collection of atoms.
 
     Args:
-        las : object of :class:`LASCINoSymm`
+        las : object of :class:`LASPSCFNoSymm`
             Mined for basic configuration info about the problem: `mole` object, _scf, ncore,
             ncas_sub, with_df, mo_coeff. The last is copied at construction and should be any
             othornormal basis (las.mo_coeff.conj ().T @ mol.get_ovlp () @ las.mo_coeff = a unit
