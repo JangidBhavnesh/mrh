@@ -151,7 +151,7 @@ def get_grad (las, mo_coeff=None, ci=None, ugg=None, kf=None):
             Contains molecular orbitals
         ci : list (length=nfrags) of list (length=nroots) of ndarray
             Contains CI vectors
-        ugg : instance of :class:`LASCI_UnitaryGroupGenerators`
+        ugg : instance of :class:`LASPSCF_UnitaryGroupGenerators`
         kf : instance of :class:`LASKeyframe`
             Overrides mo_coeff and ci if provided and carries other intermediate
             quantities that may have been calculated in advance
@@ -199,9 +199,9 @@ class LASSCFNoSymm (laspscf.LASPSCFNoSymm):
         Use this to address, e.g., conv_tol_grad, max_cycle_macro, etc. of the impurity
         subproblems
     relax_params : dict
-        Key/value pairs are assigned as attributes to the active-active relaxation (``LASCI'')
+        Key/value pairs are assigned as attributes to the active-active relaxation (``LASPSCF'')
         subproblem, similar to impurity_params. Use this to, e.g., set a different max_cycle_macro
-        for the ``LASCI'' step.
+        for the ``LASPSCF'' step.
     combine_pair_max_frags : integer
         Maximum number of frags to simultaneously relax during the combine_pair step.
     '''

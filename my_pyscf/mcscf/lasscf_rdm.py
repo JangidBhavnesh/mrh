@@ -5,7 +5,7 @@
 import time
 import numpy as np
 from scipy import linalg, sparse
-from mrh.my_pyscf.mcscf import lasscf_sync_o0, laspscf, laspscf_sync, _DFLASCI, addons
+from mrh.my_pyscf.mcscf import lasscf_sync_o0, laspscf, laspscf_sync, _DFLASPSCF, addons
 from mrh.my_pyscf.mcscf.laspscf_sync import MicroIterInstabilityException
 from mrh.my_pyscf.fci import csf_solver
 from pyscf import lib, gto, ao2mo
@@ -190,11 +190,11 @@ def kernel (las, mo_coeff=None, casdm1frs=None, casdm2fr=None, conv_tol_grad=1e-
 
         casdm1fs_new = las.make_casdm1s_sub (casdm1frs=casdm1frs)
         veff = veff.sum (0)/2
-        if not isinstance (las, _DFLASCI) or las.verbose > lib.logger.DEBUG:
+        if not isinstance (las, _DFLASPSCF) or las.verbose > lib.logger.DEBUG:
             dm1 = las.make_rdm1 (mo_coeff=mo_coeff, casdm1s_sub=casdm1fs_new)
             veff_new = las.get_veff (dm=dm1)
-            if not isinstance (las, _DFLASCI): veff = veff_new
-        if isinstance (las, _DFLASCI):
+            if not isinstance (las, _DFLASPSCF): veff = veff_new
+        if isinstance (las, _DFLASPSCF):
             ddm = [dm_new - dm_old for dm_new, dm_old in zip (casdm1fs_new, casdm1fs)]
             veff += las.fast_veffa (ddm, h2eff_sub, mo_coeff=mo_coeff)
             if las.verbose > lib.logger.DEBUG:

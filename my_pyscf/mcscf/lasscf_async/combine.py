@@ -4,7 +4,7 @@ from scipy import linalg
 from pyscf import lib
 from pyscf.lo import orth
 from pyscf.scf.rohf import get_roothaan_fock
-from mrh.my_pyscf.mcscf import laspscf, _DFLASCI
+from mrh.my_pyscf.mcscf import laspscf, _DFLASPSCF
 from mrh.my_pyscf.mcscf.lasscf_async import keyframe, crunch
 
 # TODO: symmetry
@@ -136,7 +136,7 @@ def relax (las, kf, freeze_inactive=False, unfrozen_frags=None):
         else:
             flas_stdout = las.stdout
     with flas_stdout_env (las, flas_stdout):
-        flas = laspscf.LASCI (las._scf, las.ncas_sub, las.nelecas_sub)
+        flas = laspscf.LASPSCF (las._scf, las.ncas_sub, las.nelecas_sub)
         flas.__dict__.update (las.__dict__)
         flas.frozen = []
         flas.frozen_ci = frozen_frags

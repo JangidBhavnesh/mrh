@@ -22,7 +22,7 @@ from pyscf.tools import molden
 from c2h4n4_struct import structure as struct
 from mrh.my_dmet import localintegrals, dmet, fragments
 from mrh.my_dmet.fragments import make_fragment_atom_list, make_fragment_orb_list
-from mrh.my_pyscf.mcscf.laspscf_sync import LASCI_HessianOperator, LASCI_UnitaryGroupGenerators
+from mrh.my_pyscf.mcscf.laspscf_sync import LASPSCF_HessianOperator, LASPSCF_UnitaryGroupGenerators
 topdir = os.path.abspath (os.path.join (__file__, '..'))
 
 def build (mf, m1=0, m2=0, ir1=0, ir2=0, CASlist=None, active_first=False, calcname='c2h4n4', **kwargs):
@@ -92,8 +92,8 @@ def setUpModule():
     dmet.las.mo_coeff = np.loadtxt (os.path.join (topdir, 'test_lasci_mo.dat'))
     dmet.las.ci[0] = [np.loadtxt (os.path.join (topdir, 'test_lasci_ci0.dat'))]
     dmet.las.ci[1] = [-np.loadtxt (os.path.join (topdir, 'test_lasci_ci1.dat')).T]
-    ugg = LASCI_UnitaryGroupGenerators (dmet.las, dmet.las.mo_coeff, dmet.las.ci)
-    h_op = LASCI_HessianOperator (dmet.las, ugg)
+    ugg = LASPSCF_UnitaryGroupGenerators (dmet.las, dmet.las.mo_coeff, dmet.las.ci)
+    h_op = LASPSCF_HessianOperator (dmet.las, ugg)
     np.random.seed (0)
     x = np.random.rand (ugg.nvar_tot)
 
@@ -156,6 +156,6 @@ class KnownValues(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    print("Full Tests for LASCI module functions")
+    print("Full Tests for LASPSCF module functions")
     unittest.main()
 

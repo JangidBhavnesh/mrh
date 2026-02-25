@@ -5,7 +5,7 @@ from pyscf import gto, scf, mcscf, ao2mo, lib, df
 from pyscf.lib import logger
 from pyscf.fci.direct_spin1 import _unpack_nelec
 from pyscf.mcscf.addons import _state_average_mcscf_solver
-from mrh.my_pyscf.mcscf import _DFLASCI, laspscf_sync, laspscf
+from mrh.my_pyscf.mcscf import _DFLASPSCF, laspscf_sync, laspscf
 import copy, json
 
 class ImpurityMole (gto.Mole):
@@ -929,15 +929,15 @@ class ImpurityCASSCF (mcscf.mc1step.CASSCF, ImpuritySolver):
 
         return g_orb, my_gorb_update, my_h_op, h_diag
 
-class ImpurityLASCI_HessianOperator (laspscf_sync.LASCI_HessianOperator):
+class ImpurityLASPSCF_HessianOperator (laspscf_sync.LASPSCF_HessianOperator):
     def _init_dms_(self, casdm1frs, casdm2fr):
-        laspscf_sync.LASCI_HessianOperator._init_dms_(self, casdm1frs, casdm2fr)
+        laspscf_sync.LASPSCF_HessianOperator._init_dms_(self, casdm1frs, casdm2fr)
         ncore, nocc, nroots = self.ncore, self.nocc, self.nroots
         self.dm1rs = np.stack ([self.dm1s,]*nroots, axis=0)
         self.dm1rs[:,:,ncore:nocc,ncore:nocc] = self.casdm1rs
 
     def _init_ham_(self, h2eff_sub, veff):
-        laspscf_sync.LASCI_HessianOperator._init_ham_(self, h2eff_sub, veff)
+        laspscf_sync.LASPSCF_HessianOperator._init_ham_(self, h2eff_sub, veff)
         las, mo_coeff, ncore, nocc = self.las, self.mo_coeff, self.ncore, self.nocc
         h1rs = np.dot (las.get_hcore_rs (), mo_coeff)
         h1rs = np.tensordot (mo_coeff.conj (), h1rs, axes=((0),(2))).transpose (1,2,0,3)
@@ -957,7 +957,7 @@ class ImpurityLASCI_HessianOperator (laspscf_sync.LASCI_HessianOperator):
 
     def _init_orb_(self):
         ncore, nocc = self.ncore, self.nocc
-        laspscf_sync.LASCI_HessianOperator._init_orb_(self)
+        laspscf_sync.LASPSCF_HessianOperator._init_orb_(self)
         for w, h1s, casdm1s in zip (self.weights, self.h1rs, self.casdm1rs):
             dh1s = h1s[:,ncore:nocc,ncore:nocc] - self.h1s[:,ncore:nocc,ncore:nocc]
             self.fock1[:,ncore:nocc] += w * (dh1s[0] @ casdm1s[0] + dh1s[1] @ casdm1s[1])
@@ -967,7 +967,7 @@ class ImpurityLASCI_HessianOperator (laspscf_sync.LASCI_HessianOperator):
         Hdiag = 0
         for w, h, d in zip (self.weights, self.h1rs, self.dm1rs):
             with lib.temporary_env (self, h1s=h, dm1s=d):
-                Hdiag += w * laspscf_sync.LASCI_HessianOperator._get_Horb_diag (self)
+                Hdiag += w * laspscf_sync.LASPSCF_HessianOperator._get_Horb_diag (self)
         return Hdiag
 
     def ci_response_offdiag (self, kappa1, h1frs_prime):
@@ -980,11 +980,11 @@ class ImpurityLASCI_HessianOperator (laspscf_sync.LASCI_HessianOperator):
             j = sum (ncas_sub[:i])
             k = j + ncas_sub[i]
             h1rs[:,:,:,:] += dh1_core[:,:,j:k,j:k]
-        return laspscf_sync.LASCI_HessianOperator.ci_response_offdiag (
+        return laspscf_sync.LASPSCF_HessianOperator.ci_response_offdiag (
             self, kappa1, h1frs_prime)
 
     def orbital_response (self, kappa1, odm1s, ocm2, tdm1rs, tcm2, veff_prime):
-        kappa2 = laspscf_sync.LASCI_HessianOperator.orbital_response (
+        kappa2 = laspscf_sync.LASPSCF_HessianOperator.orbital_response (
             self, kappa1, odm1s, ocm2, tdm1rs, tcm2, veff_prime
         )
         h1rs = self.h1rs - self.h1s[None,:,:,:]
@@ -996,8 +996,8 @@ class ImpurityLASCI_HessianOperator (laspscf_sync.LASCI_HessianOperator):
             kappa2 += w * (fock1 - fock1.T)
         return kappa2
 
-class ImpurityLASCI (laspscf.LASPSCFNoSymm, ImpuritySolver):
-    _hop = ImpurityLASCI_HessianOperator
+class ImpurityLASPSCF (laspscf.LASPSCFNoSymm, ImpuritySolver):
+    _hop = ImpurityLASPSCF_HessianOperator
 
     def _update_impurity_hamiltonian_(self, mo_coeff, ci, h2eff_sub=None, e_states=None, veff=None,
                                       dm1s=None, casdm1rs=None, casdm2rs=None, weights=None):
@@ -1094,10 +1094,10 @@ def get_impurity_casscf (las, ifrag, imporb_builder=None):
     if not ((output is None) or (output=='/dev/null')): output += '.{}'.format (ifrag)
     imol = ImpurityMole (las, output=output)
     imf = ImpurityHF (imol)
-    if isinstance (las, _DFLASCI):
+    if isinstance (las, _DFLASPSCF):
         imf = imf.density_fit ()
     imc = ImpurityCASSCF (imf, las.ncas_sub[ifrag], las.nelecas_sub[ifrag])
-    if isinstance (las, _DFLASCI):
+    if isinstance (las, _DFLASPSCF):
         imc = df.density_fit (imc)
     imc = _state_average_mcscf_solver (imc, las.fciboxes[ifrag])
     imc._ifrags = [ifrag,]
@@ -1121,12 +1121,12 @@ def get_pair_laspscf (las, frags, inherit_df=False):
     if stdout is None and output is not None and stdout_dict is not None:
         stdout_dict[frags] = imol.stdout
     imf = ImpurityHF (imol)
-    if inherit_df and isinstance (las, _DFLASCI):
+    if inherit_df and isinstance (las, _DFLASPSCF):
         imf = imf.density_fit ()
     ncas_sub = [las.ncas_sub[i] for i in frags]
     nelecas_sub = [las.nelecas_sub[i] for i in frags]
-    ilas = ImpurityLASCI (imf, ncas_sub, nelecas_sub, use_gpu=las.use_gpu)
-    if inherit_df and isinstance (las, _DFLASCI):
+    ilas = ImpurityLASPSCF (imf, ncas_sub, nelecas_sub, use_gpu=las.use_gpu)
+    if inherit_df and isinstance (las, _DFLASPSCF):
         ilas = laspscf.density_fit (ilas, with_df=imf.with_df)
     charges, spins, smults, wfnsyms = laspscf.get_space_info (las)
     ilas.state_average_(weights=las.weights, charges=charges[:,frags], spins=spins[:,frags],

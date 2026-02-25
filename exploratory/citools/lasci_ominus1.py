@@ -56,7 +56,7 @@ def kernel (fci, h1, h2, norb, nelec, norb_f=None, ci0_f=None,
     psi_options = {'gtol':     gtol,
                    'maxiter':  max_cycle,
                    'disp':     verbose>lib.logger.DEBUG}
-    log.info ('LASCI object has %d degrees of freedom', psi.nvar)
+    log.info ('LASPSCF object has %d degrees of freedom', psi.nvar)
     h = [ecore, h1, h2]
     psi_callback = psi.get_solver_callback (h)
     res = optimize.minimize (psi.e_de, psi.x, args=(h,), method='BFGS',
