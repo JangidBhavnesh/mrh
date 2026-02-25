@@ -608,8 +608,8 @@ def all_single_excitations (las, verbose=None, filter_shuffles=False, mask=None)
     this function a second time generates two-electron excitations, etc. The input object is
     not altered in-place. For orbital optimization, all new states have weight = 0; all weights
     of existing states are unchanged.'''
-    from mrh.my_pyscf.mcscf.lasci import get_space_info
-    from mrh.my_pyscf.mcscf.lasci import LASPSCFSymm
+    from mrh.my_pyscf.mcscf.laspscf import get_space_info
+    from mrh.my_pyscf.mcscf.laspscf import LASPSCFSymm
     if verbose is None: verbose=las.verbose
     log = logger.new_logger (las, verbose)
     if isinstance (las, LASPSCFSymm):
@@ -716,8 +716,8 @@ def spin_shuffle (las, verbose=None, equal_weights=False):
     degeneracy between states of different S**2. Unlike all_single_excitations, there
     should never be any reason to call this function more than once. For orbital optimization,
     all new states have weight == 0; all weights of existing states are unchanged.'''
-    from mrh.my_pyscf.mcscf.lasci import get_space_info
-    from mrh.my_pyscf.mcscf.lasci import LASPSCFSymm
+    from mrh.my_pyscf.mcscf.laspscf import get_space_info
+    from mrh.my_pyscf.mcscf.laspscf import LASPSCFSymm
     if verbose is None: verbose=las.verbose
     log = logger.new_logger (las, verbose)
     if isinstance (las, LASPSCFSymm):
@@ -774,7 +774,7 @@ def spin_shuffle_ci (las, ci):
     more than one reference state for an unallocated rootspace is identified, the
     rotated vectors are combined and orthogonalized. Unlike running las.lasci (),
     doing this should ALWAYS guarantee good spin quantum number.'''
-    from mrh.my_pyscf.mcscf.lasci import get_space_info
+    from mrh.my_pyscf.mcscf.laspscf import get_space_info
     spaces = [SingleLASRootspace (las, m, s, c, 0, ci=[c[ix] for c in ci])
               for ix, (c, m, s, w) in enumerate (zip (*get_space_info (las)))]
     spaces = _spin_shuffle_ci_(spaces)
@@ -868,7 +868,7 @@ def filter_spaces (las, max_charges=None, min_charges=None, max_smults=None, min
             A copy is created
     '''
     log = logger.new_logger (las, las.verbose)
-    from mrh.my_pyscf.mcscf.lasci import get_space_info
+    from mrh.my_pyscf.mcscf.laspscf import get_space_info
     charges, spins, smults, wfnsyms = get_space_info (las)
     idx = np.ones (las.nroots, dtype=bool)
     if target_any_smult is not None:
@@ -895,7 +895,7 @@ def filter_spaces (las, max_charges=None, min_charges=None, max_smults=None, min
                               smults=smults[idx], wfnsyms=wfnsyms[idx])
 
 def list_spaces (las):
-    from mrh.my_pyscf.mcscf.lasci import get_space_info
+    from mrh.my_pyscf.mcscf.laspscf import get_space_info
     spaces = [SingleLASRootspace (las, m, s, c, las.weights[ix], ci=[c[ix] for c in las.ci],
                                   fragsym=w)
               for ix, (c, m, s, w) in enumerate (zip (*get_space_info (las)))]

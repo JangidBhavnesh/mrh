@@ -1,7 +1,7 @@
 import numpy as np
 from pyscf import lib, symm
 from scipy import linalg
-from mrh.my_pyscf.mcscf.lasci import get_space_info
+from mrh.my_pyscf.mcscf.laspscf import get_space_info
 from mrh.my_pyscf.lassi.citools import get_lroots, get_rootaddr_fragaddr, umat_dot_1frag_, _umat_dot_1frag
 from mrh.my_pyscf.lassi.lassi import root_make_rdm12s, LASSI, ham_2q
 from mrh.my_pyscf.lassi.op_o1.utilities import fermion_spin_shuffle

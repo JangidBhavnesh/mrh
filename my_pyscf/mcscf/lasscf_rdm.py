@@ -5,8 +5,8 @@
 import time
 import numpy as np
 from scipy import linalg, sparse
-from mrh.my_pyscf.mcscf import lasscf_sync_o0, lasci, lasci_sync, _DFLASCI, addons
-from mrh.my_pyscf.mcscf.lasci_sync import MicroIterInstabilityException
+from mrh.my_pyscf.mcscf import lasscf_sync_o0, laspscf, laspscf_sync, _DFLASCI, addons
+from mrh.my_pyscf.mcscf.laspscf_sync import MicroIterInstabilityException
 from mrh.my_pyscf.fci import csf_solver
 from pyscf import lib, gto, ao2mo
 from pyscf.fci.direct_spin1 import _unpack_nelec
@@ -127,7 +127,7 @@ def rdm_cycle (las, mo_coeff, casdm1frs, veff, h2eff_sub, log, max_cycle_rdmjk=3
         my_veff = las.split_veff (my_veff, h2eff_sub, mo_coeff=mo_coeff, casdm1s_sub=casdm1fs)
         return my_veff
     converged = False
-    e_cas, fakeci = lasci_sync.ci_cycle (las, mo_coeff, None, veff, h2eff_sub, casdm1frs, log)
+    e_cas, fakeci = laspscf_sync.ci_cycle (las, mo_coeff, None, veff, h2eff_sub, casdm1frs, log)
     casdm1frs = [f[0] for f in fakeci]
     casdm2fr = [f[1] for f in fakeci]
     veff = get_veff (casdm1frs)
@@ -138,7 +138,7 @@ def rdm_cycle (las, mo_coeff, casdm1frs, veff, h2eff_sub, log, max_cycle_rdmjk=3
         casdm1frs_old = casdm1frs
         casdm2fr_old = casdm2fr
         e_old = e_tot
-        e_cas, fakeci = lasci_sync.ci_cycle (las, mo_coeff, None, veff, h2eff_sub, casdm1frs, log)
+        e_cas, fakeci = laspscf_sync.ci_cycle (las, mo_coeff, None, veff, h2eff_sub, casdm1frs, log)
         casdm1frs = [f[0] for f in fakeci]
         casdm2fr = [f[1] for f in fakeci]
         veff = get_veff (casdm1frs)
@@ -327,7 +327,7 @@ def canonicalize (las, mo_coeff=None, casdm1frs=None, casdm2fr=None, natorb_casd
     ncore, ncas = las.ncore, las.ncas
     nocc = ncore + ncas
     moH_cas = mo_coeff[:,ncore:nocc].conj ().T.copy ()
-    mo_coeff, mo_ene, mo_occ, _, h2eff_sub = lasci.canonicalize (las, mo_coeff=mo_coeff,
+    mo_coeff, mo_ene, mo_occ, _, h2eff_sub = laspscf.canonicalize (las, mo_coeff=mo_coeff,
         ci=None, casdm1fs=casdm1fs, natorb_casdm1=natorb_casdm1, veff=veff,
         h2eff_sub=h2eff_sub, orbsym=orbsym)
     ovlp = las._scf.get_ovlp ()
@@ -342,7 +342,7 @@ def canonicalize (las, mo_coeff=None, casdm1frs=None, casdm2fr=None, natorb_casd
     return mo_coeff, mo_ene, mo_occ, casdm1frs, casdm2fr, h2eff_sub
 
 
-# From lasci_sync.ci_cycle and lasci.get_init_guess ci, I deduce that
+# From laspscf_sync.ci_cycle and laspscf.get_init_guess ci, I deduce that
 # the fcibox class should have the following members:
 #   callable "_get_nelec"
 #   callable "kernel"
@@ -537,7 +537,7 @@ def LASSCF (mf_or_mol, ncas_sub, nelecas_sub, **kwargs):
     else:
         las = LASSCFNoSymm (mf, ncas_sub, nelecas_sub, **kwargs)
     if getattr (mf, 'with_df', None):
-        las = lasci.density_fit (las, with_df = mf.with_df) 
+        las = laspscf.density_fit (las, with_df = mf.with_df) 
     return las
 
 

@@ -3,7 +3,7 @@ import numpy as np
 from scipy import linalg
 from pyscf import lib
 from pyscf.mcscf import mc1step
-from mrh.my_pyscf.mcscf import lasci, lasscf_sync_o0
+from mrh.my_pyscf.mcscf import laspscf, lasscf_sync_o0
 from mrh.my_pyscf.mcscf.lasscf_guess import interpret_frags_atoms
 from mrh.my_pyscf.mcscf.lasscf_async import keyframe, combine
 from mrh.my_pyscf.mcscf.lasscf_async.split import get_impurity_space_constructor
@@ -189,7 +189,7 @@ class SortedIndexDict (dict):
         else:
             return dict.get (self, key)
 
-class LASSCFNoSymm (lasci.LASPSCFNoSymm):
+class LASSCFNoSymm (laspscf.LASPSCFNoSymm):
     '''Extra attributes:
 
     frags_orbs : list of length nfrags of list of integers
@@ -206,7 +206,7 @@ class LASSCFNoSymm (lasci.LASPSCFNoSymm):
         Maximum number of frags to simultaneously relax during the combine_pair step.
     '''
     def __init__(self, mf, ncas, nelecas, ncore=None, spin_sub=None, **kwargs):
-        lasci.LASPSCFNoSymm.__init__(self, mf, ncas, nelecas, ncore=ncore, spin_sub=spin_sub,
+        laspscf.LASPSCFNoSymm.__init__(self, mf, ncas, nelecas, ncore=ncore, spin_sub=spin_sub,
                                    **kwargs)
         self.impurity_params = {}
         for i in range (self.nfrags):
@@ -285,7 +285,7 @@ class LASSCFNoSymm (lasci.LASPSCFNoSymm):
                                                  frags_by_AOs=True, **kwargs) 
         return mo_coeff
     def dump_flags (self, verbose=None, _method_name='LASSCF'):
-        lasci.LASPSCFNoSymm.dump_flags (self, verbose=verbose, _method_name=_method_name)
+        laspscf.LASPSCFNoSymm.dump_flags (self, verbose=verbose, _method_name=_method_name)
     def _finalize(self):
         log = lib.logger.new_logger (self, self.verbose)
         nroots_prt = len (self.e_states)
@@ -302,9 +302,9 @@ class LASSCFNoSymm (lasci.LASPSCFNoSymm):
             log.info ("LASSCF energy = %.15g", self.e_tot)
         return
 
-class LASSCFSymm (lasci.LASPSCFSymm):
+class LASSCFSymm (laspscf.LASPSCFSymm):
     def __init__(self, mf, ncas, nelecas, ncore=None, spin_sub=None, **kwargs):
-        lasci.LASPSCFSymm.__init__(self, mf, ncas, nelecas, ncore=ncore, spin_sub=spin_sub, **kwargs)
+        laspscf.LASPSCFSymm.__init__(self, mf, ncas, nelecas, ncore=ncore, spin_sub=spin_sub, **kwargs)
         self.impurity_params = [{} for i in range (self.nfrags)]
         self.relax_params = {}
         keys = set (('frags_orbs','impurity_params','relax_params'))
@@ -335,7 +335,7 @@ def LASSCF (mf_or_mol, ncas_sub, nelecas_sub, **kwargs):
     else:
         las = LASSCFNoSymm (mf, ncas_sub, nelecas_sub, **kwargs)
     if getattr (mf, 'with_df', None):
-        las = lasci.density_fit (las, with_df = mf.with_df)
+        las = laspscf.density_fit (las, with_df = mf.with_df)
     return las
 
 if __name__=='__main__':

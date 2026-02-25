@@ -23,7 +23,7 @@
 '''
 
 from mrh.my_dmet import localintegrals, qcdmethelper
-from mrh.my_pyscf.mcscf import lasci
+from mrh.my_pyscf.mcscf import laspscf
 import warnings
 import numpy as np
 from scipy import optimize, linalg
@@ -554,7 +554,7 @@ class dmet:
                 mol.build ()
                 self.lasci_log = mol.stdout
             frozen = np.arange (ncore, sum(ncas_sub)+ncore, dtype=np.int32) if self.oldLASSCF else None
-            self.las = lasci.LASCI (self.ints._scf, ncas_sub, nelecas_sub, spin_sub=spin_sub, wfnsym_sub=wfnsym_sub, frozen=frozen)
+            self.las = laspscf.LASCI (self.ints._scf, ncas_sub, nelecas_sub, spin_sub=spin_sub, wfnsym_sub=wfnsym_sub, frozen=frozen)
             self.las.conv_tol_grad = self.conv_tol_grad
             print ("Time preparing LASCI object: {:.8f} wall, {:.8f} clock".format (time.time () - w0, time.process_time () - t0))
 

@@ -1,7 +1,7 @@
 import numpy as np
 from scipy import linalg
 from mrh.util.la import matrix_svd_control_options
-from mrh.my_pyscf.mcscf import lasci, lasci_sync, _DFLASCI
+from mrh.my_pyscf.mcscf import laspscf, laspscf_sync, _DFLASCI
 from mrh.my_pyscf.mcscf import lasscf_guess
 from pyscf import gto, scf, symm
 from pyscf.mcscf import mc_ao2mo, casci_symm, mc1step
@@ -16,24 +16,24 @@ from functools import partial
 
 localize_init_guess=lasscf_guess._localize # backwards compatibility
 
-class LASSCF_UnitaryGroupGenerators (lasci_sync.LASCI_UnitaryGroupGenerators):
+class LASSCF_UnitaryGroupGenerators (laspscf_sync.LASCI_UnitaryGroupGenerators):
 
     def _init_orb (self, las, mo_coeff, ci):
-        lasci_sync.LASCI_UnitaryGroupGenerators._init_nonfrozen_orb (self, las)
+        laspscf_sync.LASCI_UnitaryGroupGenerators._init_nonfrozen_orb (self, las)
         self.uniq_orb_idx = self.nfrz_orb_idx.copy ()
         # The distinction between "uniq_orb_idx" and "nfrz_orb_idx" is an
         # artifact of backwards-compatibility with the old LASSCF implementation
 
 class LASSCFSymm_UnitaryGroupGenerators (LASSCF_UnitaryGroupGenerators):
-    __init__ = lasci_sync.LASPSCFSymm_UnitaryGroupGenerators.__init__
-    _init_ci = lasci_sync.LASPSCFSymm_UnitaryGroupGenerators._init_ci
+    __init__ = laspscf_sync.LASPSCFSymm_UnitaryGroupGenerators.__init__
+    _init_ci = laspscf_sync.LASPSCFSymm_UnitaryGroupGenerators._init_ci
     def _init_orb (self, las, mo_coeff, ci, orbsym):
         LASSCF_UnitaryGroupGenerators._init_orb (self, las, mo_coeff, ci)
         self.symm_forbid = (orbsym[:,None] ^ orbsym[None,:]).astype (np.bool_)
         self.uniq_orb_idx[self.symm_forbid] = False
         self.nfrz_orb_idx[self.symm_forbid] = False
 
-class LASSCF_HessianOperator (lasci_sync.LASCI_HessianOperator):
+class LASSCF_HessianOperator (laspscf_sync.LASCI_HessianOperator):
     # Required modifications for Hx: [I forgot about 3) at first]
     #   1) cache CASSCF-type eris and paaa - init_eri
     #   2) increase range of ocm2 - make_odm1s2c_sub
@@ -47,7 +47,7 @@ class LASSCF_HessianOperator (lasci_sync.LASCI_HessianOperator):
     #   8) define "gx" in this context - get_gx 
 
     def _init_eri_(self):
-        lasci_sync._init_df_(self)
+        laspscf_sync._init_df_(self)
         if isinstance (self.las, _DFLASCI):
             self.cas_type_eris = mc_df._ERIS (self.las, self.mo_coeff, self.with_df)
         else:
@@ -102,7 +102,7 @@ class LASSCF_HessianOperator (lasci_sync.LASCI_HessianOperator):
         (c: closed; a: active; v: virtual; p: any) '''
 
         ncore, nocc, nmo = self.ncore, self.nocc, self.nmo
-        gorb = lasci_sync.LASCI_HessianOperator.orbital_response (self, kappa, odm1s,
+        gorb = laspscf_sync.LASCI_HessianOperator.orbital_response (self, kappa, odm1s,
             ocm2, tdm1frs, tcm2, veff_prime)
         f1_prime = np.zeros ((self.nmo, self.nmo), dtype=self.dtype)
         # (H.x_va)_pp, (H.x_ac)_pp sector
@@ -143,7 +143,7 @@ class LASSCF_HessianOperator (lasci_sync.LASCI_HessianOperator):
     def _update_h2eff_sub (self, mo1, umat, h2eff_sub):
         return self.las.ao2mo (mo1)
 
-class LASSCFNoSymm (lasci.LASPSCFNoSymm):
+class LASSCFNoSymm (laspscf.LASPSCFNoSymm):
     _ugg = LASSCF_UnitaryGroupGenerators
     _hop = LASSCF_HessianOperator
     as_scanner = mc1step.as_scanner
@@ -168,7 +168,7 @@ class LASSCFNoSymm (lasci.LASPSCFNoSymm):
         veff = np.stack ([veff_a, veff_b], axis=0)
         return veff
     def dump_flags (self, verbose=None, _method_name='LASSCF'):
-        lasci.LASPSCFNoSymm.dump_flags (self, verbose=verbose, _method_name=_method_name)
+        laspscf.LASPSCFNoSymm.dump_flags (self, verbose=verbose, _method_name=_method_name)
     #SV
     def nuc_grad_method(self):
         from mrh.my_pyscf.grad import lasscf
@@ -177,7 +177,7 @@ class LASSCFNoSymm (lasci.LASPSCFNoSymm):
     #SV
     Gradients = nuc_grad_method
     
-class LASSCFSymm (lasci.LASPSCFSymm):
+class LASSCFSymm (laspscf.LASPSCFSymm):
     _ugg = LASSCFSymm_UnitaryGroupGenerators    
     _hop = LASSCF_HessianOperator
     split_veff = LASSCFNoSymm.split_veff
@@ -199,7 +199,7 @@ def LASSCF (mf_or_mol, ncas_sub, nelecas_sub, **kwargs):
     else:
         las = LASSCFNoSymm (mf, ncas_sub, nelecas_sub, **kwargs)
     if getattr (mf, 'with_df', None):
-        las = lasci.density_fit (las, with_df = mf.with_df)
+        las = laspscf.density_fit (las, with_df = mf.with_df)
     return las
 
 
@@ -343,9 +343,9 @@ if __name__ == '__main__':
     print ("3) My preconditioner is obviously wrong, but in such a way that it suppresses CI vector evolution, which means stuff still converges if the CI vector isn't super sensitive to the orbital rotations.")
 
     from mrh.tests.lasscf.c2h4n4_struct import structure as struct
-    mo0 = np.loadtxt ('/home/herme068/gits/mrh/tests/lasscf/test_lasci_mo.dat')
-    ci00 = np.loadtxt ('/home/herme068/gits/mrh/tests/lasscf/test_lasci_ci0.dat')
-    ci01 = np.loadtxt ('/home/herme068/gits/mrh/tests/lasscf/test_lasci_ci1.dat')
+    mo0 = np.loadtxt ('/home/herme068/gits/mrh/tests/lasscf/test_laspscf_mo.dat')
+    ci00 = np.loadtxt ('/home/herme068/gits/mrh/tests/lasscf/test_laspscf_ci0.dat')
+    ci01 = np.loadtxt ('/home/herme068/gits/mrh/tests/lasscf/test_laspscf_ci1.dat')
     ci0 = None #[[ci00], [-ci01.T]]
     dr_nn = 3.0
     mol = struct (dr_nn, dr_nn, '6-31g', symmetry=False)

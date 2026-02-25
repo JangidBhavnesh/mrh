@@ -466,7 +466,7 @@ if __name__=='__main__':
 
     print ("Kernel done")
     ###########################
-    from mrh.my_pyscf.mcscf.lasci import get_grad_orb
+    from mrh.my_pyscf.mcscf.laspscf import get_grad_orb
     dm1s = mc.make_rdm1s ()
     veff = mc.get_veff (dm=dm1s)
     fock1 = get_grad_orb (mc, hermi=0)

@@ -772,7 +772,7 @@ class LASSI(lib.StreamObject):
     '''
     def __init__(self, las, mo_coeff=None, ci=None, soc=False, break_symmetry=False, opt=1,
                  davidson_only=False, nroots_si=None, **kwargs):
-        from mrh.my_pyscf.mcscf.lasci import LASPSCFNoSymm
+        from mrh.my_pyscf.mcscf.laspscf import LASPSCFNoSymm
         if isinstance(las, LASPSCFNoSymm): self._las = las
         else: raise RuntimeError("LASSI requires las instance")
         if mo_coeff is None: mo_coeff = las.mo_coeff
@@ -857,17 +857,17 @@ class LASSI(lib.StreamObject):
 
     def get_nelec_frs (self, las=None):
         if las is None: las = self
-        from mrh.my_pyscf.mcscf.lasci import get_nelec_frs
+        from mrh.my_pyscf.mcscf.laspscf import get_nelec_frs
         return get_nelec_frs (las)
 
     def get_smult_fr (self, las=None):
         if las is None: las = self
-        from mrh.my_pyscf.mcscf.lasci import get_space_info
+        from mrh.my_pyscf.mcscf.laspscf import get_space_info
         return get_space_info (las)[2].T
 
     def get_sym_fr (self, las=None):
         if las is None: las = self
-        from mrh.my_pyscf.mcscf.lasci import get_sym_fr
+        from mrh.my_pyscf.mcscf.laspscf import get_sym_fr
         return get_sym_fr (las)
 
     def get_lroots (self, ci=None):

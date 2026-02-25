@@ -6,7 +6,7 @@ from pyscf.tools import dump_mat
 from pyscf import symm, gto, scf, ao2mo, lib
 from pyscf.fci.direct_spin1 import _unpack_nelec
 from mrh.my_pyscf.mcscf.addons import state_average_n_mix, get_h1e_zipped_fcisolver, las2cas_civec
-from mrh.my_pyscf.mcscf import lasci_sync, _DFLASCI, lasscf_guess, las_ao2mo
+from mrh.my_pyscf.mcscf import laspscf_sync, _DFLASCI, lasscf_guess, las_ao2mo
 from mrh.my_pyscf.fci import csf_solver
 from mrh.my_pyscf.df.sparse_df import sparsedf_array
 from mrh.my_pyscf.mcscf import chkfile
@@ -786,7 +786,7 @@ def state_average_(las, weights=[0.5,0.5], charges=None, spins=None,
 
     if las.ci is not None:
         log = lib.logger.new_logger(las, las.verbose)
-        log.debug (("lasci.state_average: Cached CI vectors may be present.\n"
+        log.debug (("laspscf.state_average: Cached CI vectors may be present.\n"
                     "Looking for matches between old and new LAS states..."))
         ci0 = [[None for i in range (nroots)] for j in range (nfrags)]
         new_states = np.stack ([charges, spins, smults, wfnsyms],
@@ -806,10 +806,10 @@ def state_average_(las, weights=[0.5,0.5], charges=None, spins=None,
     las.converged = False
     return las
 
-@lib.with_doc(''' A version of lasci.state_average_ that creates a copy instead of modifying the 
+@lib.with_doc(''' A version of laspscf.state_average_ that creates a copy instead of modifying the 
     LASCI/LASSCF method instance in place.
 
-    See lasci.state_average_ docstring below:\n\n''' + state_average_.__doc__)
+    See laspscf.state_average_ docstring below:\n\n''' + state_average_.__doc__)
 def state_average (las, weights=[0.5,0.5], charges=None, spins=None,
         smults=None, wfnsyms=None, lroots=None, lweights=None, assert_no_dupes=True):
     is_scanner = isinstance (las, lib.SinglePointScanner)
@@ -1101,8 +1101,8 @@ class LASPSCFNoSymm (casci.CASCI):
     get_grad = get_grad
     get_grad_orb = get_grad_orb
     get_grad_ci = get_grad_ci
-    _hop = lasci_sync.LASCI_HessianOperator
-    _kern = lasci_sync.kernel
+    _hop = laspscf_sync.LASCI_HessianOperator
+    _kern = laspscf_sync.kernel
     def get_hop (self, mo_coeff=None, ci=None, ugg=None, **kwargs):
         if mo_coeff is None: mo_coeff = self.mo_coeff
         if ci is None: ci = self.ci
@@ -2339,7 +2339,7 @@ class LASPSCFNoSymm (casci.CASCI):
         self._e2_test = e2
         return e1 + e2
 
-    _ugg = lasci_sync.LASCI_UnitaryGroupGenerators
+    _ugg = laspscf_sync.LASCI_UnitaryGroupGenerators
     def get_ugg (self, mo_coeff=None, ci=None):
         if mo_coeff is None: mo_coeff = self.mo_coeff
         if ci is None: ci = self.ci
@@ -2616,7 +2616,7 @@ class LASPSCFSymm (casci_symm.CASCI, LASPSCFNoSymm):
     dump_flags = LASPSCFNoSymm.dump_flags
     dump_spaces = LASPSCFNoSymm.dump_spaces
     check_sanity = LASPSCFNoSymm.check_sanity
-    _ugg = lasci_sync.LASPSCFSymm_UnitaryGroupGenerators
+    _ugg = laspscf_sync.LASPSCFSymm_UnitaryGroupGenerators
 
     @property
     def wfnsym (self):

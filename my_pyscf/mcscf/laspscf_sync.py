@@ -13,7 +13,7 @@ class MicroIterInstabilityException (Exception):
 
 def kernel (las, mo_coeff=None, ci0=None, casdm0_fr=None, conv_tol_grad=1e-4, 
         assert_no_dupes=False, verbose=lib.logger.NOTE):
-    from mrh.my_pyscf.mcscf.lasci import _eig_inactive_virtual
+    from mrh.my_pyscf.mcscf.laspscf import _eig_inactive_virtual
     if mo_coeff is None: mo_coeff = las.mo_coeff
     if assert_no_dupes: las.assert_no_duplicates ()
     log = lib.logger.new_logger(las, verbose)
@@ -110,7 +110,7 @@ def kernel (las, mo_coeff=None, ci0=None, casdm0_fr=None, conv_tol_grad=1e-4,
                 l = j + ugg.nvar_orb
                 log.debug ('GRADIENT IMPLEMENTATION TEST: |D g_ci({})| = %.15g'.format (isub), 
                            linalg.norm (g_ci_test[i:j] - g_vec[k:l]))
-            # TODO: figure out why this fails in intermediate combined lascis in lasscf_async
+            # TODO: figure out why this fails in intermediate combined laspscfs in lasscf_async
             err = linalg.norm (g_ci_test - g_vec[ugg.nvar_orb:])
             assert (err < 1e-5), '{}'.format (err)
         gx = H_op.get_gx ()
@@ -533,7 +533,7 @@ class LASPSCFSymm_UnitaryGroupGenerators (LASCI_UnitaryGroupGenerators):
             self.ci_transformers.append (tf_list)
 
 def _init_df_(h_op):
-    from mrh.my_pyscf.mcscf.lasci import _DFLASCI
+    from mrh.my_pyscf.mcscf.laspscf import _DFLASCI
     if isinstance (h_op.las, _DFLASCI):
         h_op.with_df = h_op.las.with_df
         if h_op.las.use_gpu:
@@ -714,7 +714,7 @@ class LASCI_HessianOperator (sparse_linalg.LinearOperator):
         casdm1 = casdm1a + casdm1b
         moH_coeff = mo_coeff.conjugate ().T
         if veff is None:
-            from mrh.my_pyscf.mcscf.lasci import _DFLASCI 
+            from mrh.my_pyscf.mcscf.laspscf import _DFLASCI 
             if isinstance (las, _DFLASCI):
                 _init_df_(self)
                 # Can't use this module's get_veff because here I need to have f_aa and f_ii
