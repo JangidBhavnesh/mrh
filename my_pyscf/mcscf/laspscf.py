@@ -6,7 +6,7 @@ from pyscf.tools import dump_mat
 from pyscf import symm, gto, scf, ao2mo, lib
 from pyscf.fci.direct_spin1 import _unpack_nelec
 from mrh.my_pyscf.mcscf.addons import state_average_n_mix, get_h1e_zipped_fcisolver, las2cas_civec
-from mrh.my_pyscf.mcscf import lasci_sync, _DFLASCI, lasscf_guess, las_ao2mo
+from mrh.my_pyscf.mcscf import laspscf_sync, _DFLASPSCF, lasscf_guess, las_ao2mo
 from mrh.my_pyscf.fci import csf_solver
 from mrh.my_pyscf.df.sparse_df import sparsedf_array
 from mrh.my_pyscf.mcscf import chkfile
@@ -18,15 +18,15 @@ from scipy import linalg
 import numpy as np
 import copy
 
-def LASCI (mf_or_mol, ncas_sub, nelecas_sub, **kwargs):
+def LASPSCF (mf_or_mol, ncas_sub, nelecas_sub, **kwargs):
     if isinstance(mf_or_mol, gto.Mole):
         mf = scf.RHF(mf_or_mol)
     else:
         mf = mf_or_mol
     if mf.mol.symmetry: 
-        las = LASCISymm (mf, ncas_sub, nelecas_sub, **kwargs)
+        las = LASPSCFSymm (mf, ncas_sub, nelecas_sub, **kwargs)
     else:
-        las = LASCINoSymm (mf, ncas_sub, nelecas_sub, **kwargs)
+        las = LASPSCFNoSymm (mf, ncas_sub, nelecas_sub, **kwargs)
     if getattr (mf, 'with_df', None):
         las = density_fit (las, with_df = mf.with_df) 
     return las
@@ -36,14 +36,14 @@ def get_grad (las, mo_coeff=None, ci=None, ugg=None, h1eff_sub=None, h2eff_sub=N
     '''Return energy gradient for orbital rotation and CI relaxation.
 
     Args:
-        las : instance of :class:`LASCINoSymm`
+        las : instance of :class:`LASPSCFNoSymm`
 
     Kwargs:
         mo_coeff : ndarray of shape (nao,nmo)
             Contains molecular orbitals
         ci : list (length=nfrags) of list (length=nroots) of ndarray
             Contains CI vectors
-        ugg : instance of :class:`LASCI_UnitaryGroupGenerators`
+        ugg : instance of :class:`LASPSCF_UnitaryGroupGenerators`
         h1eff_sub : list (length=nfrags) of list (length=nroots) of ndarray
             Contains effective one-electron Hamiltonians experienced by each fragment
             in each state
@@ -60,7 +60,7 @@ def get_grad (las, mo_coeff=None, ci=None, ugg=None, h1eff_sub=None, h2eff_sub=N
         gci : ndarray of shape (sum(ugg.ncsf_sub),)
             CI relaxation gradients as a flat array
         gx : ndarray
-            Orbital rotation gradients for temporarily frozen orbitals in the "LASCI" problem
+            Orbital rotation gradients for temporarily frozen orbitals in the "LASPSCF" problem
     '''
     if mo_coeff is None: mo_coeff = las.mo_coeff
     if ci is None: ci = las.ci
@@ -95,7 +95,7 @@ def get_grad_orb (las, mo_coeff=None, ci=None, h2eff_sub=None, veff=None, dm1s=N
     '''Return energy gradient for orbital rotation.
 
     Args:
-        las : instance of :class:`LASCINoSymm`
+        las : instance of :class:`LASPSCFNoSymm`
 
     Kwargs:
         mo_coeff : ndarray of shape (nao,nmo)
@@ -161,7 +161,7 @@ def get_grad_ci (las, mo_coeff=None, ci=None, h1eff_sub=None, h2eff_sub=None, ve
     '''Return energy gradient for CI relaxation.
 
     Args:
-        las : instance of :class:`LASCINoSymm`
+        las : instance of :class:`LASPSCFNoSymm`
 
     Kwargs:
         mo_coeff : ndarray of shape (nao,nmo)
@@ -200,7 +200,7 @@ def get_grad_ci (las, mo_coeff=None, ci=None, h1eff_sub=None, h2eff_sub=None, ve
 
 def density_fit (las, auxbasis=None, with_df=None):
     ''' Here I ONLY need to attach the tag and the df object because I put conditionals in
-        LASCINoSymm to make my life easier '''
+        LASPSCFNoSymm to make my life easier '''
     las_class = las.__class__
     if with_df is None:
         if (getattr(las._scf, 'with_df', None) and
@@ -212,22 +212,22 @@ def density_fit (las, auxbasis=None, with_df=None):
             with_df.stdout = las.stdout
             with_df.verbose = las.verbose
             with_df.auxbasis = auxbasis
-    class DFLASCI (las_class, _DFLASCI):
+    class DFLASPSCF (las_class, _DFLASPSCF):
         def __init__(self, scf, ncas_sub, nelecas_sub):
             self.with_df = with_df
             self._keys = self._keys.union(['with_df'])
             las_class.__init__(self, scf, ncas_sub, nelecas_sub)
-    new_las = DFLASCI (las._scf, las.ncas_sub, las.nelecas_sub)
+    new_las = DFLASPSCF (las._scf, las.ncas_sub, las.nelecas_sub)
     new_las.__dict__.update (las.__dict__)
     return new_las
 
 def h1e_for_las (las, mo_coeff=None, ncas=None, ncore=None, nelecas=None, ci=None, ncas_sub=None,
                  nelecas_sub=None, veff=None, h2eff_sub=None, casdm1s_sub=None, casdm1frs=None,
                  eri_cas=None):
-    ''' Effective one-body Hamiltonians (plural) for a LASCI problem
+    ''' Effective one-body Hamiltonians (plural) for a LASPSCF problem
 
     Args:
-        las: a LASCI object
+        las: a LASPSCF object
 
     Kwargs:
         mo_coeff: ndarray of shape (nao,nmo)
@@ -331,7 +331,7 @@ def get_fock (las, mo_coeff=None, ci=None, eris=None, casdm1s=None, verbose=None
         fock = las.get_hcore()[None,:,:] + veff
         return get_roothaan_fock (fock, dm1s, las._scf.get_ovlp ())
     dm1 = dm1s[0] + dm1s[1]
-    if isinstance (las, _DFLASCI):
+    if isinstance (las, _DFLASPSCF):
         vj, vk = las.with_df.get_jk(dm1, hermi=1)
     else:
         vj, vk = las._scf.get_jk(las.mol, dm1, hermi=1)
@@ -342,7 +342,7 @@ def _eig_inactive_virtual (las, fock, orbsym=None):
     '''Generate the unitary matrix canonicalizing the inactive and virtual orbitals only.
 
     Args:
-        las : object of :class:`LASCINoSymm`
+        las : object of :class:`LASPSCFNoSymm`
         fock : ndarray of shape (nmo,nmo)
             Contains Fock matrix in MO basis
 
@@ -696,10 +696,10 @@ def assert_no_duplicates (las, tab=None):
 def state_average_(las, weights=[0.5,0.5], charges=None, spins=None,
         smults=None, wfnsyms=None, lroots=None, lweights=None,
         assert_no_dupes=True):
-    ''' Transform LASCI/LASSCF object into state-average LASCI/LASSCF 
+    ''' Transform LASPSCF/LASSCF object into state-average LASPSCF/LASSCF 
 
     Args:
-        las: LASCI/LASSCF instance
+        las: LASPSCF/LASSCF instance
 
     Kwargs:
         weights: list of float; required
@@ -735,9 +735,9 @@ def state_average_(las, weights=[0.5,0.5], charges=None, spins=None,
             to, i.e., np.ones (las.nfrags, las.nroots, 1).tolist ()
 
     Returns:
-        las: LASCI/LASSCF instance
+        las: LASPSCF/LASSCF instance
             The first positional argument, modified in-place into a
-            state-averaged LASCI/LASSCF instance.
+            state-averaged LASPSCF/LASSCF instance.
 
     '''
     # TODO: incorporate lroots counting into get_space_info and simplify this!
@@ -802,7 +802,7 @@ def state_average_(las, weights=[0.5,0.5], charges=None, spins=None,
 
     if las.ci is not None:
         log = lib.logger.new_logger(las, las.verbose)
-        log.debug (("lasci.state_average: Cached CI vectors may be present.\n"
+        log.debug (("laspscf.state_average: Cached CI vectors may be present.\n"
                     "Looking for matches between old and new LAS states..."))
         ci0 = [[None for i in range (nroots)] for j in range (nfrags)]
         new_states = np.stack ([charges, spins, smults, wfnsyms],
@@ -822,10 +822,10 @@ def state_average_(las, weights=[0.5,0.5], charges=None, spins=None,
     las.converged = False
     return las
 
-@lib.with_doc(''' A version of lasci.state_average_ that creates a copy instead of modifying the 
-    LASCI/LASSCF method instance in place.
+@lib.with_doc(''' A version of laspscf.state_average_ that creates a copy instead of modifying the 
+    LASPSCF/LASSCF method instance in place.
 
-    See lasci.state_average_ docstring below:\n\n''' + state_average_.__doc__)
+    See laspscf.state_average_ docstring below:\n\n''' + state_average_.__doc__)
 def state_average (las, weights=[0.5,0.5], charges=None, spins=None,
         smults=None, wfnsyms=None, lroots=None, lweights=None, assert_no_dupes=True):
     is_scanner = isinstance (las, lib.SinglePointScanner)
@@ -916,7 +916,7 @@ def run_lasci (las, mo_coeff=None, ci0=None, lroots=None, lweights=None, verbose
     nelecas_sub = las.nelecas_sub
     orbsym = getattr (mo_coeff, 'orbsym', None)
     if orbsym is not None: orbsym=orbsym[ncore:nocc]
-    elif isinstance (las, LASCISymm):
+    elif isinstance (las, LASPSCFSymm):
         mo_coeff = las.label_symmetry_(mo_coeff)
         orbsym = mo_coeff.orbsym[ncore:nocc]
     log = lib.logger.new_logger (las, verbose)
@@ -1022,7 +1022,7 @@ def _shift_svals (l, sv, r, rng):
         r[:,:k] = r[:,:k][:,idx]
     return l, sv, r
 
-class LASCINoSymm (casci.CASCI):
+class LASPSCFNoSymm (casci.CASCI):
 
     get_space_info = get_space_info
     get_smults_fr = get_smults_fr
@@ -1107,7 +1107,7 @@ class LASCINoSymm (casci.CASCI):
     '''
     def get_h2eff (self, mo_coeff=None):
         if mo_coeff is None: mo_coeff = self.mo_coeff
-        if isinstance (self, _DFLASCI):
+        if isinstance (self, _DFLASPSCF):
             mo_cas = mo_coeff[:,self.ncore:][:,:self.ncas]
             return self.with_df.ao2mo (mo_cas)
         return self.ao2mo (mo_coeff)
@@ -1117,8 +1117,8 @@ class LASCINoSymm (casci.CASCI):
     get_grad = get_grad
     get_grad_orb = get_grad_orb
     get_grad_ci = get_grad_ci
-    _hop = lasci_sync.LASCI_HessianOperator
-    _kern = lasci_sync.kernel
+    _hop = laspscf_sync.LASPSCF_HessianOperator
+    _kern = laspscf_sync.kernel
     def get_hop (self, mo_coeff=None, ci=None, ugg=None, **kwargs):
         if mo_coeff is None: mo_coeff = self.mo_coeff
         if ci is None: ci = self.ci
@@ -1135,11 +1135,11 @@ class LASCINoSymm (casci.CASCI):
             log.info (("Printing a maximum of 100 state energies;"
                        " increase self.verbose to see them all"))
         if nroots_prt > 1:
-            log.info ("LASCI state-average energy = %.15g", self.e_tot)
+            log.info ("LASPSCF state-average energy = %.15g", self.e_tot)
             for i, e in enumerate (self.e_states[:nroots_prt]):
-                log.info ("LASCI state %d energy = %.15g", i, e)
+                log.info ("LASPSCF state %d energy = %.15g", i, e)
         else:
-            log.info ("LASCI energy = %.15g", self.e_tot)
+            log.info ("LASPSCF energy = %.15g", self.e_tot)
         return
 
 
@@ -2202,7 +2202,7 @@ class LASCINoSymm (casci.CASCI):
         if dm is None: dm = self.make_rdm1 (include_core=True, **kwargs).reshape (nao, nao)
         dm = np.asarray (dm)
         if dm.ndim == 2: dm = dm[None,:,:]
-        if isinstance (self, _DFLASCI):
+        if isinstance (self, _DFLASPSCF):
             vj, vk = self.with_df.get_jk(dm, hermi=hermi)
         else:
             vj, vk = self._scf.get_jk(mol, dm, hermi=hermi)
@@ -2316,7 +2316,7 @@ class LASCINoSymm (casci.CASCI):
     def energy_elec (self, mo_coeff=None, ncore=None, ncas=None,
             ncas_sub=None, nelecas_sub=None, ci=None, h2eff=None, veff=None,
             casdm1frs=None, casdm2fr=None, **kwargs):
-        ''' Since the LASCI energy cannot be calculated as simply as ecas + ecore, I need this '''
+        ''' Since the LASPSCF energy cannot be calculated as simply as ecas + ecore, I need this '''
         if mo_coeff is None: mo_coeff = self.mo_coeff
         if ncore is None: ncore = self.ncore
         if ncas is None: ncas = self.ncas
@@ -2355,14 +2355,14 @@ class LASCINoSymm (casci.CASCI):
         self._e2_test = e2
         return e1 + e2
 
-    _ugg = lasci_sync.LASCI_UnitaryGroupGenerators
+    _ugg = laspscf_sync.LASPSCF_UnitaryGroupGenerators
     def get_ugg (self, mo_coeff=None, ci=None):
         if mo_coeff is None: mo_coeff = self.mo_coeff
         if ci is None: ci = self.ci
         return self._ugg (self, mo_coeff, ci)
 
     def cderi_ao2mo (self, mo_i, mo_j, compact=False):
-        assert (isinstance (self, _DFLASCI))
+        assert (isinstance (self, _DFLASPSCF))
         nmo_i, nmo_j = mo_i.shape[-1], mo_j.shape[-1]
         if compact:
             assert (nmo_i == nmo_j)
@@ -2381,7 +2381,7 @@ class LASCINoSymm (casci.CASCI):
     def fast_veffa (self, casdm1s_sub, h2eff_sub, mo_coeff=None, ci=None, _full=False):
         if mo_coeff is None: mo_coeff = self.mo_coeff
         if ci is None: ci = self.ci
-        assert (isinstance (self, _DFLASCI) or _full)
+        assert (isinstance (self, _DFLASPSCF) or _full)
         ncore = self.ncore
         ncas_sub = self.ncas_sub
         ncas = sum (ncas_sub)
@@ -2394,7 +2394,7 @@ class LASCINoSymm (casci.CASCI):
         dma = linalg.block_diag (*[dm[0] for dm in casdm1s_sub])
         dmb = linalg.block_diag (*[dm[1] for dm in casdm1s_sub])
         casdm1s = np.stack ([dma, dmb], axis=0)
-        if gpu or not (isinstance (self, _DFLASCI)):
+        if gpu or not (isinstance (self, _DFLASPSCF)):
             dm1s = np.dot (mo_cas, np.dot (casdm1s, moH_cas)).transpose (1,0,2)
             if not _full: dm1s = dm1s[0]+dm1s[1]
             return self.get_veff (dm = dm1s, spin_sep=_full)
@@ -2500,7 +2500,7 @@ class LASCINoSymm (casci.CASCI):
                                                full_matrices=True)[:4]
         return _shift_svals (l, sv, r, rng)
 
-    def dump_flags (self, verbose=None, _method_name='LASCI'):
+    def dump_flags (self, verbose=None, _method_name='LASPSCF'):
         log = lib.logger.new_logger (self, verbose)
         log.info ('')
         log.info ('******** %s flags ********', _method_name)
@@ -2609,11 +2609,11 @@ class LASCINoSymm (casci.CASCI):
     dump_chk = chkfile.dump_las
     load_chk = load_chk_ = chkfile.load_las_
 
-class LASCISymm (casci_symm.CASCI, LASCINoSymm):
+class LASPSCFSymm (casci_symm.CASCI, LASPSCFNoSymm):
 
     def __init__(self, mf, ncas, nelecas, ncore=None, spin_sub=None, wfnsym_sub=None, frozen=None,
                  **kwargs):
-        LASCINoSymm.__init__(self, mf, ncas, nelecas, ncore=ncore, spin_sub=spin_sub,
+        LASPSCFNoSymm.__init__(self, mf, ncas, nelecas, ncore=ncore, spin_sub=spin_sub,
                              frozen=frozen, **kwargs)
         if getattr (self.mol, 'groupname', None) in ('Dooh', 'Coov'):
             raise NotImplementedError ("LASSCF support for cylindrical point group {}".format (
@@ -2625,14 +2625,14 @@ class LASCISymm (casci_symm.CASCI, LASCINoSymm):
                 wfnsym = symm.irrep_name2id (self.mol.groupname, wfnsym)
             frag.fcisolvers[0].wfnsym = wfnsym
 
-    make_rdm1s = LASCINoSymm.make_rdm1s
-    make_rdm1 = LASCINoSymm.make_rdm1
-    get_veff = LASCINoSymm.get_veff
+    make_rdm1s = LASPSCFNoSymm.make_rdm1s
+    make_rdm1 = LASPSCFNoSymm.make_rdm1
+    get_veff = LASPSCFNoSymm.get_veff
     get_h1eff = get_h1las = h1e_for_las
-    dump_flags = LASCINoSymm.dump_flags
-    dump_spaces = LASCINoSymm.dump_spaces
-    check_sanity = LASCINoSymm.check_sanity
-    _ugg = lasci_sync.LASCISymm_UnitaryGroupGenerators
+    dump_flags = LASPSCFNoSymm.dump_flags
+    dump_spaces = LASPSCFNoSymm.dump_spaces
+    check_sanity = LASPSCFNoSymm.check_sanity
+    _ugg = laspscf_sync.LASPSCFSymm_UnitaryGroupGenerators
 
     @property
     def wfnsym (self):
@@ -2645,7 +2645,7 @@ class LASCISymm (casci_symm.CASCI, LASCINoSymm):
         return wfnsym
     @wfnsym.setter
     def wfnsym (self, ir):
-        raise RuntimeError (("Cannot assign the whole-system symmetry of a LASCI wave function. "
+        raise RuntimeError (("Cannot assign the whole-system symmetry of a LASPSCF wave function. "
                              "Address fciboxes[ifrag].fcisolvers[istate].wfnsym instead."))
 
     def kernel(self, mo_coeff=None, ci0=None, casdm0_fr=None, verbose=None, assert_no_dupes=False):
@@ -2655,11 +2655,11 @@ class LASCISymm (casci_symm.CASCI, LASCINoSymm):
             ci0 = self.ci
 
         # Initialize/overwrite mo_coeff.orbsym. Don't pass ci0 because it's not the right shape
-        lib.logger.info (self, ("LASCI lazy hack note: lines below reflect the point-group "
+        lib.logger.info (self, ("LASPSCF lazy hack note: lines below reflect the point-group "
                                 "symmetry of the whole molecule but not of the individual "
                                 "subspaces"))
         mo_coeff = self.mo_coeff = self.label_symmetry_(mo_coeff)
-        return LASCINoSymm.kernel(self, mo_coeff=mo_coeff, ci0=ci0,
+        return LASPSCFNoSymm.kernel(self, mo_coeff=mo_coeff, ci0=ci0,
             casdm0_fr=casdm0_fr, verbose=verbose, assert_no_dupes=assert_no_dupes)
 
     def canonicalize (self, mo_coeff=None, ci=None, casdm1fs=None, natorb_casdm1=None, veff=None,
@@ -2687,13 +2687,13 @@ class LASCISymm (casci_symm.CASCI, LASCINoSymm):
         mo_coeff = lib.tag_array (mo_coeff, orbsym=orbsym)
         return mo_coeff
         
-    @lib.with_doc(LASCINoSymm.localize_init_guess.__doc__)
+    @lib.with_doc(LASPSCFNoSymm.localize_init_guess.__doc__)
     def localize_init_guess (self, frags_atoms, mo_coeff=None, spin=None, lo_coeff=None, fock=None,
                              mo_occ=None, freeze_cas_spaces=False, smults_f=None, nelec_f=None):
         if mo_coeff is None:
             mo_coeff = self.mo_coeff
         mo_coeff = casci_symm.label_symmetry_(self, mo_coeff)
-        return LASCINoSymm.localize_init_guess (self, frags_atoms, mo_coeff=mo_coeff, spin=spin,
+        return LASPSCFNoSymm.localize_init_guess (self, frags_atoms, mo_coeff=mo_coeff, spin=spin,
             lo_coeff=lo_coeff, fock=fock, mo_occ=mo_occ, freeze_cas_spaces=freeze_cas_spaces,
             smults_f=smults_f, nelec_f=nelec_f)
 

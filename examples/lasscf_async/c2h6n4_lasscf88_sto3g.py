@@ -23,7 +23,7 @@ las_asyn = asyn.LASSCF (mf, (4,4), ((4,0),(0,4)), spin_sub=(5,5))
 las_asyn.max_cycle_macro = 50 # by default, all subproblems use this
 las_asyn.impurity_params['max_cycle_macro'] = 51 # all fragments
 las_asyn.impurity_params[1]['max_cycle_macro'] = 52 # second fragment only (has priority)
-las_asyn.relax_params['max_cycle_macro'] = 53 # "flas", the "LASCI step"
+las_asyn.relax_params['max_cycle_macro'] = 53 # "flas", the "LASPSCF step"
 # If you have more than two fragments, you can apply specific parameters to orbital relaxations
 # between specific pairs of fragments. Addressing specific fragment pairs has priority over
 # the global settings above.

@@ -23,7 +23,7 @@
 '''
 
 from mrh.my_dmet import localintegrals, qcdmethelper
-from mrh.my_pyscf.mcscf import lasci
+from mrh.my_pyscf.mcscf import laspscf
 import warnings
 import numpy as np
 from scipy import optimize, linalg
@@ -554,9 +554,9 @@ class dmet:
                 mol.build ()
                 self.lasci_log = mol.stdout
             frozen = np.arange (ncore, sum(ncas_sub)+ncore, dtype=np.int32) if self.oldLASSCF else None
-            self.las = lasci.LASCI (self.ints._scf, ncas_sub, nelecas_sub, spin_sub=spin_sub, wfnsym_sub=wfnsym_sub, frozen=frozen)
+            self.las = laspscf.LASPSCF (self.ints._scf, ncas_sub, nelecas_sub, spin_sub=spin_sub, wfnsym_sub=wfnsym_sub, frozen=frozen)
             self.las.conv_tol_grad = self.conv_tol_grad
-            print ("Time preparing LASCI object: {:.8f} wall, {:.8f} clock".format (time.time () - w0, time.process_time () - t0))
+            print ("Time preparing LASPSCF object: {:.8f} wall, {:.8f} clock".format (time.time () - w0, time.process_time () - t0))
 
 
         # Initial lasci cycle!
@@ -1458,13 +1458,13 @@ class dmet:
         w0, t0 = time.time (), time.process_time ()
         e_tot, _, ci_sub, _, _, h2eff_sub, veff = self.las.kernel (mo_coeff = ao2no, ci0 = ci0, casdm0_fr = casdm0_fr)
         if not self.las.converged:
-            raise RuntimeError ("LASCI SCF cycle not converged")
-        print ("LASCI module energy: {:.9f}".format (e_tot))
-        print ("Time in LASCI module: {:.8f} wall, {:.8f} clock".format (time.time () - w0, time.process_time () - t0))
+            raise RuntimeError ("LASPSCF SCF cycle not converged")
+        print ("LASPSCF module energy: {:.9f}".format (e_tot))
+        print ("Time in LASPSCF module: {:.8f} wall, {:.8f} clock".format (time.time () - w0, time.process_time () - t0))
         return self.las, h2eff_sub, veff
 
     def lasci_ (self, dm0=None, loc2wmas=None):
-        ''' Do LASCI and then also update the fragment and ints object '''
+        ''' Do LASPSCF and then also update the fragment and ints object '''
         las, h2eff_sub, veff = self.lasci (dm0=dm0, loc2wmas=loc2wmas)
         aoSloc = self.ints.ao_ovlp @ self.ints.ao2loc
         locSao = aoSloc.conjugate ().T
