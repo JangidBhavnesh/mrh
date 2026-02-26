@@ -1,6 +1,6 @@
 from pyscf import lib, symm
 from mrh.my_pyscf.fci.csfstring import ImpossibleCIvecError
-from mrh.my_pyscf.mcscf import _DFLASCI
+from mrh.my_pyscf.mcscf import _DFLASPSCF
 from scipy.sparse import linalg as sparse_linalg
 from scipy import linalg 
 import numpy as np
@@ -13,12 +13,12 @@ class MicroIterInstabilityException (Exception):
 
 def kernel (las, mo_coeff=None, ci0=None, casdm0_fr=None, conv_tol_grad=1e-4, 
         assert_no_dupes=False, verbose=lib.logger.NOTE):
-    from mrh.my_pyscf.mcscf.lasci import _eig_inactive_virtual
+    from mrh.my_pyscf.mcscf.laspscf import _eig_inactive_virtual
     if mo_coeff is None: mo_coeff = las.mo_coeff
     if assert_no_dupes: las.assert_no_duplicates ()
     log = lib.logger.new_logger(las, verbose)
     t0 = (lib.logger.process_clock(), lib.logger.perf_counter())
-    log.debug('Start LASCI')
+    log.debug('Start LASPSCF')
     gpu=las.use_gpu
     h2eff_sub = las.get_h2eff (mo_coeff)
     t1 = log.timer('integral transformation to LAS space', *t0)
@@ -52,7 +52,7 @@ def kernel (las, mo_coeff=None, ci0=None, casdm0_fr=None, conv_tol_grad=1e-4,
         casdm1s_sub = las.make_casdm1s_sub (ci=ci0)
         casdm1frs = las.states_make_casdm1s_sub (ci=ci0)
         veff = las.split_veff (veff, h2eff_sub, mo_coeff=mo_coeff, ci=ci0, casdm1s_sub=casdm1s_sub)
-    t1 = log.timer('LASCI initial get_veff', *t1)
+    t1 = log.timer('LASPSCF initial get_veff', *t1)
 
     ugg = None
     converged = False
@@ -62,8 +62,8 @@ def kernel (las, mo_coeff=None, ci0=None, casdm0_fr=None, conv_tol_grad=1e-4,
     for it in range (las.max_cycle_macro):
         e_cas, ci1 = ci_cycle (las, mo_coeff, ci1, veff, h2eff_sub, casdm1frs, log)
         if ugg is None: ugg = las.get_ugg (mo_coeff, ci1)
-        log.info ('LASCI subspace CI energies: {}'.format (e_cas))
-        t1 = log.timer ('LASCI ci_cycle', *t1)
+        log.info ('LASPSCF subspace CI energies: {}'.format (e_cas))
+        t1 = log.timer ('LASPSCF ci_cycle', *t1)
 
         veff = veff.sum (0)/2
         # Canonicalize inactive and virtual spaces to set many off-diagonal elements of the
@@ -78,11 +78,11 @@ def kernel (las, mo_coeff=None, ci0=None, casdm0_fr=None, conv_tol_grad=1e-4,
         h2eff_sub[:,:] = umat.conj ().T @ h2eff_sub
 
         casdm1s_new = las.make_casdm1s_sub (ci=ci1)
-        if not isinstance (las, _DFLASCI) or las.verbose > lib.logger.DEBUG:
+        if not isinstance (las, _DFLASPSCF) or las.verbose > lib.logger.DEBUG:
             #veff = las.get_veff (mo_coeff=mo_coeff, ci=ci1)
             veff_new = las.get_veff (dm = las.make_rdm1 (mo_coeff=mo_coeff, ci=ci1))
-            if not isinstance (las, _DFLASCI): veff = veff_new
-        if isinstance (las, _DFLASCI):
+            if not isinstance (las, _DFLASPSCF): veff = veff_new
+        if isinstance (las, _DFLASPSCF):
             dcasdm1s = [dm_new - dm_old for dm_new, dm_old in zip (casdm1s_new, casdm1s_sub)]
             veff += las.fast_veffa (dcasdm1s, h2eff_sub, mo_coeff=mo_coeff, ci=ci1) 
             if las.verbose > lib.logger.DEBUG:
@@ -91,7 +91,7 @@ def kernel (las, mo_coeff=None, ci0=None, casdm0_fr=None, conv_tol_grad=1e-4,
         veff = las.split_veff (veff, h2eff_sub, mo_coeff=mo_coeff, ci=ci1)
         casdm1s_sub = casdm1s_new
 
-        t1 = log.timer ('LASCI get_veff after ci', *t1)
+        t1 = log.timer ('LASPSCF get_veff after ci', *t1)
         H_op = las.get_hop (ugg=ugg, mo_coeff=mo_coeff, ci=ci1, h2eff_sub=h2eff_sub, veff=veff,
                             do_init_eri=False)
         g_vec = H_op.get_grad ()
@@ -110,7 +110,7 @@ def kernel (las, mo_coeff=None, ci0=None, casdm0_fr=None, conv_tol_grad=1e-4,
                 l = j + ugg.nvar_orb
                 log.debug ('GRADIENT IMPLEMENTATION TEST: |D g_ci({})| = %.15g'.format (isub), 
                            linalg.norm (g_ci_test[i:j] - g_vec[k:l]))
-            # TODO: figure out why this fails in intermediate combined lascis in lasscf_async
+            # TODO: figure out why this fails in intermediate combined laspscfs in lasscf_async
             err = linalg.norm (g_ci_test - g_vec[ugg.nvar_orb:])
             assert (err < 1e-5), '{}'.format (err)
         gx = H_op.get_gx ()
@@ -123,10 +123,10 @@ def kernel (las, mo_coeff=None, ci0=None, casdm0_fr=None, conv_tol_grad=1e-4,
         norm_xorb = linalg.norm (x0[:ugg.nvar_orb]) if ugg.nvar_orb else 0.0
         norm_xci = linalg.norm (x0[ugg.nvar_orb:]) if ugg.ncsf_sub.sum () else 0.0
         lib.logger.info (
-            las, 'LASCI macro %d : E = %.15g ; |g_int| = %.15g ; |g_ci| = %.15g ; |g_x| = %.15g',
+            las, 'LASPSCF macro %d : E = %.15g ; |g_int| = %.15g ; |g_ci| = %.15g ; |g_x| = %.15g',
             it, H_op.e_tot, norm_gorb, norm_gci, norm_gx)
         #log.info (
-        #    ('LASCI micro init : E = %.15g ; |g_orb| = %.15g ; |g_ci| = %.15g ; |x0_orb| = %.15g '
+        #    ('LASPSCF micro init : E = %.15g ; |g_orb| = %.15g ; |g_ci| = %.15g ; |x0_orb| = %.15g '
         #    '; |x0_ci| = %.15g'), H_op.e_tot, norm_gorb, norm_gci, norm_xorb, norm_xci)
         las.dump_chk (mo_coeff=mo_coeff, ci=ci1)
         if (((norm_gorb<conv_tol_grad and norm_gci<conv_tol_grad)
@@ -138,7 +138,7 @@ def kernel (las, mo_coeff=None, ci0=None, casdm0_fr=None, conv_tol_grad=1e-4,
             log.info('bPpj construction is bypassed in Hessian constructor')
         H_op._init_eri_() 
         # ^ This is down here to save time in case I am already converged at initialization
-        t1 = log.timer ('LASCI Hessian constructor', *t1)
+        t1 = log.timer ('LASPSCF Hessian constructor', *t1)
         microit = [0]
         last_x = [0]
         first_norm_x = [None]
@@ -160,11 +160,11 @@ def kernel (las, mo_coeff=None, ci0=None, casdm0_fr=None, conv_tol_grad=1e-4,
                        for x_rs in xci]
                 xscale = ugg.pack (xorb, xci)
                 Ecall = H_op.e_tot + xscale.dot (g_vec + (Hx/2))
-                log.info (('LASCI micro %d : E = %.15g ; |g_orb| = %.15g ; |g_ci| = %.15g ;'
+                log.info (('LASPSCF micro %d : E = %.15g ; |g_orb| = %.15g ; |g_ci| = %.15g ;'
                           '|x_orb| = %.15g ; |x_ci| = %.15g'), microit[0], Ecall, norm_gorb,
                           norm_gci, norm_xorb, norm_xci)
             else:
-                log.info ('LASCI micro %d : |x_orb| = %.15g ; |x_ci| = %.15g', microit[0],
+                log.info ('LASPSCF micro %d : |x_orb| = %.15g ; |x_ci| = %.15g', microit[0],
                           norm_xorb, norm_xci)
             if abs(x_max)>.5: # Nonphysical step vector element
                 if last_x[0] is 0:
@@ -183,24 +183,24 @@ def kernel (las, mo_coeff=None, ci0=None, casdm0_fr=None, conv_tol_grad=1e-4,
             x = sparse_linalg.cg (H_op, -g_vec, x0=x0, atol=my_tol,
                                   maxiter=las.max_cycle_micro, callback=my_callback,
                                   M=prec_op)[0]
-            t1 = log.timer ('LASCI {} microcycles'.format (microit[0]), *t1)
+            t1 = log.timer ('LASPSCF {} microcycles'.format (microit[0]), *t1)
             mo_coeff, ci1, h2eff_sub = H_op.update_mo_ci_eri (x, h2eff_sub)
-            t1 = log.timer ('LASCI Hessian update', *t1)
+            t1 = log.timer ('LASPSCF Hessian update', *t1)
 
             #veff = las.get_veff (mo_coeff=mo_coeff, ci=ci1)
             veff = las.get_veff (dm = las.make_rdm1 (mo_coeff=mo_coeff, ci=ci1))
             veff = las.split_veff (veff, h2eff_sub, mo_coeff=mo_coeff, ci=ci1)
-            t1 = log.timer ('LASCI get_veff after secondorder', *t1)
+            t1 = log.timer ('LASPSCF get_veff after secondorder', *t1)
         except MicroIterInstabilityException as e:
             log.info ('Unstable microiteration aborted: %s', str (e))
-            t1 = log.timer ('LASCI {} microcycles'.format (microit[0]), *t1)
+            t1 = log.timer ('LASPSCF {} microcycles'.format (microit[0]), *t1)
             x = last_x[0]
             for i in range (3): # Make up to 3 attempts to scale-down x if necessary
                 mo2, ci2, h2eff_sub2 = H_op.update_mo_ci_eri (x, h2eff_sub)
-                t1 = log.timer ('LASCI Hessian update', *t1)
+                t1 = log.timer ('LASPSCF Hessian update', *t1)
                 veff2 = las.get_veff (dm = las.make_rdm1 (mo_coeff=mo2, ci=ci2))
                 veff2 = las.split_veff (veff2, h2eff_sub2, mo_coeff=mo2, ci=ci2)
-                t1 = log.timer ('LASCI get_veff after secondorder', *t1)
+                t1 = log.timer ('LASPSCF get_veff after secondorder', *t1)
                 e2 = las.energy_nuc () + las.energy_elec (mo_coeff=mo2, ci=ci2, h2eff=h2eff_sub2,
                                                           veff=veff2)
                 if e2 < H_op.e_tot:
@@ -215,7 +215,7 @@ def kernel (las, mo_coeff=None, ci0=None, casdm0_fr=None, conv_tol_grad=1e-4,
         casdm1frs = las.states_make_casdm1s_sub (ci=ci1)
         casdm1s_sub = las.make_casdm1s_sub (ci=ci1)
 
-    t2 = log.timer ('LASCI {} macrocycles'.format (it), *t2)
+    t2 = log.timer ('LASPSCF {} macrocycles'.format (it), *t2)
 
     e_tot = las.energy_nuc () + las.energy_elec (mo_coeff=mo_coeff, ci=ci1, h2eff=h2eff_sub,
                                                  veff=veff)
@@ -241,21 +241,21 @@ def kernel (las, mo_coeff=None, ci0=None, casdm0_fr=None, conv_tol_grad=1e-4,
     # I need the true veff, with f^a_a and f^i_i spin-separated, in order to use the Hessian
     # Better to do it here with bmPu than in localintegrals
 
-    log.info ('LASCI %s after %d cycles', ('not converged', 'converged')[converged], it+1)
-    log.info ('LASCI E = %.15g ; |g_int| = %.15g ; |g_ci| = %.15g ; |g_ext| = %.15g', e_tot,
+    log.info ('LASPSCF %s after %d cycles', ('not converged', 'converged')[converged], it+1)
+    log.info ('LASPSCF E = %.15g ; |g_int| = %.15g ; |g_ci| = %.15g ; |g_ext| = %.15g', e_tot,
               norm_gorb, norm_gci, norm_gx)
-    t1 = log.timer ('LASCI wrap-up', *t1)
+    t1 = log.timer ('LASPSCF wrap-up', *t1)
 
     if las.canonicalization:
         mo_coeff, mo_energy, mo_occ, ci1, h2eff_sub = las.canonicalize (
             mo_coeff, ci1, veff=veff.sa, h2eff_sub=h2eff_sub)
-        t1 = log.timer ('LASCI canonicalization', *t1)
+        t1 = log.timer ('LASPSCF canonicalization', *t1)
     else:
         fock = mo_coeff.conjugate ().T @ las.get_fock (mo_coeff=mo_coeff, ci=ci1,
                                                        veff=veff.sa)
         mo_energy = (fock * mo_coeff).sum (0)
 
-    t0 = log.timer ('LASCI kernel function', *t0)
+    t0 = log.timer ('LASPSCF kernel function', *t0)
 
     las.dump_chk (mo_coeff=mo_coeff, ci=ci1)
 
@@ -286,9 +286,9 @@ def ci_cycle (las, mo, ci0, veff, h2eff_sub, casdm1frs, log):
             if np.issubdtype (orbsym.dtype, np.integer):
                 orbsym_io = np.asarray ([symm.irrep_id2name (las.mol.groupname, x)
                                          for x in orbsym])
-            log.info ("LASCI subspace {} with orbsyms {}".format (isub, orbsym_io))
+            log.info ("LASPSCF subspace {} with orbsyms {}".format (isub, orbsym_io))
         else:
-            log.info ("LASCI subspace {} with no orbsym information".format (isub))
+            log.info ("LASPSCF subspace {} with no orbsym information".format (isub))
         if log.verbose > lib.logger.DEBUG: 
          for state, solver in enumerate (fcibox.fcisolvers):
             wfnsym = getattr (solver, 'wfnsym', None)
@@ -297,7 +297,7 @@ def ci_cycle (las, mo, ci0, veff, h2eff_sub, casdm1frs, log):
                     wfnsym_str = wfnsym
                 else:
                     wfnsym_str = symm.irrep_id2name (las.mol.groupname, wfnsym)
-                log.debug1 ("LASCI subspace {} state {} with wfnsym {}".format (isub, state,
+                log.debug1 ("LASPSCF subspace {} state {} with wfnsym {}".format (isub, state,
                                                                                 wfnsym_str))
 
         if isub not in frozen_ci:
@@ -314,7 +314,7 @@ def ci_cycle (las, mo, ci0, veff, h2eff_sub, casdm1frs, log):
 
 def all_nonredundant_idx (nmo, ncore, ncas_sub):
     ''' Generate a index mask array addressing all nonredundant, lower-triangular elements of an
-    nmo-by-nmo orbital-rotation unitary generator amplitude matrix for a LASSCF or LASCI problem
+    nmo-by-nmo orbital-rotation unitary generator amplitude matrix for a LASSCF or LASPSCF problem
     with ncore inactive orbitals and len (ncas_sub) fragments with ncas_sub[i] active orbitals in
     the ith fragment:
 
@@ -342,10 +342,10 @@ def all_nonredundant_idx (nmo, ncore, ncas_sub):
     # active -> active
     return idx
 
-class LASCI_UnitaryGroupGenerators (object):
+class LASPSCF_UnitaryGroupGenerators (object):
     ''' Object for `pack'ing (for root-finding algorithms) and `unpack'ing (for direct
-    manipulation) the nonredundant variables ('unitary generator amplitudes') of a `LASCI' problem.
-    `LASCI' here means that the CAS is frozen relative to inactive or external orbitals, but active
+    manipulation) the nonredundant variables ('unitary generator amplitudes') of a `LASPSCF' problem.
+    `LASPSCF' here means that the CAS is frozen relative to inactive or external orbitals, but active
     orbitals from different fragments may rotate into one another, and inactive orbitals may rotate
     into virtual orbitals, and CI vectors may also evolve. Transforms between the nonredundant
     lower-triangular part ('x') of a skew-symmetric orbital rotation matrix ('kappa')
@@ -403,7 +403,7 @@ class LASCI_UnitaryGroupGenerators (object):
     def get_gx_idx (self):
         ''' Returns an index mask array identifying all nonredundant, nonfrozen orbital rotations
         which are not considered in the current phase of the phase of the problem:
-        active<->inactive and active<->virtual for the LASCI parent class; nothing (all elements
+        active<->inactive and active<->virtual for the LASPSCF parent class; nothing (all elements
         False) in the LASSCF child class. '''
         return np.logical_and (self.nfrz_orb_idx, np.logical_not (self.uniq_orb_idx))
 
@@ -491,8 +491,8 @@ class LASCI_UnitaryGroupGenerators (object):
     def nvar_tot (self):
         return self.nvar_orb + self.ncsf_sub.sum ()
 
-class LASCISymm_UnitaryGroupGenerators (LASCI_UnitaryGroupGenerators):
-    __doc__ = LASCI_UnitaryGroupGenerators.__doc__ + '''
+class LASPSCFSymm_UnitaryGroupGenerators (LASPSCF_UnitaryGroupGenerators):
+    __doc__ = LASPSCF_UnitaryGroupGenerators.__doc__ + '''
 
     Symmetry subclass forbids rotations between orbitals of different point groups or CSFs of
     other-than-specified point group -> sets many additional elements of nfrz_orb_idx and
@@ -510,7 +510,7 @@ class LASCISymm_UnitaryGroupGenerators (LASCI_UnitaryGroupGenerators):
         self._init_ci (las, mo_coeff, ci, orbsym)
     
     def _init_orb (self, las, mo_coeff, ci, orbsym):
-        LASCI_UnitaryGroupGenerators._init_orb (self, las, mo_coeff, ci)
+        LASPSCF_UnitaryGroupGenerators._init_orb (self, las, mo_coeff, ci)
         self.symm_forbid = (orbsym[:,None] ^ orbsym[None,:]).astype (np.bool_)
         self.uniq_orb_idx[self.symm_forbid] = False
         self.nfrz_orb_idx[self.symm_forbid] = False
@@ -533,8 +533,8 @@ class LASCISymm_UnitaryGroupGenerators (LASCI_UnitaryGroupGenerators):
             self.ci_transformers.append (tf_list)
 
 def _init_df_(h_op):
-    from mrh.my_pyscf.mcscf.lasci import _DFLASCI
-    if isinstance (h_op.las, _DFLASCI):
+    from mrh.my_pyscf.mcscf.laspscf import _DFLASPSCF
+    if isinstance (h_op.las, _DFLASPSCF):
         h_op.with_df = h_op.las.with_df
         if h_op.las.use_gpu:
            pass
@@ -543,13 +543,13 @@ def _init_df_(h_op):
                 compact=False))
 
 # TODO: local state-average generalization
-class LASCI_HessianOperator (sparse_linalg.LinearOperator):
-    ''' The Hessian-vector product for a `LASCI' energy minimization, implemented as a linear
-    operator from the scipy.sparse.linalg module. `LASCI' here means that the CAS is frozen
+class LASPSCF_HessianOperator (sparse_linalg.LinearOperator):
+    ''' The Hessian-vector product for a `LASPSCF' energy minimization, implemented as a linear
+    operator from the scipy.sparse.linalg module. `LASPSCF' here means that the CAS is frozen
     relative to inactive or external orbitals, but active orbitals from different fragments may
     rotate into one another, and inactive orbitals may rotate into virtual orbitals, and CI vectors
     may also evolve. Implements the get_grad (gradient of the energy), get_prec (preconditioner for
-    conjugate-gradient iteration), get_gx (gradient along non-`LASCI' degrees of freedom), and
+    conjugate-gradient iteration), get_gx (gradient along non-`LASPSCF' degrees of freedom), and
     update_mo_ci_eri (apply a shift vector `x' to MO coefficients and CI vectors) in addition to
     _matvec and _rmatvec. For a shift vector `x', in terms of attributes and methods of this class,
     the second-order power series for the total (state-averaged) electronic energy is
@@ -557,8 +557,8 @@ class LASCI_HessianOperator (sparse_linalg.LinearOperator):
     e = self.e_tot + np.dot (self.get_grad (), x) + (.5 * np.dot (self._matvec (x), x))
 
     Args:
-        las : instance of :class:`LASCINoSymm`
-        ugg : instance of :class:`LASCI_UnitaryGroupGenerators`
+        las : instance of :class:`LASPSCFNoSymm`
+        ugg : instance of :class:`LASPSCF_UnitaryGroupGenerators`
 
     Kwargs:
         mo_coeff : ndarray of shape (nao,nmo)
@@ -714,8 +714,8 @@ class LASCI_HessianOperator (sparse_linalg.LinearOperator):
         casdm1 = casdm1a + casdm1b
         moH_coeff = mo_coeff.conjugate ().T
         if veff is None:
-            from mrh.my_pyscf.mcscf.lasci import _DFLASCI 
-            if isinstance (las, _DFLASCI):
+            from mrh.my_pyscf.mcscf.laspscf import _DFLASPSCF 
+            if isinstance (las, _DFLASPSCF):
                 _init_df_(self)
                 # Can't use this module's get_veff because here I need to have f_aa and f_ii
                 # On the other hand, I know that dm1s spans only the occupied orbitals
@@ -945,13 +945,13 @@ class LASCI_HessianOperator (sparse_linalg.LinearOperator):
         dm1s_mo[:,ncore:nocc,ncore:nocc] += tdm1s_sa
         mo = self.mo_coeff
         moH = mo.conjugate ().T
-        t1 = lib.logger.timer (self.las, 'LASCI get_veff_Heff 1', *t0)
+        t1 = lib.logger.timer (self.las, 'LASPSCF get_veff_Heff 1', *t0)
         
         # Overall veff for gradient: the one and only jk call per microcycle that I will allow.
         veff_mo = self.get_veff (dm1s_mo=dm1s_mo)
-        t2 = lib.logger.timer (self.las, 'LASCI get_veff_Heff 2', *t1)
+        t2 = lib.logger.timer (self.las, 'LASPSCF get_veff_Heff 2', *t1)
         veff_mo = self.split_veff (veff_mo, dm1s_mo)
-        t3 = lib.logger.timer (self.las, 'LASCI get_veff_Heff 3', *t2)
+        t3 = lib.logger.timer (self.las, 'LASPSCF get_veff_Heff 3', *t2)
 
         # Core-orbital-effect only for individual CI problems
         odm1s_core = np.copy (odm1s)
@@ -968,7 +968,7 @@ class LASCI_HessianOperator (sparse_linalg.LinearOperator):
         veff_ci += veff_ci.transpose (0,2,1)
         veff_ci /= 2.0
         veff_ci += veff_mo[:,ncore:nocc,ncore:nocc]
-        t4 = lib.logger.timer (self.las, 'LASCI get_veff_Heff 4', *t3)
+        t4 = lib.logger.timer (self.las, 'LASPSCF get_veff_Heff 4', *t3)
         
         # SO, individual CI problems!
         # 1) There is NO constant term. Constant terms immediately drop out via the ugg defs!
@@ -994,13 +994,13 @@ class LASCI_HessianOperator (sparse_linalg.LinearOperator):
             #err_h1rs += err_h1rs[:,::-1] # ja + jb
             #err_h1rs -= np.tensordot (err_dm1rs, self.eri_cas, axes=((2,3),(0,3)))
             h1frs[isub][:,:,:,:] += err_h1rs[:,:,i:j,i:j]
-        t5 = lib.logger.timer (self.las, 'LASCI get_veff_Heff 5', *t4)
+        t5 = lib.logger.timer (self.las, 'LASPSCF get_veff_Heff 5', *t4)
         
         return veff_mo, h1frs
         
     def get_veff (self, dm1s_mo=None):
         '''THIS FUNCTION IS OVERWRITTEN WITH A CALL TO LAS.GET_VEFF IN THE LASSCF_O0 CLASS. IT IS
-        ONLY RELEVANT TO THE "LASCI" STEP OF THE OLDER, DEPRECATED, DMET-BASED ALGORITHM.
+        ONLY RELEVANT TO THE "LASPSCF" STEP OF THE OLDER, DEPRECATED, DMET-BASED ALGORITHM.
 
         Compute the effective potential from a 1-RDM in the MO basis (presumptively the first-order
         effective 1-RDM which is proportional to a step vector in MO and CI rotation coordinates).
@@ -1086,33 +1086,33 @@ class LASCI_HessianOperator (sparse_linalg.LinearOperator):
         extra_timer = log.timer if extra_timing else log.timer_debug1
         t0 = (lib.logger.process_clock(), lib.logger.perf_counter())
         kappa1, ci1 = self.ugg.unpack (x)
-        t1 = extra_timer ('LASCI sync Hessian operator 1: unpack', *t0)
+        t1 = extra_timer ('LASPSCF sync Hessian operator 1: unpack', *t0)
 
         # Effective density matrices, veffs, and overlaps from linear response
         odm1s = -np.dot (self.dm1s, kappa1)
         ocm2 = -np.dot (self.cascm2, kappa1[self.ncore:self.nocc])
         tdm1rs, tcm2 = self.make_tdm1s2c_sub (ci1)
-        t1 = extra_timer ('LASCI sync Hessian operator 2: effective density matrices', *t1)
+        t1 = extra_timer ('LASPSCF sync Hessian operator 2: effective density matrices', *t1)
         veff_prime, h1s_prime = self.get_veff_Heff (odm1s, tdm1rs)
-        t1 = extra_timer ('LASCI sync Hessian operator 3: effective potentials', *t1)
+        t1 = extra_timer ('LASPSCF sync Hessian operator 3: effective potentials', *t1)
 
         # Responses!
         kappa2 = self.orbital_response (kappa1, odm1s, ocm2, tdm1rs, tcm2, veff_prime)
-        t1 = extra_timer ('LASCI sync Hessian operator 4: (Hx)_orb', *t1)
+        t1 = extra_timer ('LASPSCF sync Hessian operator 4: (Hx)_orb', *t1)
         ci2 = self.ci_response_offdiag (kappa1, h1s_prime)
-        t1 = extra_timer ('LASCI sync Hessian operator 5: (Hx)_CI offdiag', *t1)
+        t1 = extra_timer ('LASPSCF sync Hessian operator 5: (Hx)_CI offdiag', *t1)
         ci2 = [[x+y for x,y in zip (xr, yr)] for xr, yr in zip (ci2, self.ci_response_diag (ci1))]
-        t1 = extra_timer ('LASCI sync Hessian operator 6: (Hx)_CI diag', *t1)
+        t1 = extra_timer ('LASPSCF sync Hessian operator 6: (Hx)_CI diag', *t1)
 
         # LEVEL SHIFT!!
         kappa3, ci3 = self.ugg.unpack (self.ah_level_shift * np.abs (x))
         kappa2 += kappa3
         ci2 = [[x+y for x,y in zip (xr, yr)] for xr, yr in zip (ci2, ci3)]
-        t1 = extra_timer ('LASCI sync Hessian operator 7: level shift', *t1)
+        t1 = extra_timer ('LASPSCF sync Hessian operator 7: level shift', *t1)
 
         Hx = self.ugg.pack (kappa2, ci2)
-        t1 = extra_timer ('LASCI sync Hessian operator 8: pack', *t1)
-        t0 = log.timer ('LASCI sync Hessian operator total', *t0)
+        t1 = extra_timer ('LASPSCF sync Hessian operator 8: pack', *t1)
+        t0 = log.timer ('LASPSCF sync Hessian operator total', *t0)
         return Hx
 
     _rmatvec = _matvec # Hessian is Hermitian in this context!
@@ -1285,14 +1285,14 @@ class LASCI_HessianOperator (sparse_linalg.LinearOperator):
         if ndeg_stable and (round (g_unst/b, 2) < 1):
             Hdiag[idx_unstable] = np.inf
             ndeg_unstable = ndeg - ndeg_stable
-            log.debug ('%d/%d d.o.f. masked in LASCI sync preconditioner (masked gradient = %g)',
+            log.debug ('%d/%d d.o.f. masked in LASPSCF sync preconditioner (masked gradient = %g)',
                        ndeg_unstable, ndeg, g_unst)
         else:
-            log.warn ('LASCI encountered an unmaskable instability; calculation may not converge')
+            log.warn ('LASPSCF encountered an unmaskable instability; calculation may not converge')
         def prec_op (x):
             t0 = (lib.logger.process_clock(), lib.logger.perf_counter())
             Mx = x/Hdiag
-            log.timer ('LASCI sync preconditioner call', *t0)
+            log.timer ('LASPSCF sync preconditioner call', *t0)
             return Mx
         return sparse_linalg.LinearOperator (self.shape,matvec=prec_op,dtype=self.dtype)
 

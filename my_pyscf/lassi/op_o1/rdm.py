@@ -573,7 +573,7 @@ def get_fdm1_maker (las, ci, nelec_frs, si, **kwargs):
     in a single rootspace. For unittesting purposes (make_sdm1 in sitools does the same thing)
 
     Args:
-        las : instance of :class:`LASCINoSymm`
+        las : instance of :class:`LASPSCFNoSymm`
         ci : list of list of ndarrays 
             Contains all CI vectors
         nelec_frs : ndarray of shape (nfrags,nroots,2)
@@ -624,7 +624,7 @@ def roots_trans_rdm12s (las, ci, nelec_frs, si_bra, si_ket, **kwargs):
     ''' Build spin-separated LASSI 1- and 2-body transition reduced density matrices
 
     Args:
-        las : instance of :class:`LASCINoSymm`
+        las : instance of :class:`LASPSCFNoSymm`
         ci : list of list of ndarrays
             Contains all CI vectors
         nelec_frs : ndarray of shape (nfrags,nroots,2)
@@ -727,7 +727,7 @@ def roots_make_rdm12s (las, ci, nelec_frs, si, **kwargs):
     ''' Build spin-separated LASSI 1- and 2-body reduced density matrices
 
     Args:
-        las : instance of :class:`LASCINoSymm`
+        las : instance of :class:`LASPSCFNoSymm`
         ci : list of list of ndarrays
             Contains all CI vectors
         nelec_frs : ndarray of shape (nfrags,nroots,2)

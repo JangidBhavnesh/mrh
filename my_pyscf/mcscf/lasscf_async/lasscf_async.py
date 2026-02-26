@@ -3,7 +3,7 @@ import numpy as np
 from scipy import linalg
 from pyscf import lib
 from pyscf.mcscf import mc1step
-from mrh.my_pyscf.mcscf import lasci, lasscf_sync_o0
+from mrh.my_pyscf.mcscf import laspscf, lasscf_sync_o0
 from mrh.my_pyscf.mcscf.lasscf_guess import interpret_frags_atoms
 from mrh.my_pyscf.mcscf.lasscf_async import keyframe, combine
 from mrh.my_pyscf.mcscf.lasscf_async.split import get_impurity_space_constructor
@@ -144,14 +144,14 @@ def get_grad (las, mo_coeff=None, ci=None, ugg=None, kf=None):
     '''Return energy gradient for orbital rotation and CI relaxation.
 
     Args:
-        las : instance of :class:`LASCINoSymm`
+        las : instance of :class:`LASPSCFNoSymm`
 
     Kwargs:
         mo_coeff : ndarray of shape (nao,nmo)
             Contains molecular orbitals
         ci : list (length=nfrags) of list (length=nroots) of ndarray
             Contains CI vectors
-        ugg : instance of :class:`LASCI_UnitaryGroupGenerators`
+        ugg : instance of :class:`LASPSCF_UnitaryGroupGenerators`
         kf : instance of :class:`LASKeyframe`
             Overrides mo_coeff and ci if provided and carries other intermediate
             quantities that may have been calculated in advance
@@ -189,7 +189,7 @@ class SortedIndexDict (dict):
         else:
             return dict.get (self, key)
 
-class LASSCFNoSymm (lasci.LASCINoSymm):
+class LASSCFNoSymm (laspscf.LASPSCFNoSymm):
     '''Extra attributes:
 
     frags_orbs : list of length nfrags of list of integers
@@ -199,14 +199,14 @@ class LASSCFNoSymm (lasci.LASCINoSymm):
         Use this to address, e.g., conv_tol_grad, max_cycle_macro, etc. of the impurity
         subproblems
     relax_params : dict
-        Key/value pairs are assigned as attributes to the active-active relaxation (``LASCI'')
+        Key/value pairs are assigned as attributes to the active-active relaxation (``LASPSCF'')
         subproblem, similar to impurity_params. Use this to, e.g., set a different max_cycle_macro
-        for the ``LASCI'' step.
+        for the ``LASPSCF'' step.
     combine_pair_max_frags : integer
         Maximum number of frags to simultaneously relax during the combine_pair step.
     '''
     def __init__(self, mf, ncas, nelecas, ncore=None, spin_sub=None, **kwargs):
-        lasci.LASCINoSymm.__init__(self, mf, ncas, nelecas, ncore=ncore, spin_sub=spin_sub,
+        laspscf.LASPSCFNoSymm.__init__(self, mf, ncas, nelecas, ncore=ncore, spin_sub=spin_sub,
                                    **kwargs)
         self.impurity_params = {}
         for i in range (self.nfrags):
@@ -285,7 +285,7 @@ class LASSCFNoSymm (lasci.LASCINoSymm):
                                                  frags_by_AOs=True, **kwargs) 
         return mo_coeff
     def dump_flags (self, verbose=None, _method_name='LASSCF'):
-        lasci.LASCINoSymm.dump_flags (self, verbose=verbose, _method_name=_method_name)
+        laspscf.LASPSCFNoSymm.dump_flags (self, verbose=verbose, _method_name=_method_name)
     def _finalize(self):
         log = lib.logger.new_logger (self, self.verbose)
         nroots_prt = len (self.e_states)
@@ -302,9 +302,9 @@ class LASSCFNoSymm (lasci.LASCINoSymm):
             log.info ("LASSCF energy = %.15g", self.e_tot)
         return
 
-class LASSCFSymm (lasci.LASCISymm):
+class LASSCFSymm (laspscf.LASPSCFSymm):
     def __init__(self, mf, ncas, nelecas, ncore=None, spin_sub=None, **kwargs):
-        lasci.LASCISymm.__init__(self, mf, ncas, nelecas, ncore=ncore, spin_sub=spin_sub, **kwargs)
+        laspscf.LASPSCFSymm.__init__(self, mf, ncas, nelecas, ncore=ncore, spin_sub=spin_sub, **kwargs)
         self.impurity_params = [{} for i in range (self.nfrags)]
         self.relax_params = {}
         keys = set (('frags_orbs','impurity_params','relax_params'))
@@ -335,7 +335,7 @@ def LASSCF (mf_or_mol, ncas_sub, nelecas_sub, **kwargs):
     else:
         las = LASSCFNoSymm (mf, ncas_sub, nelecas_sub, **kwargs)
     if getattr (mf, 'with_df', None):
-        las = lasci.density_fit (las, with_df = mf.with_df)
+        las = laspscf.density_fit (las, with_df = mf.with_df)
     return las
 
 if __name__=='__main__':

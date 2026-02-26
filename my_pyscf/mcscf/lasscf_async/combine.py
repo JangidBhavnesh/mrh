@@ -4,7 +4,7 @@ from scipy import linalg
 from pyscf import lib
 from pyscf.lo import orth
 from pyscf.scf.rohf import get_roothaan_fock
-from mrh.my_pyscf.mcscf import lasci, _DFLASCI
+from mrh.my_pyscf.mcscf import laspscf, _DFLASPSCF
 from mrh.my_pyscf.mcscf.lasscf_async import keyframe, crunch
 
 # TODO: symmetry
@@ -136,7 +136,7 @@ def relax (las, kf, freeze_inactive=False, unfrozen_frags=None):
         else:
             flas_stdout = las.stdout
     with flas_stdout_env (las, flas_stdout):
-        flas = lasci.LASCI (las._scf, las.ncas_sub, las.nelecas_sub)
+        flas = laspscf.LASPSCF (las._scf, las.ncas_sub, las.nelecas_sub)
         flas.__dict__.update (las.__dict__)
         flas.frozen = []
         flas.frozen_ci = frozen_frags
@@ -183,7 +183,7 @@ def select_aa_block (las, frags1, frags2, fock1, max_frags=None):
     gradient block with the largest norm
 
     Args:
-        las : object of :class:`LASCINoSymm`
+        las : object of :class:`LASPSCFNoSymm`
         frags1 : sequence of integers
         frags2 : sequence of integers
         fock1 : ndarray of shape (nmo,nmo)
@@ -255,7 +255,7 @@ def combine_pair (las, kf1, kf2, kf_ref=None):
     kf3 = orth_orb (las, [kf1, kf2], kf_ref=kf_ref)
     aa_frags = select_aa_block (las, kf1.frags, kf2.frags, kf3.fock1)
     #kf3 = relax (las, kf3, freeze_inactive=True, unfrozen_frags=(i,j))
-    pair = crunch.get_pair_lasci (las, tuple (aa_frags))
+    pair = crunch.get_pair_laspscf (las, tuple (aa_frags))
     pair._pull_keyframe_(kf3)
     if pair.conv_tol_grad == 'DEFAULT':
         # Default: scale down conv_tol_grad according to size of subproblem
@@ -271,7 +271,7 @@ def combine_o1_kappa_rigid (las, kf1, kf2, kf_ref):
     with respect to a third reference keyframe democratically
 
     Args:
-        las : object of :class:`LASCINoSymm`
+        las : object of :class:`LASPSCFNoSymm`
         kf1 : object of :class:`LASKeyframe`
         kf2 : object of :class:`LASKeyframe`
         kf_ref : object of :class:`LASKeyframe`
