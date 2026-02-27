@@ -225,7 +225,6 @@ def kernel_Davidson (sisolver, e0, h1, h2, norb_f, ci_fr, nelec_frs, smult_fr, d
     def h_op (x):
         return raw2orth (h_op_raw (orth2raw (x)))
     log.info ("LASSI E(const) = %15.10f", e0)
-    print ("right before davidson", nroots, flush=True)
     conv, e, x1 = lib.davidson1 (lambda xs: [h_op (x) for x in xs],
                                  x0, precond_op, nroots=nroots,
                                  verbose=davidson_log, max_cycle=max_cycle,
