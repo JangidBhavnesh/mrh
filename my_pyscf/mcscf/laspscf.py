@@ -1110,7 +1110,7 @@ class LASPSCFNoSymm (casci.CASCI):
         return self._hop (self, ugg, mo_coeff=mo_coeff, ci=ci, **kwargs)
     canonicalize = canonicalize
 
-    def _finalize(self):
+    def _finalize(self, method='LASPSCF'):
         log = lib.logger.new_logger (self, self.verbose)
         nroots_prt = len (self.e_states)
         if self.verbose <= lib.logger.INFO:
@@ -1119,11 +1119,11 @@ class LASPSCFNoSymm (casci.CASCI):
             log.info (("Printing a maximum of 100 state energies;"
                        " increase self.verbose to see them all"))
         if nroots_prt > 1:
-            log.info ("LASPSCF state-average energy = %.15g", self.e_tot)
+            log.info ("%s state-average energy = %.15g", method, self.e_tot)
             for i, e in enumerate (self.e_states[:nroots_prt]):
-                log.info ("LASPSCF state %d energy = %.15g", i, e)
+                log.info ("%s state %d energy = %.15g", method, i, e)
         else:
-            log.info ("LASPSCF energy = %.15g", self.e_tot)
+            log.info ("%s energy = %.15g", method, self.e_tot)
         return
 
 
@@ -2418,7 +2418,7 @@ class LASPSCFNoSymm (casci.CASCI):
             self.dump_chk ()
         elif getattr (self, 'chkfile', None) is not None:
             lib.logger.warn (self, 'orbitals changed; chkfile not dumped!')
-        self._finalize ()
+        self._finalize (method='LASCI')
         return self.converged, self.e_tot, self.e_states, self.e_cas, e_lexc, self.ci
 
     @lib.with_doc(run_lasci.__doc__)
