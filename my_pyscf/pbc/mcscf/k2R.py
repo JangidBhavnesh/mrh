@@ -129,6 +129,7 @@ def actmo_k2R(kmf, mo_coeff_guess, ncore, ncas, kpts, kmesh=None):
 
     print('Max imaginary part in act mo (R-space): ', cI_max.max())
     mo_phase = np.einsum('kum,kuv,vi->kmi', mo_coeff_k.conj(), skg, mo_coeff)
+
     return scell, phase, mo_coeff, mo_phase
 
 def actmo_R2k(kmf, mo_coeff_R, mo_phase, phase, kpts):
@@ -173,11 +174,12 @@ def get_mo_coeff_k2R(kmf, mo_coeff_guess, ncore, ncas, kmesh=None):
     # Sanity Check
     actshape = mo_coeff_k[0].shape
     assert all([mo.shape == actshape for mo in mo_coeff_k])
-    scell, phase = get_phase(cell, kpts, kmesh)
-
     E_g = np.hstack(mo_energy_k)
     C_k = np.asarray(mo_coeff_k)
     Nk, Nao, Nmo = C_k.shape
+
+    scell, phase = get_phase(cell, kpts, kmesh)
+
     NR = phase.shape[0]
 
     k_conj_groups = group_by_conj_pairs(cell, kpts, return_kpts_pairs=False)
@@ -201,9 +203,10 @@ def get_mo_coeff_k2R(kmf, mo_coeff_guess, ncore, ncas, kmesh=None):
     s_k = cell.pbc_intor('int1e_ovlp', kpts=kpts)
     s_k_g = np.einsum('kuv,Rk->kuRv', s_k, phase.conj()).reshape(Nk,Nao,NR*Nao)
     mo_phase = lib.einsum('kum,kuv,vi->kmi', C_k.conj(), s_k_g, mo_coeff_R)
-
+    
     return scell, phase, mo_coeff_R, mo_phase
 
 from pyscf.pbc.tools.k2gamma import to_supercell_ao_integrals
 
 convert_kao_to_rao = to_supercell_ao_integrals
+
