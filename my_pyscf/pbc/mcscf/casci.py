@@ -8,7 +8,7 @@ from pyscf import lib, mcscf, __config__
 from pyscf.lib import logger
 from pyscf.pbc import scf
 from pyscf.fci.addons import _unpack_nelec
- from pyscf.pbc.lib import kpts_helper
+from pyscf.pbc.lib import kpts_helper
 
 from mrh.my_pyscf.pbc import fci as pbc_fci
 from mrh.my_pyscf.pbc.mcscf.k2R import  get_mo_coeff_k2R
@@ -660,18 +660,23 @@ class PBCCASCI(PBCCASBASE):
 
         # Do the ao2mo transformation in k-space and then transform the eris to r-space.
         # Basically, I am using the same eris integrals computed for the cell object.
-        eri_k = np.zeros((nkpts, nkpts, nkpts, ncas,ncas, ncas,ncas), dtype=np.complex128)
-
-        for kp in range(nkpts):
-            for kq in range(nkpts):
-                for kr in range(nkpts):
-                    ks = kconserv[kp, kq, kr]
-                    mo_tuple = [mo_coeff[i][:, ncore:ncore+ncas] for i in (kp, kq, kr, ks)]
-                    kp_tuple = [kpts[i] for i in (kp, kq, kr, ks)]
-                    eri_pqrs = kmf.with_df.ao2mo(mo_tuple, kp_tuple, compact=False)
-                    eri_k[kp, kq, kr] = eri_pqrs.reshape(ncas,ncas, ncas,ncas)
-
+        # Initial version:
+        # eri_k = np.zeros((nkpts, nkpts, nkpts, ncas,ncas, ncas,ncas), dtype=np.complex128)
+        # for kp in range(nkpts):
+        #     for kq in range(nkpts):
+        #         for kr in range(nkpts):
+        #             ks = kconserv[kp, kq, kr]
+        #             mo_tuple = [mo_coeff[i][:, ncore:ncore+ncas] for i in (kp, kq, kr, ks)]
+        #             kp_tuple = [kpts[i] for i in (kp, kq, kr, ks)]
+        #             eri_pqrs = kmf.with_df.ao2mo(mo_tuple, kp_tuple, compact=False)
+        #             eri_k[kp, kq, kr] = eri_pqrs.reshape(ncas, ncas, ncas,ncas)
+        
+        # There is optimized version as well:
+        mo_cas_kpts = np.array([mo_coeff[i][:, ncore:ncore+ncas] for i in range(nkpts)])
+        eri_k = kmf.with_df.ao2mo_7d(mo_cas_kpts, kpts=kpts)
+        
         kconserv = kpts_helper.get_kconserv(kmf.cell, kmf.kpts)
+        
         mo_ks = mo_phase[kconserv]
         eris = np.einsum('auR,bvS,abcuvwt,cwT,abctU->RSTU',
                          mo_phase.conj(), mo_phase, eri_k, mo_phase.conj(), mo_ks, optimize=True)
