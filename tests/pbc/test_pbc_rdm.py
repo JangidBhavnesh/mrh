@@ -9,7 +9,7 @@ from pyscf.pbc import scf
 from pyscf.fci import direct_spin1
 from pyscf.tools import molden
 from pyscf.pbc.tools import k2gamma
-from mrh.my_pyscf.pbc.fci import direct_com_real
+from mrh.my_pyscf.pbc.fci import direct_spin1_cplx
 from mrh.my_pyscf.pbc.mcscf import avas
 from mrh.my_pyscf.pbc.mcscf.k2R import get_mo_coeff_k2R
 
@@ -116,7 +116,7 @@ def setUpModule():
     h2e = 0.5*(h2e + h2e.transpose(1, 0, 3, 2).conj())
     h2e = 0.5*(h2e + h2e.transpose(3, 2, 1, 0).conj())
     
-    fcisolver = direct_com_real.FCI()
+    fcisolver = direct_spin1_cplx.FCI()
     e_fci, ci = fcisolver.kernel(h1e, h2e, nkpts*ncas, (nkpts*nelecas[0], nkpts*nelecas[1]))
     e_casci_ref = e_fci + ecore
     
