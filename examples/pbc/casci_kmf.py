@@ -82,14 +82,13 @@ ncas, nelecas, mo_coeff = avas.kernel(kmf, ['C 2pz'], minao=cell.basis,
                                       threshold=0.01, canonicalize=True)[:3]
 
 # CASCI calculation.
-
 kmc = mcscf.CASCI(kmf, 2, (1,1))
 kmc.kernel(mo_coeff)
 
 # Print the molden file for the active space orbitals.
 from pyscf.tools import molden
 molden.from_mo(kmf.cell, f'PAchain.{nC}.molden', 
-               np.hstack([mo_coeff[k][:, kmc.ncore:kmc.ncore+kmf.ncas] for k in range(len(kpts))]).real ) 
+               np.hstack([mo_coeff[k][:, kmc.ncore:kmc.ncore+kmc.ncas] for k in range(len(kpts))]).real ) 
 
 # Spin-summed and spin-separated 1-RDMs in the AO basis.
 # dm1 = kmc.make_rdm1()
