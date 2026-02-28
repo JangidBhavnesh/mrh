@@ -62,7 +62,8 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
 
     for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
         k4 = kconserv(k1, k2, k3)
-        dm2_k = np.einsum('ip, jq, pqrs, kr, ls->ijkl', mo_phase[k1], mo_phase[k2], casdm2, mo_phase[k3], mo_phase[k4])
+        dm2_k = 1.0/nkpts * np.einsum('iP, jQ, PQRS, kR, lS->ijkl', 
+                                      mo_phase[k1].conj(), mo_phase[k2], casdm2, mo_phase[k3].conj(), mo_phase[k4])
         CASDM2_k[k1, k2, k3] = dm2_k
 
     jkcaa = np.zeros((nkpts, nocc, ncas), dtype=dtype)
@@ -167,8 +168,8 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
                 if not k4 == k:
                     pass
                 else:
-                    dm2_k = np.einsum('ip, jq, pqrs, kr, ls->ijkl', 
-                                      mo_phase[k1], mo_phase[k2], casdm2, mo_phase[k3], mo_phase[k4])
+                    dm2_k = 1.0/nkpts * np.einsum('iP, jQ, PQRS, kR, lS->ijkl', 
+                                      mo_phase[k1].conj(), mo_phase[k2], casdm2, mo_phase[k3].conj(), mo_phase[k4])
                     p1aa_k = lib.dot(u[k].conj().T, p1aa[k1, k2, k3].reshape(nmo, -1)).reshape(nmo, ncas, ncas, ncas)
                     paa1_k = lib.dot(u[k].conj().T, paa1[k1, k2, k3].reshape(nmo, -1)).reshape(nmo, ncas, ncas, ncas)
                     p1aa_k += paa1_k
