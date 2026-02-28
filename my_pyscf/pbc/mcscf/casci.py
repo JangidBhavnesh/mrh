@@ -678,6 +678,7 @@ class PBCCASCI(PBCCASBASE):
         kconserv = kpts_helper.get_kconserv(kmf.cell, kmf.kpts)
         
         mo_ks = mo_phase[kconserv]
+        # This einsum looks very scary but it is just the transformation of the eris from k-space mo to r-space mo.
         eris = np.einsum('auR,bvS,abcuvwt,cwT,abctU->RSTU',
                          mo_phase.conj(), mo_phase, eri_k, mo_phase.conj(), mo_ks, optimize=True)
         eris *= 1.0/nkpts
