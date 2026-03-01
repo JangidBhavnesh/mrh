@@ -40,32 +40,35 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
     dtype = casdm1.dtype
     ncasncas = ncas*ncas
     nmonmo = nmo*nmo
+    nkncas = nkpts*ncas
 
     kconserv = kpts_helper.get_kconserv(mc._scf.cell, mc._scf.kpts)
 
-    assert casdm1.shape == (nkpts*ncas, nkpts*ncas)
-    assert casdm2.shape == (nkpts*ncas, nkpts*ncas, nkpts*ncas, nkpts*ncas)
+    assert casdm1.shape == (nkncas, ) * 2
+    assert casdm2.shape == (nkncas, ) * 4
     assert casdm1.dtype == casdm2.dtype
-
+    
+    # First convert the casdm1 and casdm2 to k-space.
     # This is in MO basis
     dm1 = np.empty((nkpts, nmo, nmo), dtype=casdm1.dtype)
-    CASDM1_k = np.empty((nkpts, ncas, ncas), dtype=casdm1.dtype)
+    casdm1_kpts = np.empty((nkpts, ncas, ncas), dtype=casdm1.dtype)
     idx = np.arange(ncore)
     
     for k in range(nkpts):
         dm1[k][idx, idx] = 2.0
         casdm1_k = reduce(np.dot, (mo_phase[k], casdm1, mo_phase[k].conj().T))
         dm1[k][ncore:nocc, ncore:nocc] = casdm1_k
-        CASDM1_k[k] = casdm1_k
+        casdm1_kpts[k] = casdm1_k
     
-    CASDM2_k = np.empty((nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas), dtype=casdm1.dtype)
+    casdm2_kpts = np.empty((nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas), dtype=casdm1.dtype)
 
     for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
         k4 = kconserv(k1, k2, k3)
         dm2_k = 1.0/nkpts * np.einsum('iP, jQ, PQRS, kR, lS->ijkl', 
                                       mo_phase[k1].conj(), mo_phase[k2], casdm2, mo_phase[k3].conj(), mo_phase[k4])
-        CASDM2_k[k1, k2, k3] = dm2_k
+        casdm2_kpts[k1, k2, k3] = dm2_k
 
+    # Construct the potential
     jkcaa = np.zeros((nkpts, nocc, ncas), dtype=dtype)
     vhf_a = np.zeros((nkpts, nmo, nmo), dtype=dtype)
     g_dm2 = np.zeros((nkpts, nmo, ncas), dtype=dtype)
@@ -93,8 +96,8 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
 
         jbuf = eris.ppaa[k1, k2, k3]
         kbuf = eris.papa[k1, k2, k3]
-        dm1 = CASDM1_k[k4]
-        dm2 = CASDM2_k[k1, k2, k3]
+        dm1 = casdm1_kpts[k4]
+        dm2 = casdm2_kpts[k1, k2, k3]
 
         dm2t = (dm2.conj().transpose(1,2,0,3) + dm2.conj().transpose(0,2,1,3)).reshape(ncasncas, ncasncas)
         vhf_a[k4] += (np.einsum('iquv,uv->iq', jbuf, dm1)
@@ -121,7 +124,7 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
         vhf_ca[k] = eris.vhf_c[k] + vhf_a[k]
         h1e_mo[k] = reduce(np.dot, (mo_coeff[k].conj().T, hcore[k], mo_coeff[k]))
         g[k][:,:ncore] = 2.0 * (h1e_mo[k][:,:ncore] + vhf_ca[k][:,:ncore])
-        g[k][:,ncore:nocc] = np.dot(h1e_mo[k][:, ncore:nocc] + eris.vhf_c[k][:, ncore:nocc], CASDM1_k[k])
+        g[k][:,ncore:nocc] = np.dot(h1e_mo[k][:, ncore:nocc] + eris.vhf_c[k][:, ncore:nocc], casdm1_kpts[k])
         g[k][:,ncore:nocc] += g_dm2[k]
     
     hcore = None
@@ -182,8 +185,8 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
     hdiag = np.empty((nkpts, nmo, ncas), dtype=dtype)
     
     for k in range(nkpts):
-        temp = np.einsum('ii, jj->ij', h1e_mo[k], CASDM1_k[k])
-        temp -= h1e_mo[k] * CASDM1_k[k]
+        temp = np.einsum('ii, jj->ij', h1e_mo[k], casdm1_kpts[k])
+        temp -= h1e_mo[k] * casdm1_kpts[k]
         hdiag[k] = temp + temp.conj().T
         g_diag = g[k].diagonal()
         hdiag[k] -= g_diag + g_diag.reshape(-1, 1)
@@ -195,10 +198,10 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
         idx = np.arange(ncore)
         hdiag[k][idx, idx] -= 4.0 * v_diag[:ncore]
 
-        tmp = np.einsum('ii,jj->ij', eris.vhf_c[k], CASDM1_k[k])
+        tmp = np.einsum('ii,jj->ij', eris.vhf_c[k], casdm1_kpts[k])
         hdiag[k][:, ncore:nocc] += tmp
         hdiag[k][ncore:nocc, :] += tmp.conj().T
-        tmp = -eris.vhf_c[k][ncore:nocc,ncore:nocc] * CASDM1_k[k]
+        tmp = -eris.vhf_c[k][ncore:nocc,ncore:nocc] * casdm1_kpts[k]
         hdiag[k][ncore:nocc,ncore:nocc] += tmp + tmp.conj().T
         tmp = 6 * eris.k_pc[k] - 2 * eris.j_pc[k]
         hdiag[k][ncore:,:ncore] += tmp[ncore:]
