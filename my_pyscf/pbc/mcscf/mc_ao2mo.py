@@ -1,11 +1,17 @@
 import numpy as np
 from functools import reduce
 from pyscf import lib
+from pyscf.ao2mo import _ao2mo
 from pyscf.pbc.lib import kpts_helper
+from pyscf.pbc.df import df_ao2mo
+from pyscf.pbc.df.df import _load3c
+
+
+_mo_as_complex = df_ao2mo._mo_as_complex
+_conc_mos = df_ao2mo._conc_mos
 
 
 # The 2e integrals transformation to MO basis for the orbital optimization.mk
-
 
 def _do_ao2mo_direct(kcasscf, mo_kpts, nkpts, ncore, ncas, nmo, level=1):
     cell = kcasscf._scf.cell
@@ -44,10 +50,104 @@ def _do_ao2mo_direct(kcasscf, mo_kpts, nkpts, ncore, ncas, nmo, level=1):
         k_pc = None
     return ppaa, papa, j_pc, k_pc
 
+def get_nauxlist(mydf, kpts, nkpts):
+    nauxlist = {}
+    for k1 in range(nkpts):
+        for k2 in range(nkpts):
+            kpti_kptj = np.vstack((kpts[k1], kpts[k2]))
+            assert kpti_kptj.shape == (2, 3)
+            with _load3c(mydf._cderi, mydf._dataname, kpti_kptj) as j3c:
+                nauxlist[(k1,k2)] = j3c.shape[0]
+    return nauxlist
 
 def _do_ao2mo_disk(kcasscf, mo_kpts, nkpts, ncore, ncas, nmo, level=1):
-    ppaa = None
+    cell = kcasscf._scf.cell
+    kpts = kcasscf._scf.kpts
+    nkpts = kcasscf.nkpts
+    mydf = kcasscf._scf.with_df
+    nocc = ncore + ncas
+    dtype = mo_kpts[0].dtype
+
+    assert len(mo_kpts) == nkpts
+
+    erifile = lib.H5TmpFile()
+    erifile.require_group("ppaa") # Create the group for storing the ppaa integrals.
+    erifile.require_group("papa") # Create the group for storing the papa integrals.
+
+    log = lib.logger.Logger(kcasscf.stdout, kcasscf.verbose)
+    # Steps:
+    # 1. Loop over k1, k2 pairs and compute the ao2mo for these pairs, and save them on disk.
+    
+
+    mem_now = lib.current_memory()[0]
+    # I am not sure wheather the naoaux will be same for all k1, k2 pairs. 
+    # So I am taking the maximum naoaux among all pairs.
+    # naoaux = mydf.get_naoaux()
+    nauxlist = get_nauxlist(mydf, kpts, nkpts)
+    naoaux = max(nauxlist.values())
+    mem_required = naoaux * nmo * nmo * 16 / 1e6
+    if mem_now < 2.0 * mem_required:
+        raise MemoryError(f"Not enough memory for intermediate arrays for ao2mo transformation. \
+                          Required: {mem_required} MB, Current: {mem_now} MB.")
+    
+    compact = False # For complex integrals: I am using compact as of now to avoid any conj/sign issues.
+    fxpp = lib.H5TmpFile()
+    grp = fxpp.require_group("xpp") # Create the group for storing the Lpq integrals.
+    grp2 = fxpp.require_group("xpp_sign") # Create the group for storing sign of the Lpq integrals.
+
+    # Step-1
+    for k1 in range(nkpts):
+        for k2 in range(nkpts):
+            mo_coeffs = _mo_as_complex(mo_kpts[k1], mo_kpts[k2])
+            nij_pair, moij, ijslice = _conc_mos([mo_coeffs[0], mo_coeffs[1]])[1:]
+            kptij = np.vstack((kpts[k1], kpts[k2]))
+            naux = nauxlist[(k1, k2)]
+            for LpqR, LpqI, sign in mydf.sr_loop(kptij, mem_now, compact):
+                tao = []
+                ao_loc = None
+                zij = LpqR + 1j * LpqI
+                zij = _ao2mo.r_e2(LpqR, moij, ijslice, tao, ao_loc, out=zij)
+                # TODO: Learn whether I should store the 2D or 3D array for better I/O performance.
+                grp.create_dataset(f"{k1}_{k2}", data=zij.reshape(naux, nmo, nmo))
+                grp2.create_dataset(f"{k1}_{k2}", data=sign)
+
+    # TODO: use the blksize to loop over the nmo to reduce the memory footprint.           
+    # Step-2: Construct the papa integrals:
+    kconserv = kpts_helper.get_kconserv(cell, kpts)
+    # for k1 in range(nkpts):
+    #     for k2 in range(nkpts):
+    #         for k3 in range(nkpts):
+    for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
+        k4 = kconserv[k1, k2, k3]
+        papa = np.zeros((nmo*ncas, nmo*ncas), dtype=dtype)
+        # Read the Lpq integrals for the required pairs from disk.
+        zij_12 = grp[f"{k1}_{k2}"][:, :ncas][:] # Lpq
+        zkl_34 = grp[f"{k3}_{k4}"][:, :ncas][:] # Lkl
+        # Reshape 
+        zij_12 = zij_12.reshape(-1, nmo*ncas)
+        zkl_34 = zkl_34.reshape(-1, nmo*ncas)
+        sign = grp2[f"{k1}_{k2}"][:]
+        lib.dot(zij_12.T, zkl_34, sign, papa, 1)
+        erifile[f"papa/{k1}_{k2}_{k3}"] = papa.reshape(nmo, ncas, nmo, ncas)
+
     papa = None
+    
+    # Step-3: Construct the ppaa integrals:
+    for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
+        k4 = kconserv[k1, k2, k3]
+        ppaa = np.zeros((nmo*nmo, ncas*ncas), dtype=dtype)
+        zij_12 = grp[f"{k1}_{k2}"][:]
+        zkl_34 = grp[f"{k3}_{k4}"][:ncas, :ncas][:]
+        zij_12 = zij_12.reshape(-1, nmo*nmo)
+        zkl_34 = zkl_34.reshape(-1, ncas*ncas)
+        sign = grp2[f"{k1}_{k2}"][:]
+        lib.dot(zij_12.T, zkl_34, sign, ppaa, 1)
+        erifile[f"ppaa/{k1}_{k2}_{k3}"] = ppaa.reshape(nmo, nmo, ncas, ncas)
+
+    ppaa = None
+
+    log.debug1('Initializing disk for Lpq integrals.')
+
     if level == 1:
         j_pc = np.empty((nkpts, nmo, ncore), dtype=mo_kpts[0].dtype)
         k_pc = np.empty((nkpts, nmo, ncore), dtype=mo_kpts[0].dtype)
@@ -56,7 +156,9 @@ def _do_ao2mo_disk(kcasscf, mo_kpts, nkpts, ncore, ncas, nmo, level=1):
     else:
         j_pc = None
         k_pc = None
-    erifile = lib.H5TmpFile()
+
+    fxpp.close()
+
     return erifile, j_pc, k_pc
 
 def _mem_usage(nkpts, ncore, ncas, nmo):
