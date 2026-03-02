@@ -6,10 +6,8 @@ from pyscf.pbc.lib import kpts_helper
 from pyscf.pbc.df import df_ao2mo
 from pyscf.pbc.df.df import _load3c
 
-
 _mo_as_complex = df_ao2mo._mo_as_complex
 _conc_mos = df_ao2mo._conc_mos
-
 
 # The 2e integrals transformation to MO basis for the orbital optimization.mk
 
@@ -30,9 +28,9 @@ def _do_ao2mo_direct(kcasscf, mo_kpts, nkpts, ncore, ncas, nmo, level=1):
                 k4 = kconserv[k1, k2, k3]
                 mo_ppaa = [mo_kpts[k1], mo_kpts[k2], mo_kpts[k3][:, ncore:nocc], mo_kpts[k4][:, ncore:nocc]]
                 kp_tuple = [kpts[i] for i in (k1, k2, k3, k4)]
-                ppaa[k1, k2, k3] = mydf.ao2mo(mo_ppaa, kp_tuple, compact=False)
+                ppaa[k1, k2, k3] = mydf.ao2mo(mo_ppaa, kp_tuple, compact=False).reshape(nmo, nmo, ncas, ncas)
                 mo_paaa = [mo_kpts[k1], mo_kpts[k2][:, ncore:nocc], mo_kpts[k3], mo_kpts[k4][:, ncore:nocc]]
-                papa[k1, k2, k3] = mydf.ao2mo(mo_paaa, kp_tuple, compact=False)
+                papa[k1, k2, k3] = mydf.ao2mo(mo_paaa, kp_tuple, compact=False).reshape(nmo, ncas, nmo, ncas)
 
     # This is very naive implementation, would require a lot of optimization.
     if level == 1:
@@ -40,10 +38,10 @@ def _do_ao2mo_direct(kcasscf, mo_kpts, nkpts, ncore, ncas, nmo, level=1):
         k_pc = np.empty((nkpts, nmo, ncore), dtype=dtype)
         for k in range(nkpts):
             mo_ppaa = [mo_kpts[k], mo_kpts[k], mo_kpts[k][:, :ncore], mo_kpts[k][:, :ncore]]
-            temp = mydf.ao2mo(mo_ppaa, [kpts[k]]*4, compact=False)
+            temp = mydf.ao2mo(mo_ppaa, [kpts[k]]*4, compact=False).reshape(nmo, nmo, ncore, ncore)
             j_pc[k] = np.einsum('ppjj->pj', temp)
-            mo_papa = [mo_kpts[k], mo_kpts[k][:, :ncore], mo_kpts[k][:, ncore:nocc], mo_kpts[k][:, ncore:nocc]]
-            temp = mydf.ao2mo(mo_papa, [kpts[k]]*4, compact=False)
+            mo_papa = [mo_kpts[k], mo_kpts[k][:, :ncore], mo_kpts[k], mo_kpts[k][:, :ncore]]
+            temp = mydf.ao2mo(mo_papa, [kpts[k]]*4, compact=False).reshape(nmo, ncore, nmo, ncore)
             k_pc[k] = np.einsum('pjpj->pj', temp)
     else:
         j_pc = None
@@ -94,19 +92,19 @@ def _do_ao2mo_disk(kcasscf, mo_kpts, nkpts, ncore, ncas, nmo, level=1):
     fxpp = lib.H5TmpFile()
     grp = fxpp.require_group("xpp") # Create the group for storing the Lpq integrals.
     grp2 = fxpp.require_group("xpp_sign") # Create the group for storing sign of the Lpq integrals.
-
+    
     # Step-1
     for k1 in range(nkpts):
         for k2 in range(nkpts):
-            mo_coeffs = _mo_as_complex(mo_kpts[k1], mo_kpts[k2])
-            nij_pair, moij, ijslice = _conc_mos([mo_coeffs[0], mo_coeffs[1]])[1:]
+            mo_coeffs = _mo_as_complex([mo_kpts[k1], mo_kpts[k2]])
+            nij_pair, moij, ijslice = _conc_mos(mo_coeffs[0], mo_coeffs[1])[1:]
             kptij = np.vstack((kpts[k1], kpts[k2]))
             naux = nauxlist[(k1, k2)]
+            zij = None
             for LpqR, LpqI, sign in mydf.sr_loop(kptij, mem_now, compact):
                 tao = []
                 ao_loc = None
-                zij = LpqR + 1j * LpqI
-                zij = _ao2mo.r_e2(LpqR, moij, ijslice, tao, ao_loc, out=zij)
+                zij = _ao2mo.r_e2(LpqR + 1j * LpqI, moij, ijslice, tao, ao_loc, out=zij)
                 # TODO: Learn whether I should store the 2D or 3D array for better I/O performance.
                 grp.create_dataset(f"{k1}_{k2}", data=zij.reshape(naux, nmo, nmo))
                 grp2.create_dataset(f"{k1}_{k2}", data=sign)
@@ -121,12 +119,12 @@ def _do_ao2mo_disk(kcasscf, mo_kpts, nkpts, ncore, ncas, nmo, level=1):
         k4 = kconserv[k1, k2, k3]
         papa = np.zeros((nmo*ncas, nmo*ncas), dtype=dtype)
         # Read the Lpq integrals for the required pairs from disk.
-        zij_12 = grp[f"{k1}_{k2}"][:, :ncas][:] # Lpq
-        zkl_34 = grp[f"{k3}_{k4}"][:, :ncas][:] # Lkl
+        zij_12 = grp[f"{k1}_{k2}"][:, :, :ncas][()]
+        zkl_34 = grp[f"{k3}_{k4}"][:, :, :ncas][()]
         # Reshape 
         zij_12 = zij_12.reshape(-1, nmo*ncas)
         zkl_34 = zkl_34.reshape(-1, nmo*ncas)
-        sign = grp2[f"{k1}_{k2}"][:]
+        sign = grp2[f"{k1}_{k2}"][()]
         lib.dot(zij_12.T, zkl_34, sign, papa, 1)
         erifile[f"papa/{k1}_{k2}_{k3}"] = papa.reshape(nmo, ncas, nmo, ncas)
 
@@ -136,30 +134,31 @@ def _do_ao2mo_disk(kcasscf, mo_kpts, nkpts, ncore, ncas, nmo, level=1):
     for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
         k4 = kconserv[k1, k2, k3]
         ppaa = np.zeros((nmo*nmo, ncas*ncas), dtype=dtype)
-        zij_12 = grp[f"{k1}_{k2}"][:]
-        zkl_34 = grp[f"{k3}_{k4}"][:ncas, :ncas][:]
+        zij_12 = grp[f"{k1}_{k2}"][()]
+        zkl_34 = grp[f"{k3}_{k4}"][:, :ncas, :ncas][()] # Lkl for k3=k4
         zij_12 = zij_12.reshape(-1, nmo*nmo)
         zkl_34 = zkl_34.reshape(-1, ncas*ncas)
-        sign = grp2[f"{k1}_{k2}"][:]
+        sign = grp2[f"{k1}_{k2}"][()]
         lib.dot(zij_12.T, zkl_34, sign, ppaa, 1)
         erifile[f"ppaa/{k1}_{k2}_{k3}"] = ppaa.reshape(nmo, nmo, ncas, ncas)
 
     ppaa = None
 
-    log.debug1('Initializing disk for Lpq integrals.')
-
     if level == 1:
-        j_pc = np.empty((nkpts, nmo, ncore), dtype=mo_kpts[0].dtype)
-        k_pc = np.empty((nkpts, nmo, ncore), dtype=mo_kpts[0].dtype)
-        cell = kcasscf._scf.cell
-        kpts = kcasscf._scf.kpts
+        j_pc_kpts = np.empty((nkpts, nmo, ncore), dtype=dtype)
+        k_pc_kpts = np.empty((nkpts, nmo, ncore), dtype=dtype)
+        for k in range(nkpts):
+            zij = grp[f"{k}_{k}"][:]
+            bufd = np.einsum('pii->pi', zij)
+            j_pc_kpts[k] = np.einsum('pi,pj->ij', bufd, bufd[:,:ncore])
+            k_cp = np.einsum('kij,kij->ij', zij[:,:ncore], zij[:,:ncore])
+            k_pc_kpts[k] = k_cp.conj().T
     else:
-        j_pc = None
-        k_pc = None
-
+        j_pc_kpts = None
+        k_pc_kpts = None
+    
     fxpp.close()
-
-    return erifile, j_pc, k_pc
+    return erifile, j_pc_kpts, k_pc_kpts
 
 def _mem_usage(nkpts, ncore, ncas, nmo):
     basic = nkpts**3 * nmo**2 * ncas**2 * 16 / 1e6
@@ -181,12 +180,24 @@ class _ERIS:
         level: int (Default is 1)
             level-1: ppaa, papa, vhf, jpc and kpc
             level-2: Only ppaa, papa and vhf
-        '''
+    Saved Attributes:
+        ppaa: function
+            A function that takes k1, k2, k3 as input and returns the ppaa integrals for these k-points.
+        papa: function
+            A function that takes k1, k2, k3 as input and returns the papa integrals for these k-points.
+        j_pc: numpy array or None
+            The J contribution to the core Hamiltonian in MO basis. It is required for the orbital optimization step. It is only computed if level=1.
+        k_pc: numpy array or None
+            The K contribution to the core Hamiltonian in MO basis. It is required for the orbital optimization step. It is only computed if level=1.
+        vhf_c: numpy array
+            The VHF contribution to the core Hamiltonian in MO basis. It is required for the orbital optimization step.
+    '''
 
     def __init__(self, kcasscf, mo_kpts, method='direct', level=1):
         self.erifile = None
         self.ppaa_kpts = None
         self.papa_kpts = None
+
         cell = kcasscf._scf.cell
         kpts = kcasscf._scf.kpts
         ncore = kcasscf.ncore
@@ -244,3 +255,41 @@ class _ERIS:
 
     def get_papa(self, k1, k2, k3):
         return self._get("papa", k1, k2, k3)
+    
+
+
+if __name__ == "__main__":
+    from pyscf.pbc import gto, scf
+
+    cell = gto.Cell()
+    cell.a = np.eye(3)*3.5668
+    cell.atom = 'C 0 0 0'
+    cell.basis = 'CC-PVDZ'
+    cell.verbose = 4
+    cell.build()
+
+    kmesh = [1, 1, 2]
+    kpts = cell.make_kpts(kmesh)
+    
+    kmf = scf.KRHF(cell, kpts).density_fit()
+    kmf.exxdiv = None
+    kmf.kernel()
+    
+    # Dummy class to check the _ERIS class.
+    class _kCASSCF:
+        def __init__(self, kmf, ncas, nelecas):
+            self._scf = kmf
+            self.ncas = ncas
+            self.nelecas = nelecas
+            self.ncore = int(kmf.cell.nelectron - nelecas)
+            self.nkpts = len(kmf.kpts)
+            self.stdout = kmf.stdout
+            self.verbose = kmf.verbose
+            self.max_memory = kmf.max_memory
+    
+    kmc = _kCASSCF(kmf, ncas=2, nelecas=2)
+    mo_kpts = kmf.mo_coeff
+    eris = _ERIS(kmc, mo_kpts, method='disk', level=1)
+
+    eris2 = _ERIS(kmc, mo_kpts, method='direct', level=1)
+    
