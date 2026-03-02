@@ -8,6 +8,7 @@ from pyscf.pbc.df.df import _load3c
 
 _mo_as_complex = df_ao2mo._mo_as_complex
 _conc_mos = df_ao2mo._conc_mos
+logger = lib.logger
 
 # The 2e integrals transformation to MO basis for the orbital optimization.mk
 
@@ -19,19 +20,27 @@ def _do_ao2mo_direct(kcasscf, mo_kpts, nkpts, ncore, ncas, nmo, level=1):
     dtype = mo_kpts[0].dtype
     assert len(mo_kpts) == nkpts
 
+    log = lib.logger.Logger(kcasscf.stdout, kcasscf.verbose)
+    t1 = t0 = (logger.process_clock(), logger.perf_counter())
+
     ppaa = np.empty((nkpts, nkpts, nkpts, nmo, nmo, ncas, ncas), dtype=dtype)
     papa = np.empty((nkpts, nkpts, nkpts, nmo, ncas, nmo, ncas), dtype=dtype)
-    kconserv = kpts_helper.get_kconserv(cell, kpts)
-    for k1 in range(nkpts):
-        for k2 in range(nkpts):
-            for k3 in range(nkpts):
-                k4 = kconserv[k1, k2, k3]
-                mo_ppaa = [mo_kpts[k1], mo_kpts[k2], mo_kpts[k3][:, ncore:nocc], mo_kpts[k4][:, ncore:nocc]]
-                kp_tuple = [kpts[i] for i in (k1, k2, k3, k4)]
-                ppaa[k1, k2, k3] = mydf.ao2mo(mo_ppaa, kp_tuple, compact=False).reshape(nmo, nmo, ncas, ncas)
-                mo_paaa = [mo_kpts[k1], mo_kpts[k2][:, ncore:nocc], mo_kpts[k3], mo_kpts[k4][:, ncore:nocc]]
-                papa[k1, k2, k3] = mydf.ao2mo(mo_paaa, kp_tuple, compact=False).reshape(nmo, ncas, nmo, ncas)
 
+    kconserv = kpts_helper.get_kconserv(cell, kpts)
+    for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
+        k4 = kconserv[k1, k2, k3]
+        ppaa[k1, k2, k3] = mydf.ao2mo([mo_kpts[k1], mo_kpts[k2], mo_kpts[k3][:, ncore:nocc], mo_kpts[k4][:, ncore:nocc]],
+                          [kpts[i] for i in (k1, k2, k3, k4)], 
+                          compact=False).reshape(nmo, nmo, ncas, ncas)
+    t1 = log.timer('density fitting ao2mo ppaa', *t0)
+
+    for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
+        k4 = kconserv[k1, k2, k3]
+        papa[k1, k2, k3] = mydf.ao2mo([mo_kpts[k1], mo_kpts[k2][:, ncore:nocc], mo_kpts[k3], mo_kpts[k4][:, ncore:nocc]],
+                          [kpts[i] for i in (k1, k2, k3, k4)],
+                          compact=False).reshape(nmo, ncas, nmo, ncas)    
+    t2 = log.timer('density fitting ao2mo papa', *t1)
+    
     # This is very naive implementation, would require a lot of optimization.
     if level == 1:
         j_pc = np.empty((nkpts, nmo, ncore), dtype=dtype)
@@ -44,8 +53,8 @@ def _do_ao2mo_direct(kcasscf, mo_kpts, nkpts, ncore, ncas, nmo, level=1):
             temp = mydf.ao2mo(mo_papa, [kpts[k]]*4, compact=False).reshape(nmo, ncore, nmo, ncore)
             k_pc[k] = np.einsum('pjpj->pj', temp)
     else:
-        j_pc = None
-        k_pc = None
+        j_pc = k_pc = None
+    log.timer('density fitting ao2mo j_pc, k_pc', *t2)
     return ppaa, papa, j_pc, k_pc
 
 def get_nauxlist(mydf, kpts, nkpts):
@@ -260,12 +269,14 @@ class _ERIS:
 
 if __name__ == "__main__":
     from pyscf.pbc import gto, scf
+    # Timer level prints:
+    lib.logger.TIMER_LEVEL = lib.logger.INFO
 
     cell = gto.Cell()
     cell.a = np.eye(3)*3.5668
     cell.atom = 'C 0 0 0'
-    cell.basis = 'CC-PVDZ'
-    cell.verbose = 4
+    cell.basis = 'CC-PVQZ'
+    cell.verbose = lib.logger.TIMER_LEVEL
     cell.build()
 
     kmesh = [1, 1, 2]
@@ -289,6 +300,7 @@ if __name__ == "__main__":
     
     kmc = _kCASSCF(kmf, ncas=2, nelecas=2)
     mo_kpts = kmf.mo_coeff
+
     eris = _ERIS(kmc, mo_kpts, method='disk', level=1)
 
     eris2 = _ERIS(kmc, mo_kpts, method='direct', level=1)
