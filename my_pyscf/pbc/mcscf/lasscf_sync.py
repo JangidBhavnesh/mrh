@@ -8,11 +8,8 @@ from mrh.my_pyscf.mcscf import lasci
 class PBCLASSCFNoSym(lasci.LASCINoSymm):
     pass
 
-
 class _DFLASCI:
     pass
-
-
 
 def LASSCF(kmf, ncas_sub, nelecas_sub, **kwargs):
     '''
@@ -72,10 +69,8 @@ def LASSCF(kmf, ncas_sub, nelecas_sub, **kwargs):
             klas.__class__.__init__(self, scf, ncas_sub, nelecas_sub)
     
     new_las = DFLASCI (klas._scf, klas.ncas_sub, klas.nelecas_sub)
-    new_las.__dict__.update (klas.__dict__)
-    
+    new_las.__dict__.update (klas.__dict__)    
     return new_las
-
 
 if __name__ == "__main__":
     from pyscf import lib
