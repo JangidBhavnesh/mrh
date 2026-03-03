@@ -10,14 +10,18 @@ from pyscf.pbc.lib import kpts_helper
 from pyscf.mcscf.mc1step import max_stepsize_scheduler
 logger = lib.logger
 
+# Author: Bhavnesh Jangid
+
 '''
 I think these reference are utmost useful, if anyone is trying to implement the CASSCF.
-1.
-2.
-3.
-4.
-5.
-6.
+1. Chem Phy. 1980, 48, 157-173
+2. Ph. Scripta, 1980, 21, 323-327
+3. Theo Chem Acc 1997, 97, 88-95
+4. CPL 2017, 683, 291-299
+5. JCP 2019, 150, 194106
+6. JCP 2019, 152, 074102
+7. IJQC, 2009, 109, 2178-2190 (For DIIS)
+8. JCC. 2018, 40, 1463-1470 (For DIIS)
 '''
 
 '''
@@ -28,8 +32,44 @@ Steps
 
 def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
     '''
-    To solve the second order or quasi-second order CASSCF equations, we need to generate the gradient and the Hessian-vector product. I am generalizing pyscf/mcscf/mc1step.py to the k-point case.
+    To solve the second order or quasi-second order CASSCF equations, we need to generate the gradient and the Hessian-vector product. I am generalizing pyscf/mcscf/mc1step.py to the k-point case. 
     Note that the input args are different than the original gen_g_hop function.
+    PySCF implementation doesn't have the docstring, but I am writing one to make my life
+    easier.
+    args:
+        mc: casscf object
+            instance of the CASSCF class.
+        mo_coeff: list of np.ndarray (nkpts, nao, nmo)
+            List of the MO coefficients for each k-point.
+        mo_phase: list of np.ndarray (nkpts, nmo, nR)
+            List of the phase factors for transforming the mo_orb from k-to-r. This is used to transform the casdm1 and casdm2 to k-space.
+        u: list of np.ndarray (nkpts, nmo, nmo)
+            orbital rotation matrix for each k-point.
+        casdm1: np.ndarray (nkpts*ncas, nkpts*ncas)
+            1-RDM in the CAS space. This is in the MO basis.
+        casdm2: np.ndarray (nkpts*nkpts*nkpts*ncas*ncas, nkpts*nkpts*nkpts*ncas*ncas)
+            2-RDM in the CAS space. This is in the MO basis.
+        eris: ao2mo object for the casscf object.
+
+        Additionally, some other variables used in this functions are:
+        Note, ncore, ncas, nelecas is for the unit-cell not for the whole supercell.
+            ncas: int
+                Number of active space orbitals.
+            nelecas: tuple of int
+                Number of active space electrons. (nalpha, nbeta)
+            nkpts: int
+                Number of k-points.
+            ncore: int
+                Number of core orbitals.
+    returns:
+        g_orb: list of np.ndarray (nkpts, nmo, nmo)
+            Orbital gradient for each k-point.
+        gorb_update: function
+            Function to update the orbital gradient after the orbital rotation.
+        h_op: function
+            Function to compute the Hessian-vector product.
+        h_diag: np.ndarray (nkpts, nmo, ncas)
+            Diagonal of the Hessian matrix. This is used for preconditioning in the Davidson solver.
     '''
     ncas = mc.ncas
     nelecas = mc.nelecas
@@ -38,6 +78,7 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
     nocc = ncore + ncas
     nmo = mo_coeff[0].shape[1]
     dtype = casdm1.dtype
+
     ncasncas = ncas*ncas
     nmonmo = nmo*nmo
     nkncas = nkpts*ncas
@@ -49,7 +90,7 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
     assert casdm1.dtype == casdm2.dtype
     
     # First convert the casdm1 and casdm2 to k-space.
-    # This is in MO basis
+    # The constructed dm1 would be in MO basis.
     dm1 = np.empty((nkpts, nmo, nmo), dtype=casdm1.dtype)
     casdm1_kpts = np.empty((nkpts, ncas, ncas), dtype=casdm1.dtype)
     idx = np.arange(ncore)
@@ -80,19 +121,24 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
 
     for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
         k4 = kconserv[k1, k2, k3]
-        # I think we should not loop over nmo:
-        # First I made the without for loop version for the molecular case.
-        # vhf_a = np.einsum('iquv,uv->iq', ppaa, casdm1) 
-        # vhf_a -= 0.5*np.einsum('iuqv,uv->iq', papa, casdm1)
-        # slice = np.arange(nocc)
-        # temp = (6.0*papa[:nocc, :, :nocc, :] - 2.0*ppaa[:nocc, :nocc, :, :])[slice, :, slice, :]
-        # jkcaa = np.einsum('iuv,uv->iu', temp, casdm1)
-        # casdm2_mat = casdm2.reshape(ncas*ncas, ncas*ncas)
-        # _reshape = (nmo, nmo, ncas, ncas)
-        # jtmp_all = lib.dot(ppaa.reshape(nmo*nmo, ncas*ncas), casdm2_mat).reshape(_reshape)
-        # ktmp_all = lib.dot(papa.transpose(0,2,1,3).reshape(nmo*nmo, ncas*ncas), dm2tmp).reshape(_reshape)
-        # hdm2 = (ktmp_all + jtmp_all).transpose(0, 2, 1, 3)
-        # g_dm2 = np.einsum('iaav->iv', jtmp_all[:, ncore:nocc, :, :])
+        # I think we should not loop over nmo, because it will be solved for 
+        # a given k-point. To remove the loop over nmo, as done in the molecular
+        # code, I have first converted that code without for loop, matched it with loop.
+        # That code is:
+        # ppaa = eris.ppaa
+        # papa = eris.papa
+        # vhf_a = numpy.einsum('pquv,uv->pq', ppaa, casdm1)
+        # vhf_a -= 0.5*numpy.einsum('puqv,uv->pq', papa, casdm1)
+        # jtmp = lib.dot(ppaa.reshape(nmo*nmo,-1), casdm2.reshape(ncas*ncas,-1))
+        # jtmp = jtmp.reshape(nmo,nmo,ncas,ncas) # nmo, nmo, ncas, ncas
+        # ktmp = lib.dot(papa.transpose(0,2,1,3).reshape(nmo*nmo,-1), dm2tmp) # nmo, nmo, ncas, ncas
+        # hdm2 = (ktmp.reshape(nmo,nmo,ncas,ncas)+jtmp).transpose(0,2,1,3) # nmo, ncas, nmo, ncas
+        # g_dm2 = numpy.einsum('puuv->pv', jtmp[:, ncore:nocc])
+        # jkcaa  = 6.0 * numpy.einsum('iuiv,uv->iu', papa[:nocc, :, :nocc, :], casdm1)
+        # jkcaa -= 2.0 * numpy.einsum('iiuv,uv->iu',ppaa[:nocc, :nocc, :, :], casdm1)
+        # papa = ppaa = jtmp = ktmp = dm2tmp = None
+    
+
 
         jbuf = eris.ppaa[k1, k2, k3]
         kbuf = eris.papa[k1, k2, k3]
