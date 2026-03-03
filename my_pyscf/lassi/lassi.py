@@ -36,7 +36,7 @@ def ham_2q (las, mo_coeff, veff_c=None, h2eff_sub=None, soc=0):
     a LASSCF calculation.
 
     Args:
-        las : instance of :class:`LASCINoSymm`
+        las : instance of :class:`LASPSCFNoSymm`
         mo_coeff: ndarray of shape (nao,nmo)
             Contains MO coefficients
 
@@ -114,7 +114,7 @@ def las_symm_tuple (las, spaces=None, break_spin=False, break_symmetry=False, ve
     diagonal symmetry blocks.
 
     Args:
-        las : instance of :class:`LASCINoSymm`
+        las : instance of :class:`LASPSCFNoSymm`
 
     Kwargs:
         spaces : list of instances of :class:`SingleLASRootspace`
@@ -380,7 +380,7 @@ def make_stdm12s (las, ci=None, orbsym=None, soc=False, break_symmetry=False, sp
     ''' Evaluate <I|p'q|J> and <I|p'r'sq|J> where |I>, |J> are LAS states.
 
         Args:
-            las: LASCI object
+            las: LASPSCF object
 
         Kwargs:
             ci: list of list of ci vectors
@@ -508,7 +508,7 @@ def roots_trans_rdm12s (las, ci, si_bra, si_ket, orbsym=None, soc=None, break_sy
     '''Evaluate 1- and 2-electron reduced transition density matrices of LASSI states
 
         Args:
-            las: LASCI object
+            las: LASPSCF object
             ci: list of list of ci vectors
             si_bra: tagged ndarray of shape (nroots,nroots)
                Linear combination vectors defining LASSI states for the bra.
@@ -626,7 +626,7 @@ def roots_make_rdm12s (las, ci, si, orbsym=None, soc=None, break_symmetry=None,
     '''Evaluate 1- and 2-electron reduced density matrices of LASSI states
 
         Args:
-            las: LASCI object
+            las: LASPSCF object
             ci: list of list of ci vectors
             si: tagged ndarray of shape (nroots,nroots)
                Linear combination vectors defining LASSI states.
@@ -662,7 +662,7 @@ def root_trans_rdm12s (las, ci, si_bra, si_ket, state=0, orbsym=None, soc=None, 
     states.
 
         Args:
-            las: LASCI object
+            las: LASPSCF object
             ci: list of list of ci vectors
             si_bra: tagged ndarray of shape (nroots,nroots)
                Linear combination vectors defining LASSI states for the bra.
@@ -712,7 +712,7 @@ def root_make_rdm12s (las, ci, si, state=0, orbsym=None, soc=None, break_symmetr
     '''Evaluate 1- and 2-electron reduced density matrices of one single LASSI state
 
         Args:
-            las: LASCI object
+            las: LASPSCF object
             ci: list of list of ci vectors
             si: tagged ndarray of shape (nroots,nroots)
                Linear combination vectors defining LASSI states.
@@ -772,8 +772,8 @@ class LASSI(lib.StreamObject):
     '''
     def __init__(self, las, mo_coeff=None, ci=None, soc=False, break_symmetry=False, opt=1,
                  davidson_only=False, nroots_si=None, **kwargs):
-        from mrh.my_pyscf.mcscf.lasci import LASCINoSymm
-        if isinstance(las, LASCINoSymm): self._las = las
+        from mrh.my_pyscf.mcscf.laspscf import LASPSCFNoSymm
+        if isinstance(las, LASPSCFNoSymm): self._las = las
         else: raise RuntimeError("LASSI requires las instance")
         if mo_coeff is None: mo_coeff = las.mo_coeff
         if ci is None: ci = las.ci
@@ -857,17 +857,17 @@ class LASSI(lib.StreamObject):
 
     def get_nelec_frs (self, las=None):
         if las is None: las = self
-        from mrh.my_pyscf.mcscf.lasci import get_nelec_frs
+        from mrh.my_pyscf.mcscf.laspscf import get_nelec_frs
         return get_nelec_frs (las)
 
     def get_smult_fr (self, las=None):
         if las is None: las = self
-        from mrh.my_pyscf.mcscf.lasci import get_space_info
+        from mrh.my_pyscf.mcscf.laspscf import get_space_info
         return get_space_info (las)[2].T
 
     def get_sym_fr (self, las=None):
         if las is None: las = self
-        from mrh.my_pyscf.mcscf.lasci import get_sym_fr
+        from mrh.my_pyscf.mcscf.laspscf import get_sym_fr
         return get_sym_fr (las)
 
     def get_lroots (self, ci=None):
@@ -1131,9 +1131,9 @@ class LASSI(lib.StreamObject):
     def get_casscf_eris (self, mo_coeff=None):
         if mo_coeff is None: mo_coeff=self.mo_coeff
         las = self._las
-        from mrh.my_pyscf.mcscf import _DFLASCI
+        from mrh.my_pyscf.mcscf import _DFLASPSCF
         from pyscf.mcscf import mc_ao2mo, df
-        if isinstance (las, _DFLASCI):
+        if isinstance (las, _DFLASPSCF):
             eris = df._ERIS (las, mo_coeff, las.with_df)
         else:
             eris = mc_ao2mo._ERIS (las, mo_coeff, method='incore', level=2)

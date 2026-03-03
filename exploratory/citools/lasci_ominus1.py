@@ -18,7 +18,7 @@ from pyscf.fci import addons as fci_addons
 from itertools import product
 from mrh.exploratory.citools import fockspace, addons
 from mrh.exploratory.unitary_cc.uccsd_sym1 import get_uccs_op
-from mrh.my_pyscf.mcscf.lasci_sync import all_nonredundant_idx
+from mrh.my_pyscf.mcscf.laspscf_sync import all_nonredundant_idx
 from mrh.my_pyscf.fci import csf_solver
 from itertools import product
 
@@ -56,7 +56,7 @@ def kernel (fci, h1, h2, norb, nelec, norb_f=None, ci0_f=None,
     psi_options = {'gtol':     gtol,
                    'maxiter':  max_cycle,
                    'disp':     verbose>lib.logger.DEBUG}
-    log.info ('LASCI object has %d degrees of freedom', psi.nvar)
+    log.info ('LASPSCF object has %d degrees of freedom', psi.nvar)
     h = [ecore, h1, h2]
     psi_callback = psi.get_solver_callback (h)
     res = optimize.minimize (psi.e_de, psi.x, args=(h,), method='BFGS',
