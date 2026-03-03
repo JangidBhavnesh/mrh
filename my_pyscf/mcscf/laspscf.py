@@ -2456,8 +2456,10 @@ class LASPSCFNoSymm (casci.CASCI):
         if mo_occ is None: mo_occ = np.ones (mo_rspace.shape[1], dtype=int)
         if rngs is None: rngs = [None,None,None]
         mo_occ1 = []
+        mo_occ2 = []
         svals = []
         mo_rvecs = []
+        mo_rnull = []
         for m in np.unique (mo_occ):
             idx = (mo_occ==m)
             l, sv, r = self._svd1 (mo_lspace, mo_rspace[:,idx], s=s, rng=rngs[int(round(m))],
@@ -2467,15 +2469,19 @@ class LASPSCFNoSymm (casci.CASCI):
             svals.append (sv[:k])
             mo_rvecs.append (r[:,:k])
             mo_occ1.append (np.asarray ([m,]*k))
-        mo_rvecs = np.concatenate (mo_rvecs, axis=1)
+            if k < np.count_nonzero (idx):
+                assert (r.shape[1] == np.count_nonzero (idx))
+                mo_rnull.append (r[:,k:])
+                mo_occ2.append (np.asarray ([m,]*(np.count_nonzero (idx) - k)))
+        mo_rvecs = np.concatenate (mo_rvecs + mo_rnull, axis=1)
         svals = np.concatenate (svals)
-        mo_occ1 = np.concatenate (mo_occ1)
+        mo_occ1 = np.concatenate (mo_occ1 + mo_occ2)
         idx = np.argsort (-svals)
         svals = svals[idx]
-        mo_occ1 = mo_occ1[idx]
         k = len (idx)
+        mo_occ1[:k] = mo_occ1[:k][idx]
         mo_lvecs[:,:k] = mo_lvecs[:,:k][:,idx]
-        mo_rvecs = mo_rvecs[:,idx]
+        mo_rvecs[:,:k] = mo_rvecs[:,:k][:,idx]
         return mo_lvecs, svals, mo_rvecs, mo_occ1
 
     def _svd1 (self, mo_lspace, mo_rspace, s=None, rng=None, **kwargs):
@@ -2659,12 +2665,14 @@ class LASPSCFSymm (casci_symm.CASCI, LASPSCFNoSymm):
         ncore = self.ncore
         ncas_sub = self.ncas_sub
         nocc = ncore + sum (ncas_sub)
-        mo_coeff[:,:ncore] = symm.symmetrize_space (self.mol, mo_coeff[:,:ncore])
+        if ncore > 0:
+            mo_coeff[:,:ncore] = symm.symmetrize_space (self.mol, mo_coeff[:,:ncore])
         for isub, ncas in enumerate (ncas_sub):
             i = ncore + sum (ncas_sub[:isub])
             j = i + ncas
             mo_coeff[:,i:j] = symm.symmetrize_space (self.mol, mo_coeff[:,i:j])
-        mo_coeff[:,nocc:] = symm.symmetrize_space (self.mol, mo_coeff[:,nocc:])
+        if mo_coeff.shape[1] > nocc:
+            mo_coeff[:,nocc:] = symm.symmetrize_space (self.mol, mo_coeff[:,nocc:])
         orbsym = symm.label_orb_symm (self.mol, self.mol.irrep_id,
                                       self.mol.symm_orb, mo_coeff,
                                       s=self._scf.get_ovlp ())
@@ -2696,9 +2704,12 @@ class LASPSCFSymm (casci_symm.CASCI, LASPSCFNoSymm):
             rsymm = symm.label_orb_symm(self.mol, self.mol.irrep_id,
                 self.mol.symm_orb, mo_rspace, s=s)
         mo_occ1 = []
+        mo_occ2 = []
         svals = []
         mo_rvecs = []
+        mo_rnull = []
         rsymm1 = []
+        rsymm2 = []
         for m in np.unique (mo_occ):
             idx = (mo_occ==m)
             l, sv, r = self._svd1 (mo_lspace, mo_rspace[:,idx], lsymm, rsymm[idx], s=s, 
@@ -2708,19 +2719,24 @@ class LASPSCFSymm (casci_symm.CASCI, LASPSCFNoSymm):
             svals.append (sv[:k])
             mo_rvecs.append (r[:,:k])
             mo_occ1.append (np.asarray ([m,]*k))
-            rsymm1.append (r.orbsym)
-        mo_rvecs = np.concatenate (mo_rvecs, axis=1)
+            rsymm1.append (r.orbsym[:k].copy ())
+            if k < np.count_nonzero (idx):
+                assert (r.shape[1] == np.count_nonzero (idx))
+                mo_rnull.append (r[:,k:])
+                mo_occ2.append (np.asarray ([m,]*(np.count_nonzero (idx) - k)))
+                rsymm2.append (r.orbsym[k:].copy ())
+        mo_rvecs = np.concatenate (mo_rvecs + mo_rnull, axis=1)
         svals = np.concatenate (svals)
-        mo_occ1 = np.concatenate (mo_occ1)
+        mo_occ1 = np.concatenate (mo_occ1 + mo_occ2)
         idx = np.argsort (-svals)
-        svals = svals[idx]
-        mo_occ1 = mo_occ1[idx]
-        mo_rvecs = mo_rvecs[:,idx]
-        lsymm = mo_lvecs.orbsym
         k = len (idx)
+        svals = svals[idx]
+        mo_occ1[:k] = mo_occ1[:k][idx]
+        mo_rvecs[:,:k] = mo_rvecs[:,:k][:,idx]
+        lsymm = mo_lvecs.orbsym
         lsymm[:k] = lsymm[:k][idx]
         mo_lvecs[:,:k] = mo_lvecs[:,:k][:,idx]
-        mo_rvecs = lib.tag_array (mo_rvecs, orbsym=np.concatenate (rsymm1))
+        mo_rvecs = lib.tag_array (mo_rvecs, orbsym=np.concatenate (rsymm1 + rsymm2))
         mo_lvecs = lib.tag_array (mo_lvecs, orbsym=lsymm)
         return mo_lvecs, svals, mo_rvecs, mo_occ1
 
