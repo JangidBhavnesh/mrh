@@ -79,6 +79,8 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
     nmo = mo_coeff[0].shape[1]
     dtype = casdm1.dtype
 
+    kpts = mc._scf.kpts
+    
     ncasncas = ncas*ncas
     nmonmo = nmo*nmo
     nkncas = nkpts*ncas
@@ -119,56 +121,57 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
     sl = np.arange(nocc)
     reshape_ = (nmo, nmo, ncas, ncas)
 
-    for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
-        k4 = kconserv[k1, k2, k3]
-        # I think we should not loop over nmo, because it will be solved for 
-        # a given k-point. To remove the loop over nmo, as done in the molecular
-        # code, I have first converted that code without for loop, matched it with loop.
-        # That code is:
-        # ppaa = eris.ppaa
-        # papa = eris.papa
-        # vhf_a = numpy.einsum('pquv,uv->pq', ppaa, casdm1)
-        # vhf_a -= 0.5*numpy.einsum('puqv,uv->pq', papa, casdm1)
-        # jtmp = lib.dot(ppaa.reshape(nmo*nmo,-1), casdm2.reshape(ncas*ncas,-1))
-        # jtmp = jtmp.reshape(nmo,nmo,ncas,ncas) # nmo, nmo, ncas, ncas
-        # ktmp = lib.dot(papa.transpose(0,2,1,3).reshape(nmo*nmo,-1), dm2tmp) # nmo, nmo, ncas, ncas
-        # hdm2 = (ktmp.reshape(nmo,nmo,ncas,ncas)+jtmp).transpose(0,2,1,3) # nmo, ncas, nmo, ncas
-        # g_dm2 = numpy.einsum('puuv->pv', jtmp[:, ncore:nocc])
-        # jkcaa  = 6.0 * numpy.einsum('iuiv,uv->iu', papa[:nocc, :, :nocc, :], casdm1)
-        # jkcaa -= 2.0 * numpy.einsum('iiuv,uv->iu',ppaa[:nocc, :nocc, :, :], casdm1)
-        # papa = ppaa = jtmp = ktmp = dm2tmp = None
+    for k in range(nkpts):
+        for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
+            k4 = kconserv[k1, k2, k3]
+            if k != k4: continue
+            else:
+                # I think we should not loop over nmo, because it will be solved for 
+                # a given k-point. To remove the loop over nmo, as done in the molecular
+                # code, I have first converted that code without for loop, matched it with loop.
+                # That code is:
+                # ppaa = eris.ppaa
+                # papa = eris.papa
+                # vhf_a = numpy.einsum('pquv,uv->pq', ppaa, casdm1)
+                # vhf_a -= 0.5*numpy.einsum('puqv,uv->pq', papa, casdm1)
+                # jtmp = lib.dot(ppaa.reshape(nmo*nmo,-1), casdm2.reshape(ncas*ncas,-1))
+                # jtmp = jtmp.reshape(nmo,nmo,ncas,ncas) # nmo, nmo, ncas, ncas
+                # ktmp = lib.dot(papa.transpose(0,2,1,3).reshape(nmo*nmo,-1), dm2tmp) # nmo, nmo, ncas, ncas
+                # hdm2 = (ktmp.reshape(nmo,nmo,ncas,ncas)+jtmp).transpose(0,2,1,3) # nmo, ncas, nmo, ncas
+                # g_dm2 = numpy.einsum('puuv->pv', jtmp[:, ncore:nocc])
+                # jkcaa  = 6.0 * numpy.einsum('iuiv,uv->iu', papa[:nocc, :, :nocc, :], casdm1)
+                # jkcaa -= 2.0 * numpy.einsum('iiuv,uv->iu',ppaa[:nocc, :nocc, :, :], casdm1)
+                # papa = ppaa = jtmp = ktmp = dm2tmp = None
+                ppaa = eris.ppaa[k1, k2, k3]
+                papa = eris.papa[k1, k2, k3]
+                dm1 = casdm1_kpts[k4]
+                dm2 = casdm2_kpts[k1, k2, k3]
+                vhf_a[k4] = np.einsum('pquv,uv->pq', ppaa, casdm1)
+                vhf_a[k4] -= 0.5*np.einsum('puqv,uv->pq', papa, casdm1)
+                # TODO: Double check this conjugation..
+                #dm2t = (dm2.conj().transpose(1,2,0,3) + dm2.conj().transpose(0,2,1,3)).reshape(ncasncas, ncasncas)
+                dm2t = (dm2.transpose(1,2,0,3) + dm2.conj().transpose(0,2,1,3)).reshape(ncasncas, ncasncas)
+                dm2m = dm2.reshape(ncasncas, ncasncas)
+                jtmp = lib.dot(ppaa.reshape(nmonmo, ncasncas), dm2m).reshape(reshape_)
+                g_dm2[k4] += np.einsum('puuv->pv', jtmp[:, ncore:nocc, :, :])
+                ktmp = lib.dot(papa.conj().transpose(0,2,1,3).reshape(nmonmo, ncasncas), dm2t).reshape(reshape_)
+                hdm2[k1, k2, k3] = (ktmp + jtmp).conj().transpose(0, 2, 1, 3)
+                jkcaa[k4]  = 6.0 * np.einsum('iuiv,uv->iu', papa[:nocc, :, :nocc, :], casdm1)
+                jkcaa[k4] -= 2.0 * np.einsum('iiuv,uv->iu', ppaa[:nocc, :nocc, :, :], casdm1)
     
-
-
-        jbuf = eris.ppaa[k1, k2, k3]
-        kbuf = eris.papa[k1, k2, k3]
-        dm1 = casdm1_kpts[k4]
-        dm2 = casdm2_kpts[k1, k2, k3]
-
-        dm2t = (dm2.conj().transpose(1,2,0,3) + dm2.conj().transpose(0,2,1,3)).reshape(ncasncas, ncasncas)
-        vhf_a[k4] += (np.einsum('iquv,uv->iq', jbuf, dm1)
-                    - 0.5*np.einsum('iuqv,uv->iq', kbuf, dm1))
-
-        temp = (6.0*kbuf[:nocc, :, :nocc, :] - 2.0*jbuf[:nocc, :nocc, :, :])[sl, :, sl, :]
-        jkcaa[k4] += np.einsum('iuv,uv->iu', temp, dm1)
-
-        dm2m = dm2.reshape(ncasncas, ncasncas)
-        jtmp = lib.dot(jbuf.reshape(nmonmo, ncasncas), dm2m).reshape(reshape_)
-        g_dm2[k4] += np.einsum('iuuv->iv', jtmp[:, ncore:nocc, :, :])
-        
-        ktmp = lib.dot(kbuf.transpose(0,2,1,3).reshape(nmonmo, ncasncas), dm2t).reshape(reshape_)
-        hdm2[k1, k2, k3] = (ktmp + jtmp).transpose(0, 2, 1, 3)
+    ppaa = papa = jtmp = ktmp = temp = None
     
-    jbuf = kbuf = jtmp = ktmp = temp = None
-    
-    vhf_ca = np.empty_like(vhf_a)
-    h1e_mo = np.empty((nkpts, nmo, nmo), dtype=dtype)
+    vhf_ca = np.zeros_like(vhf_a, dtype=dtype)
+    h1e_mo = np.zeros_like((nkpts, nmo, nmo), dtype=dtype)
     g = np.zeros_like(h1e_mo, dtype=dtype)
 
-    hcore = mc.get_hcore()
+    hcore = mc.get_hcore() # (nkpts, nao, nao)
     for k in range(nkpts):
         vhf_ca[k] = eris.vhf_c[k] + vhf_a[k]
         h1e_mo[k] = reduce(np.dot, (mo_coeff[k].conj().T, hcore[k], mo_coeff[k]))
+    
+    # Gradients:
+    for k in range(nkpts):
         g[k][:,:ncore] = 2.0 * (h1e_mo[k][:,:ncore] + vhf_ca[k][:,:ncore])
         g[k][:,ncore:nocc] = np.dot(h1e_mo[k][:, ncore:nocc] + eris.vhf_c[k][:, ncore:nocc], casdm1_kpts[k])
         g[k][:,ncore:nocc] += g_dm2[k]
@@ -178,49 +181,51 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
     def gorb_update(u, fcivec):
         g = np.zeros_like((nkpts, nmo, nmo), dtype=dtype)
         casdm1, casdm2 = mc.fcisolver.make_rdm12(fcivec, nkpts*ncas, (nkpts*nelecas[0], nkpts*nelecas[1]))
+        
         for k in range(nkpts):
             uc = u[k][:, :ncore].copy()
             ua = u[k][:, ncore:nocc].copy()
-            rmat = u[k] - np.eye(nmo)
+            rmat = u[k] - np.eye(nmo, dtype=dtype)
             ra = rmat[:, ncore:nocc].copy()
             mo1 = np.dot(mo_coeff[k], u[k])
             mo_c = np.dot(mo_coeff[k], uc)
             mo_a = np.dot(mo_coeff[k], ua)
-            dm_c = np.dot(mo_c, mo_c.conj().T) * 2.0
+            dm_c = 2.0 * np.dot(mo_c, mo_c.conj().T)
             casdm1_k = reduce(np.dot, (mo_phase[k], casdm1, mo_phase[k].conj().T))
             dm_a = reduce(np.dot, (mo_a, casdm1_k, mo_a.conj().T))
-            vj, vk = mc.get_jk(mc._scf.cell, (dm_c, dm_a), kpts=mc._scf.kpts)
+            vj, vk = mc.get_jk(mc._scf.cell, (dm_c, dm_a), kpts=kpts[k])
             vhf_c = reduce(np.dot, (mo1.conj().T, vj[0]-vk[0]*0.5, mo1[:,:nocc]))
             vhf_a = reduce(np.dot, (mo1.conj().T, vj[1]-vk[1]*0.5, mo1[:,:nocc]))
-            h1e_mo1 = reduce(np.dot, (u[k].conj().T, h1e_mo[k], u[k][:,:nocc]))
-            
-            p1aa = np.empty((nkpts, nkpts, nkpts, nmo, ncas, ncasncas), dtype=dtype)
-            paa1 = np.empty((nkpts, nkpts, nkpts, nmo, ncasncas, ncas), dtype=dtype)
-            aaaa = np.empty((nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas), dtype=dtype)
+            h1e_mo1k = reduce(np.dot, (u[k].conj().T, h1e_mo[k], u[k][:,:nocc]))
+
+            g[k][:, :ncore] = 2.0 * (h1e_mo1k[:,:ncore] + vhf_c[k][:,:ncore] + vhf_a[k][:,:ncore])
+            g[k][:,ncore:nocc] = np.dot(h1e_mo1k[:,ncore:nocc] + vhf_c[k][:,ncore:nocc], casdm1_k)
+
+            # These objects would be insanly huge. Instead of creating them and storing, I think I should 
+            # compute them on the fly.
+            # p1aa = np.empty((nkpts, nkpts, nkpts, nmo, ncas, ncasncas), dtype=dtype)
+            # paa1 = np.empty((nkpts, nkpts, nkpts, nmo, ncasncas, ncas), dtype=dtype)
+            # aaaa = np.empty((nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas), dtype=dtype)
+            # for k1, k2, k3 in kpts_helper.loop(nkpts):
+            #     k4 = kconserv[k1, k2, k3]
+            #     if not k4 == k:
+            #         pass
+            #     else:
+            #         jbuf = eris.ppaa[k1, k2, k3]
+            #         kbuf = eris.papa[k1, k2, k3]
+            #         p1aa[k1, k2, k3] = np.einsum('pu, pqm-> qum', ua, jbuf.reshape(nmo, nmo, -1))
+            #         paa1[k1, k2, k3] = np.einsum('pqm, pu-> qmu', kbuf.conj().transpose(0,2,1,3).reshape(nmo, nmo, -1), ra)
+            #         aaaa[k1, k2, k3] = jbuf[ncore:nocc, ncore:nocc, :, :]
 
             for k1, k2, k3 in kpts_helper.loop(nkpts):
                 k4 = kconserv[k1, k2, k3]
-                if not k4 == k:
-                    pass
-                else:
-                    jbuf = eris.ppaa[k1, k2, k3]
-                    kbuf = eris.papa[k1, k2, k3]
-                    p1aa[k1, k2, k3] = np.einsum('pu, pqm-> qum', ua, jbuf.reshape(nmo, nmo, -1))
-                    paa1[k1, k2, k3] = np.einsum('pqm, pu-> qmu', kbuf.conj().transpose(0,2,1,3).reshape(nmo, nmo, -1), ra)
-                    aaaa[k1, k2, k3] = jbuf[ncore:nocc, ncore:nocc, :, :]
-                
-            g[k][:, :ncore] = 2.0 * (h1e_mo1[k][:,:ncore] + vhf_c[k][:,:ncore] + vhf_a[k][:,:ncore])
-            g[k][:,ncore:nocc] = np.dot(h1e_mo1[k][:,ncore:nocc] + vhf_c[k][:,ncore:nocc], casdm1_k)
-
-            for k1, k2, k3 in kpts_helper.loop(nkpts):
-                k4 = kconserv[k1, k2, k3]
-                if not k4 == k:
-                    pass
+                if k4 != k: continue
                 else:
                     dm2_k = 1.0/nkpts * np.einsum('iP, jQ, PQRS, kR, lS->ijkl', 
                                       mo_phase[k1].conj(), mo_phase[k2], casdm2, mo_phase[k3].conj(), mo_phase[k4])
-                    p1aa_k = lib.dot(u[k].conj().T, p1aa[k1, k2, k3].reshape(nmo, -1)).reshape(nmo, ncas, ncas, ncas)
-                    paa1_k = lib.dot(u[k].conj().T, paa1[k1, k2, k3].reshape(nmo, -1)).reshape(nmo, ncas, ncas, ncas)
+                    p1aa_k_temp = np.einsum('pu, pqm-> qum', ua, eris.ppaa[k1, k2, k3].reshape(nmo, nmo, -1))
+                    p1aa_k = lib.dot(u[k].conj().T, p1aa_k_temp.reshape(nmo, -1)).reshape(nmo, ncas, ncas, ncas)
+                    paa1_k = lib.dot(u[k].conj().T, eris.papa[k1, k2, k3].reshape(nmo, -1)).reshape(nmo, ncas, ncas, ncas)
                     p1aa_k += paa1_k
                     p1aa_k += paa1_k.conj().transpose(0, 1, 3, 2)
                     g[k][:, ncore:nocc] += np.einsum('puwx, wxuv->pv', p1aa_k, dm2_k)
