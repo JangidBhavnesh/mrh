@@ -1393,7 +1393,7 @@ def gen_contract_op_si_hdiag (las, h1, h2, ci, nelec_frs, smult_fr=None, disc_fr
     ''' Build Hamiltonian, spin-squared, and overlap matrices in LAS product state basis
 
     Args:
-        las : instance of :class:`LASCINoSymm`
+        las : instance of :class:`LASPSCFNoSymm`
         h1 : ndarray of size ncas**2
             Contains effective 1-electron Hamiltonian amplitudes in second quantization
         h2 : ndarray of size ncas**4

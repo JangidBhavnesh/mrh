@@ -31,5 +31,5 @@ class KnownValues (unittest.TestCase):
             self.assertLessEqual (las1.e_tot, las.e_states[i])
 
 if __name__ == "__main__":
-    print("Full Tests for LASSCF/LASCI miscellaneous")
+    print("Full Tests for LASSCF/LASPSCF miscellaneous")
     unittest.main()
