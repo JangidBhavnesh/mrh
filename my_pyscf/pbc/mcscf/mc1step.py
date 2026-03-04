@@ -241,21 +241,23 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
                     g[k][:, ncore:nocc] += np.einsum('puwx, wxuv->pv', p1aa, dm2_k)
         
         papa = ppaa = p1aa = paa1 = None
-        
+
         return [mc.pack_uniq_var(grd - grd.conj().T) for grd in g]    
     
     # Hessian diagonal
     hdiag = np.empty((nkpts, nmo, ncas), dtype=dtype)
     
     for k in range(nkpts):
-        temp = np.einsum('ii, jj->ij', h1e_mo[k], casdm1_kpts[k])
-        temp -= h1e_mo[k] * casdm1_kpts[k]
+        temp = np.einsum('ii, jj->ij', h1e_mo[k], dm1[k])
+        temp -= h1e_mo[k] * dm1[k]
         hdiag[k] = temp + temp.conj().T
+
         g_diag = g[k].diagonal()
         hdiag[k] -= g_diag + g_diag.reshape(-1, 1)
         idx = np.arange(nmo)
-        hdiag[k][idx, idx] += 2.0 * g_diag 
-        v_diag = vhf_ca[k].diagonal()
+        hdiag[k][idx, idx] += 2.0 * g_diag
+        # TODO: Check whether the vhf_ca is coming from gorb_update or above
+        v_diag = vhf_ca[k].diagonal() 
         hdiag[k][:, :ncore] += 2.0 * v_diag.reshape(-1, 1)
         hdiag[k][:ncore] += 2.0 * v_diag
         idx = np.arange(ncore)
@@ -264,11 +266,14 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
         tmp = np.einsum('ii,jj->ij', eris.vhf_c[k], casdm1_kpts[k])
         hdiag[k][:, ncore:nocc] += tmp
         hdiag[k][ncore:nocc, :] += tmp.conj().T
+
         tmp = -eris.vhf_c[k][ncore:nocc,ncore:nocc] * casdm1_kpts[k]
         hdiag[k][ncore:nocc,ncore:nocc] += tmp + tmp.conj().T
+
         tmp = 6 * eris.k_pc[k] - 2 * eris.j_pc[k]
         hdiag[k][ncore:,:ncore] += tmp[ncore:]
         hdiag[k][:ncore,ncore:] += tmp[ncore:].conj().T
+        
         hdiag[k][:nocc,ncore:nocc] -= jkcaa[k]
         hdiag[k][ncore:nocc,:nocc] -= jkcaa[k].conj().T
 
