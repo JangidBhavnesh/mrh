@@ -246,7 +246,6 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
     
     # Hessian diagonal
     hdiag = np.empty((nkpts, nmo, ncas), dtype=dtype)
-    
     for k in range(nkpts):
         temp = np.einsum('ii, jj->ij', h1e_mo[k], dm1[k])
         temp -= h1e_mo[k] * dm1[k]
@@ -273,7 +272,7 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
         tmp = 6 * eris.k_pc[k] - 2 * eris.j_pc[k]
         hdiag[k][ncore:,:ncore] += tmp[ncore:]
         hdiag[k][:ncore,ncore:] += tmp[ncore:].conj().T
-        
+
         hdiag[k][:nocc,ncore:nocc] -= jkcaa[k]
         hdiag[k][ncore:nocc,:nocc] -= jkcaa[k].conj().T
 
@@ -285,7 +284,7 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
                        for k in range(nkpts)])
     h_diag = np.hstack([mc.pack_uniq_var(hdiag[k]) 
                         for k in range(nkpts)])
-    
+    # Hessian operator
     def h_op(x):
         x2 = np.empty((nkpts, nmo, nmo), dtype=dtype)
         for k in range(nkpts):
@@ -293,7 +292,7 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
             x2[k] = reduce(np.dot, (h1e_mo[k], x1, dm1[k]))
             x2[k] -= 0.5 * np.dot((g[k] + g[k].conj().T), x1)
             x2[k][:ncore] += 2.0 * reduce(np.dot, (x1[:ncore,ncore:], vhf_ca[k][ncore:]))
-            x2[k][ncore:nocc] += reduce(np.dot, (casdm1, x1[ncore:nocc], eris.vhf_c[k]))
+            x2[k][ncore:nocc] += reduce(np.dot, (casdm1_kpts[k], x1[ncore:nocc], eris.vhf_c[k]))
 
             for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
                 k4 = kconserv[k1, k2, k3]
@@ -304,7 +303,7 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
             
             if ncore > 0:
                 # I need to modify this function: mc.update_jk_in_ah as well.
-                va, vc = mc.update_jk_in_ah(mo_coeff, x1, casdm1, eris)
+                va, vc = mc.update_jk_in_ah(mo_coeff, x1, casdm1_kpts[k], eris)
                 x2[k][ncore:nocc] += va
                 x2[k][:ncore,ncore:] += vc
             
