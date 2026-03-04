@@ -6,10 +6,10 @@ from functools import reduce
 from pyscf import lib, __config__
 from pyscf.soscf import ciah # Recently they have added the CIAH solver for PBC. Will use it!
 from pyscf.mcscf.addons import StateAverageMCSCFSolver
+from pyscf.mcscf.mc1step import CASSCF as molCASSCF
 from pyscf.pbc.lib import kpts_helper
-from pyscf.mcscf.mc1step import max_stepsize_scheduler
 
-
+from mrh.my_pyscf.pbc.mcscf import casci
 from mrh.my_pyscf.pbc.mcscf.mc_ao2mo import _ERIS
 
 logger = lib.logger
@@ -606,9 +606,7 @@ def kernel(casscf, mo_coeff, tol=1e-7, conv_tol_grad=None,
     log.timer('1-step CASSCF', *cput0)
     return conv, e_tot, e_cas, fcivec, mo, mo_energy
 
-from mrh.my_pyscf.pbc.mcscf import casci
-from pyscf.mcscf.mc1step import CASSCF as molCASSCF
-from pyscf import __config__
+
 # I needed to make a decision here, I could have inherited from bothe pbccasci and mc1step.CASSCF from
 # molecular code. But for safety reasons and my inexperience of OOP, I will just inherit from pbccasci.CASBase.
 # Look at the description of the attr and other functions.
