@@ -8,6 +8,10 @@ from pyscf.soscf import ciah # Recently they have added the CIAH solver for PBC.
 from pyscf.mcscf.addons import StateAverageMCSCFSolver
 from pyscf.pbc.lib import kpts_helper
 from pyscf.mcscf.mc1step import max_stepsize_scheduler
+
+
+from mrh.my_pyscf.pbc.mcscf.mc_ao2mo import _ERIS
+
 logger = lib.logger
 
 # Author: Bhavnesh Jangid
@@ -303,7 +307,7 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
             
             if ncore > 0:
                 # I need to modify this function: mc.update_jk_in_ah as well.
-                va, vc = mc.update_jk_in_ah(mo_coeff, x1, casdm1_kpts[k], eris)
+                va, vc = mc.update_jk_in_ah(mo_coeff[k], x1, casdm1_kpts[k], eris, kptindx)
                 x2[k][ncore:nocc] += va
                 x2[k][:ncore,ncore:] += vc
             
@@ -601,3 +605,291 @@ def kernel(casscf, mo_coeff, tol=1e-7, conv_tol_grad=None,
 
     log.timer('1-step CASSCF', *cput0)
     return conv, e_tot, e_cas, fcivec, mo, mo_energy
+
+from mrh.my_pyscf.pbc.mcscf import casci
+from pyscf.mcscf.mc1step import CASSCF as molCASSCF
+from pyscf import __config__
+# I needed to make a decision here, I could have inherited from bothe pbccasci and mc1step.CASSCF from
+# molecular code. But for safety reasons and my inexperience of OOP, I will just inherit from pbccasci.CASBase.
+# Look at the description of the attr and other functions.
+class PBCCASSCF(casci.CASBase):
+
+    __doc__ = molCASSCF.__doc__
+
+    # I ddin't want to do this, but I don't know if there is any other way to directly use these options
+    # from the molecular code.
+    max_stepsize = getattr(__config__, 'pbc_mcscf_mc1step_CASSCF_max_stepsize', .02)
+    max_cycle_macro = getattr(__config__, 'pbc_mcscf_mc1step_CASSCF_max_cycle_macro', 50)
+    max_cycle_micro = getattr(__config__, 'pbc_mcscf_mc1step_CASSCF_max_cycle_micro', 4)
+    conv_tol = getattr(__config__, 'pbc_mcscf_mc1step_CASSCF_conv_tol', 1e-7)
+    conv_tol_grad = getattr(__config__, 'pbc_mcscf_mc1step_CASSCF_conv_tol_grad', None)
+    ah_level_shift = getattr(__config__, 'pbc_mcscf_mc1step_CASSCF_ah_level_shift', 1e-8)
+    ah_conv_tol = getattr(__config__, 'pbc_mcscf_mc1step_CASSCF_ah_conv_tol', 1e-12)
+    ah_max_cycle = getattr(__config__, 'pbc_mcscf_mc1step_CASSCF_ah_max_cycle', 30)
+    ah_lindep = getattr(__config__, 'pbc_mcscf_mc1step_CASSCF_ah_lindep', 1e-14)
+    ah_start_tol = getattr(__config__, 'pbc_mcscf_mc1step_CASSCF_ah_start_tol', 2.5)
+    ah_start_cycle = getattr(__config__, 'pbc_mcscf_mc1step_CASSCF_ah_start_cycle', 3)
+    ah_grad_trust_region = getattr(__config__, 'pbc_mcscf_mc1step_CASSCF_ah_grad_trust_region', 3.0)
+
+    internal_rotation = getattr(__config__, 'pbc_mcscf_mc1step_CASSCF_internal_rotation', False)
+    ci_response_space = getattr(__config__, 'pbc_mcscf_mc1step_CASSCF_ci_response_space', 4)
+    ci_grad_trust_region = getattr(__config__, 'pbc_mcscf_mc1step_CASSCF_ci_grad_trust_region', 3.0)
+    with_dep4 = getattr(__config__, 'pbc_mcscf_mc1step_CASSCF_with_dep4', False)
+    chk_ci = getattr(__config__, 'pbc_mcscf_mc1step_CASSCF_chk_ci', False)
+    kf_interval = getattr(__config__, 'pbc_mcscf_mc1step_CASSCF_kf_interval', 4)
+    kf_trust_region = getattr(__config__, 'pbc_mcscf_mc1step_CASSCF_kf_trust_region', 3.0)
+
+    ao2mo_level = getattr(__config__, 'pbc_mcscf_mc1step_CASSCF_ao2mo_level', 2)
+    natorb = getattr(__config__, 'pbc_mcscf_mc1step_CASSCF_natorb', False)
+    canonicalization = getattr(__config__, 'pbc_mcscf_mc1step_CASSCF_canonicalization', True)
+    sorting_mo_energy = getattr(__config__, 'pbc_mcscf_mc1step_CASSCF_sorting_mo_energy', False)
+    scale_restoration = getattr(__config__, 'pbc_mcscf_mc1step_CASSCF_scale_restoration', 0.5)
+    small_rot_tol = getattr(__config__, 'pbc_mcscf_mc1step_CASSCF_small_rot_tol', 0.01)
+    extrasym = None
+    callback = None
+
+    _keys = {
+        'max_stepsize', 'max_cycle_macro', 'max_cycle_micro', 'conv_tol',
+        'conv_tol_grad', 'ah_level_shift', 'ah_conv_tol', 'ah_max_cycle',
+        'ah_lindep', 'ah_start_tol', 'ah_start_cycle', 'ah_grad_trust_region',
+        'internal_rotation', 'ci_response_space', 'ci_grad_trust_region',
+        'with_dep4', 'chk_ci', 'kf_interval', 'kf_trust_region',
+        'fcisolver_max_cycle', 'fcisolver_conv_tol', 'natorb',
+        'canonicalization', 'sorting_mo_energy', 'scale_restoration',
+        'small_rot_tol', 'extrasym', 'callback',
+        'frozen', 'chkfile', 'fcisolver', 'e_tot', 'e_cas', 'ci', 'mo_coeff',
+        'mo_energy', 'converged',
+    }
+
+    def __init__(self, kmf, ncas=0, nelecas=0, ncore=None, frozen=None):
+        casci.CASBase.__init__(self, kmf, ncas, nelecas, ncore)
+        self.frozen = frozen
+        self.chkfile = self._scf.chkfile
+        self.fcisolver.max_cycle = getattr(__config__,
+                                           'pbc_mcscf_mc1step_CASSCF_fcisolver_max_cycle', 50)
+        self.fcisolver.conv_tol = getattr(__config__,
+                                          'pbc_mcscf_mc1step_CASSCF_fcisolver_conv_tol', 1e-8)
+        self.e_tot = None
+        self.e_cas = None
+        self.ci = None
+        self.mo_coeff = self._scf.mo_coeff
+        self.mo_energy = self._scf.mo_energy
+        self.converged = False
+        self._max_stepsize = None
+
+        __getstate__, __setstate__ = lib.generate_pickle_methods(
+                excludes=('chkfile', 'callback'))
+        
+    
+    def dump_flags(self, verbose=None):
+        molCASSCF.dump_flags(self, verbose)
+        log = logger.new_logger(self, verbose)
+        log.info(' nkpts = %d', self.nkpts)
+        return self
+    
+    def kernel(self, mo_coeff=None, ci0=None, callback=None, _kern=kernel):
+        '''
+        args:
+            mo_coeff: list or np.ndarray (nkpts, nao, nmo) dtype=np.complex128
+                Initial guess of the MCSCF problem.
+            ci0: list of np.ndarray, dtype=np.complex128
+                Initial guess of the active space CI wavefunction coefficients.
+                Note: this should be equal to supercell ci0. which is equals
+                to the (nkpts*ncas, nkpts*nelecas[0], nkpts*nelecas[1])
+            callback: function, callback(locals()) 
+                Some function to called at the end of each micro/macro iteration.
+            _kern: function, don't change this.
+        returns:
+            Five elements, they are
+            e_tot: float (np.complex128)
+                total energy/nkpts
+            e_cas: float (np.complex128)
+                Active space CI energy/nkpts
+            ci: list of np.ndarray, dtype=np.complex128
+                Active space FCI wavefunction coefficients. Note this would be 
+                for the supercell, which is equals to the (nkpts*ncas, nkpts*nelecas[0], nkpts*nelecas[1])
+            mo_coeff: list of np.ndarray (nkpts, nao, nmo) dtype=np.complex128
+                MCSCF canonical orbital coefficients or Natural orbitals within the active space.
+                TODO: Natural orbitals are not yet implemented.
+            mo_energy: list of np.ndarray (nkpts, nmo) dtype=np.complex128
+                MCSCF canonical orbital energies (diagonal elements of general Fock matrix).
+        '''
+        if mo_coeff is None: mo_coeff = self.mo_coeff
+        else: self.mo_coeff = mo_coeff
+        if callback is None: callback = self.callback
+        if ci0 is None: ci0 = self.ci
+
+        self.check_sanity()
+        self.dump_flags()
+
+        self.converged, self.e_tot, self.e_cas, self.ci, \
+                self.mo_coeff, self.mo_energy = \
+                _kern(self, mo_coeff,
+                      tol=self.conv_tol, conv_tol_grad=self.conv_tol_grad,
+                      ci0=ci0, callback=callback, verbose=self.verbose)
+        # This would be for the total energy/nkpts
+        logger.note(self, 'CASSCF energy = %#.15g', self.e_tot)
+        self._finalize()
+        return self.e_tot, self.e_cas, self.ci, self.mo_coeff, self.mo_energy
+    
+    def mc1step(self, mo_coeff=None, ci0=None, callback=None):
+        return self.kernel(mo_coeff, ci0, callback)
+    
+    def mc2step(self, mo_coeff=None, ci0=None, callback=None):
+        raise NotImplementedError('MC2step is not implemented for PBC-CASSCF yet')
+    
+    casci = molCASSCF.casci
+    uniq_var_indices = molCASSCF.uniq_var_indices
+
+    def pack_uniq_var(self, mat):
+        nmo = self.mo_coeff[0].shape[1]
+        idx = self.uniq_var_indices(nmo, self.ncore, self.ncas, self.frozen)
+        return mat[idx]
+    
+    def unpack_uniq_var(self, v):
+        nmo = self.mo_coeff[0].shape[1]
+        idx = self.uniq_var_indices(nmo, self.ncore, self.ncas, self.frozen)
+        mat = np.zeros((nmo,nmo), dtype=self.mo_coeff[0].dtype)
+        mat[idx] = v
+        return mat - mat.conj().T
+    
+    def update_rotate_matrix(self, dx, u0=1):
+        dr = self.unpack_uniq_var(dx)
+        return np.dot(u0, expm(dr))
+    
+    gen_g_hop = gen_g_hop
+    rotate_orb_cc = rotate_orb_cc
+    get_h2eff = casci.CASCI.get_h2eff
+
+    def ao2mo(self, mo_coeff):
+        '''
+        In pbc_casscf, I don't have worry about two options as in the molecular code. The integrals
+        will always be transformed to the MO basis using DF only.
+        '''
+        eris = _ERIS(self, mo_coeff)
+        return eris
+    
+    def update_jk_in_ah(self, mo_k, r_k, casdm1_k, eris, kptindx):
+        cell = self._scf.cell
+        kpts = self.kpts
+        ncore = self.ncore
+        ncas = self.ncas
+        nocc = ncore + ncas
+        
+        # Make sure they are for a single k-point.
+        assert casdm1_k.ndim == 2
+        assert mo_k.ndim == 2
+
+        dm3 = reduce(np.dot, (mo_k[:,:ncore], r_k[:ncore,ncore:], mo_k[:,ncore:].conj().T))
+        dm3 = dm3 + dm3.conj().T
+        
+        dm4 = reduce(np.dot, (mo_k[:,ncore:nocc], casdm1_k, r_k[ncore:nocc], mo_k.T))
+        dm4 = dm4 + dm4.conj().T
+
+        vj, vk = self.get_jk(cell, (dm3, dm3*2.0 + dm4), kpts=kpts[kptindx])
+
+        va = reduce(np.dot, (casdm1_k, mo_k[:,ncore:nocc].conj().T, vj[0]*2-vk[0], mo_k))
+        vc = reduce(np.dot, (mo_k[:,:ncore].conj().T, vj[1]*2-vk[1], mo_k[:,ncore:]))
+
+        return va, vc
+    
+    def solve_approx_ci(self, **args):
+        # TODO: Implement this.
+        pass
+
+    def get_grad(self, *args, **kwargs):
+        # TODO: Implement this.
+        pass
+    
+    def _exact_paaa(self, mo_kpts, u_kpts, out=None):
+        # TODO: Implement this.
+        pass
+    
+    def dump_chk(self, **kwargs):
+        pass
+
+    def update_from_chk(self, chkfile=None):
+        raise NotImplementedError('update_from_chk is not implemented for PBC-CASSCF yet')
+    update = update_from_chk
+
+    def rotate_mo(self, mo_coeff, u, log=None):
+        '''Rotate orbitals with the given unitary matrix'''
+        nkpts = self.nkpts
+        for k in range(nkpts):
+            mo_coeff[k] = np.dot(mo_coeff[k], u[k])
+        if log is not None and log.verbose >= logger.DEBUG:
+            ncore = self.ncore
+            ncas = self.ncas
+            nocc = ncore + ncas
+            ovlp = self._scf.get_ovlp()
+            for k in range(nkpts):
+                log.debug('K-point %d', k)
+                s = reduce(np.dot, (mo_coeff[k][:,ncore:nocc].conj().T, ovlp[k],
+                                    self.mo_coeff[k][:,ncore:nocc]))
+                log.debug('Active space overlap to initial guess, SVD = %s',
+                        np.linalg.svd(s)[1])
+                log.debug('Active space overlap to last step, SVD = %s',
+                        np.linalg.svd(u[k][ncore:nocc,ncore:nocc])[1])
+        return mo_coeff
+    
+    def update_casdm(self, *args, **kwargs):
+        raise NotImplementedError('update_casdm is not implemented for PBC-CASSCF yet')
+    
+    micro_cycle_scheduler = molCASSCF.micro_cycle_scheduler
+    max_stepsize_scheduler = molCASSCF.max_stepsize_scheduler
+    ah_scheduler = molCASSCF.ah_scheduler
+
+    # I don't know, whether these can be imported or assigned directly from the molecular code
+    # but I will just write them here for now. I will try to import them later.
+
+    @property
+    def max_orb_stepsize(self):
+        return self.max_stepsize
+    
+    @max_orb_stepsize.setter
+    def max_orb_stepsize(self, x):
+        sys.stderr.write('WARN: Attribute "max_orb_stepsize" was replaced by "max_stepsize"\n')
+        self.max_stepsize = x
+    
+    @property
+    def ci_update_dep(self):
+        return self.with_dep4
+    
+    @ci_update_dep.setter
+    def ci_update_dep(self, x):
+        sys.stderr.write('WARN: Attribute .ci_update_dep was replaced by .with_dep4 since PySCF v1.1.\n')
+        self.with_dep4 = x == 4
+
+    grad_update_dep = ci_update_dep
+
+    @property
+    def max_cycle(self):
+        return self.max_cycle_macro
+    
+    @max_cycle.setter
+    def max_cycle(self, x):
+        self.max_cycle_macro = x
+
+    def approx_hessian(self, *args, **kwargs):
+        raise NotImplementedError('Approximate Hessian is not implemented for PBC-CASSCF yet')
+    
+    def nuc_grad_method(self, **args):
+        raise NotImplementedError('Nuclear gradient method is not implemented for PBC-CASSCF yet')
+    
+    def _state_average_nuc_grad_method (self, **args):
+        raise NotImplementedError('State-average nuclear gradient method is not implemented for PBC-CASSCF yet')
+    
+    def _state_average_nac_method(self):
+        raise NotImplementedError('State-average NAC method is not implemented for PBC-CASSCF yet')
+    
+    def newton(self):
+        raise NotImplementedError('Newton solver is not implemented for PBC-CASSCF yet')
+    
+    def reset(self, cell=None):
+        casci.CASBase.reset(self, cell=cell)
+        self._max_stepsize = None
+
+
+
+if __name__ == '__main__':
+    pass
