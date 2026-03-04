@@ -198,8 +198,8 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
             vhf_a = reduce(np.dot, (mo1.conj().T, vj[1]-vk[1]*0.5, mo1[:,:nocc]))
             h1e_mo1k = reduce(np.dot, (u[k].conj().T, h1e_mo[k], u[k][:,:nocc]))
 
-            g[k][:, :ncore] = 2.0 * (h1e_mo1k[:,:ncore] + vhf_c[k][:,:ncore] + vhf_a[k][:,:ncore])
-            g[k][:,ncore:nocc] = np.dot(h1e_mo1k[:,ncore:nocc] + vhf_c[k][:,ncore:nocc], casdm1_k)
+            g[k][:, :ncore] = 2.0 * (h1e_mo1k[:,:ncore] + vhf_c[:,:ncore] + vhf_a[:,:ncore])
+            g[k][:,ncore:nocc] = np.dot(h1e_mo1k[:,ncore:nocc] + vhf_c[:,ncore:nocc], casdm1_k)
 
             # These objects would be insanly huge. Instead of creating them and storing, I think I should 
             # compute them on the fly.
@@ -216,6 +216,15 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
             #         p1aa[k1, k2, k3] = np.einsum('pu, pqm-> qum', ua, jbuf.reshape(nmo, nmo, -1))
             #         paa1[k1, k2, k3] = np.einsum('pqm, pu-> qmu', kbuf.conj().transpose(0,2,1,3).reshape(nmo, nmo, -1), ra)
             #         aaaa[k1, k2, k3] = jbuf[ncore:nocc, ncore:nocc, :, :]
+            
+            # Benchmarked on the molecular code.
+            # ppaa = eris.ppaa
+            # papa = eris.papa
+            # p1aa = numpy.einsum('pr, tq, rquv-> ptuv', u.T, ua.T, ppaa)
+            # paa1 = numpy.einsum('pr, ruvq, qt -> puvt', u.T, papa.transpose(0,1,3,2), ra)
+            # p1aa += paa1
+            # p1aa += paa1.transpose(0,1,3,2)
+            # g[:, :ncore:nocc] += np.einsum('puwx, wxuv->pu', p1aa, casdm2)
 
             for k1, k2, k3 in kpts_helper.loop(nkpts):
                 k4 = kconserv[k1, k2, k3]
@@ -223,13 +232,16 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
                 else:
                     dm2_k = 1.0/nkpts * np.einsum('iP, jQ, PQRS, kR, lS->ijkl', 
                                       mo_phase[k1].conj(), mo_phase[k2], casdm2, mo_phase[k3].conj(), mo_phase[k4])
-                    p1aa_k_temp = np.einsum('pu, pqm-> qum', ua, eris.ppaa[k1, k2, k3].reshape(nmo, nmo, -1))
-                    p1aa_k = lib.dot(u[k].conj().T, p1aa_k_temp.reshape(nmo, -1)).reshape(nmo, ncas, ncas, ncas)
-                    paa1_k = lib.dot(u[k].conj().T, eris.papa[k1, k2, k3].reshape(nmo, -1)).reshape(nmo, ncas, ncas, ncas)
-                    p1aa_k += paa1_k
-                    p1aa_k += paa1_k.conj().transpose(0, 1, 3, 2)
-                    g[k][:, ncore:nocc] += np.einsum('puwx, wxuv->pv', p1aa_k, dm2_k)
-
+                    ppaa = eris.ppaa[k1, k2, k3]
+                    papa = eris.papa[k1, k2, k3]
+                    p1aa = np.einsum('pr, tq, rquv-> ptuv', u[k].conj().T, ua.conj().T, ppaa)
+                    paa1 = np.einsum('pr, ruvq, qt -> puvt', u[k].conj().T, papa.conj().transpose(0,1,3,2), ra)
+                    p1aa += paa1
+                    p1aa += paa1.conj().transpose(0,1,3,2)
+                    g[k][:, ncore:nocc] += np.einsum('puwx, wxuv->pv', p1aa, dm2_k)
+        
+        papa = ppaa = p1aa = paa1 = None
+        
         return [mc.pack_uniq_var(grd - grd.conj().T) for grd in g]    
     
     # Hessian diagonal
