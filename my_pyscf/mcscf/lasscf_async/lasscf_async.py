@@ -286,7 +286,8 @@ class LASSCFNoSymm (laspscf.LASPSCFNoSymm):
         return mo_coeff
     def dump_flags (self, verbose=None, _method_name='LASSCF'):
         laspscf.LASPSCFNoSymm.dump_flags (self, verbose=verbose, _method_name=_method_name)
-    def _finalize(self):
+
+    def _finalize(self, method='LASSCF'):
         log = lib.logger.new_logger (self, self.verbose)
         nroots_prt = len (self.e_states)
         if self.verbose <= lib.logger.INFO:
@@ -295,11 +296,11 @@ class LASSCFNoSymm (laspscf.LASPSCFNoSymm):
             log.info (("Printing a maximum of 100 state energies;"
                        " increase self.verbose to see them all"))
         if nroots_prt > 1:
-            log.info ("LASSCF state-average energy = %.15g", self.e_tot)
+            log.info ("%s state-average energy = %.15g", method, self.e_tot)
             for i, e in enumerate (self.e_states):
-                log.info ("LASSCF state %d energy = %.15g", i, e)
+                log.info ("%s state %d energy = %.15g", method, i, e)
         else:
-            log.info ("LASSCF energy = %.15g", self.e_tot)
+            log.info ("%s energy = %.15g", method, self.e_tot)
         return
 
 class LASSCFSymm (laspscf.LASPSCFSymm):
