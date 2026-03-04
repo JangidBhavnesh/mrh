@@ -205,7 +205,11 @@ def absorb_h1e(h1e, eri, norb, nelec, fac=1):
     for k in range(norb):
         h2e[k,k,:,:] += f1e
         h2e[:,:,k,k] += f1e
-    return h2e * fac
+    
+    if fac != 1:
+        h2e *= fac
+    
+    return h2e
 
 def pspace(h1e, eri, norb, nelec, hdiag=None, pspace_size=400):
     '''
