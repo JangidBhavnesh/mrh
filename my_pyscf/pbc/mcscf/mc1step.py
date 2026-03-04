@@ -97,8 +97,8 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
     
     # First convert the casdm1 and casdm2 to k-space.
     # The constructed dm1 would be in MO basis.
-    dm1 = np.empty((nkpts, nmo, nmo), dtype=casdm1.dtype)
-    casdm1_kpts = np.empty((nkpts, ncas, ncas), dtype=casdm1.dtype)
+    dm1 = np.zeros((nkpts, nmo, nmo), dtype=casdm1.dtype)
+    casdm1_kpts = np.zeros((nkpts, ncas, ncas), dtype=casdm1.dtype)
     idx = np.arange(ncore)
     
     for k in range(nkpts):
@@ -107,7 +107,7 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
         dm1[k][ncore:nocc, ncore:nocc] = casdm1_k
         casdm1_kpts[k] = casdm1_k
     
-    casdm2_kpts = np.empty((nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas), dtype=casdm1.dtype)
+    casdm2_kpts = np.zeros((nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas), dtype=casdm1.dtype)
 
     for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
         k4 = kconserv(k1, k2, k3)
@@ -120,7 +120,7 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
     vhf_a = np.zeros((nkpts, nmo, nmo), dtype=dtype)
     g_dm2 = np.zeros((nkpts, nmo, ncas), dtype=dtype)
 
-    hdm2 = np.empty((nkpts, nkpts, nkpts, nmo, ncas, nmo, ncas), dtype=dtype)
+    hdm2 = np.zeros((nkpts, nkpts, nkpts, nmo, ncas, nmo, ncas), dtype=dtype)
     
     sl = np.arange(nocc)
     reshape_ = (nmo, nmo, ncas, ncas)
