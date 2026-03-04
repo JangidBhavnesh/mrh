@@ -19,7 +19,7 @@ logger = lib.logger
 '''
 I think these reference are utmost useful, if anyone is trying to implement the CASSCF.
 1. Chem Phy. 1980, 48, 157-173
-2. Ph. Scripta, 1980, 21, 323-327
+2. Phys. Scripta, 1980, 21, 323-327
 3. Theo Chem Acc 1997, 97, 88-95
 4. CPL 2017, 683, 291-299
 5. JCP 2019, 150, 194106
@@ -317,15 +317,16 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
     
     return g_orb, gorb_update, h_op, h_diag
 
-
-def rotate_orb_cc(casscf, mo_coeff, mo_phase, fcivec, fcasdm1, fcasdm2, eris, x0_guess=None,
-                conv_tol_grad=1e-4, max_stepsize=None, verbose=None):
+#TODO: make mo_coeff as tagged array then mo_phase can be added to it.
+def rotate_orb_cc(casscf, mo_coeff, mo_phase, fcivec, fcasdm1, fcasdm2,
+                  eris, x0_guess=None, conv_tol_grad=1e-4, max_stepsize=None,
+                  verbose=None):
     log = logger.new_logger(casscf, verbose)
     if max_stepsize is None: max_stepsize = casscf.max_stepsize
     t3m = (logger.process_clock(), logger.perf_counter())
     u = [1,]*casscf.nkpts
     g_orb, gorb_update, h_op, h_diag = \
-        gen_g_hop(casscf, mo_coeff, mo_phase, u, fcasdm1, fcasdm2, eris)
+        gen_g_hop(casscf, mo_coeff, mo_phase, u, fcasdm1(), fcasdm2(), eris)
     
     g_kf = g_orb
     norm_gkf = norm_gorb = np.array([np.linalg.norm(g_orb_) for g_orb_ in g_orb])
@@ -333,13 +334,15 @@ def rotate_orb_cc(casscf, mo_coeff, mo_phase, fcivec, fcasdm1, fcasdm2, eris, x0
     log.debug('    max|g|=%5.3g', np.max(norm_gorb)) # Max norm of the orbital gradient (Should print the k-pt as well)
     t3m = log.timer('gen h_op', *t3m)
     
-    if all(norm_gorb < conv_tol_grad*.3):
+    if all(norm_gorb < conv_tol_grad * 0.3):
         u = casscf.update_rotate_matrix(g_orb*0)
         yield u, g_orb, 1, x0_guess
         return
     
+    # This is preconditioner for orbital optimization using iterative solver.
     def precond(x, e):
         hdiagd = np.zeros_like(h_diag)
+        assert len(x) == len(h_diag)
         for k in range(casscf.nkpts):
             hdiagd[k] = h_diag - (e - casscf.ah_level_shift)
             hdiagd[k][abs(hdiagd[k]) < 1e-8] = 1e-8
@@ -358,7 +361,10 @@ def rotate_orb_cc(casscf, mo_coeff, mo_phase, fcivec, fcasdm1, fcasdm2, eris, x0
     ikf = 0
     
     g_op = lambda: g_orb
-    problem_size = np.array(g_orb).size
+    
+    problem_size = np.array([np.array(g_orb_).size for g_orb_ in g_orb])
+    assert problem_size.sum() == problem_size[0] * len(g_orb)
+    problem_size = problem_size[0]
 
     for ah_end, ihop, w, dxi, hdxi, residual, seig \
         in ciah.davidson_cc(h_op, g_op, precond, x0_guess,
@@ -367,10 +373,10 @@ def rotate_orb_cc(casscf, mo_coeff, mo_phase, fcivec, fcasdm1, fcasdm2, eris, x0
     
         norm_residual = np.mean([np.linalg.norm(residual_) for residual_ in residual])
         if (ah_end or ihop == casscf.ah_max_cycle or 
-            ((norm_residual < casscf.ah_start_tol) and (ihop >= casscf.ah_start_cycle)) or 
-            (seig < casscf.ah_lindep)):
+            ((norm_residual < casscf.ah_start_tol) and 
+             (ihop >= casscf.ah_start_cycle)) or (seig < casscf.ah_lindep)):
             imic += 1
-            dxmax = np.max(abs(dxi))
+            dxmax = np.max(np.abs(dxi))
             if ihop == problem_size:
                 log.debug1('... Hx=g fully converged for small systems')
 
@@ -414,12 +420,14 @@ def rotate_orb_cc(casscf, mo_coeff, mo_phase, fcivec, fcasdm1, fcasdm2, eris, x0
 
                 g_kf1 = gorb_update(u, fcivec())
                 jkcount += 1
+
                 norm_gkf1 = np.mean([np.linalg.norm(g_kf1_) for g_kf1_ in g_kf1])
                 norm_dg = np.mean([np.linalg.norm(g_kf1_ - g_orb_) 
                                    for g_kf1_, g_orb_ in zip(g_kf1, g_orb)])
                 log.debug('    |g|=%5.3g (keyframe), |g-correction|=%5.3g',
                           norm_gkf1, norm_dg)
                 
+                # For out of trust region
                 if (norm_dg > norm_gorb*casscf.ah_grad_trust_region and
                     norm_gkf1 > norm_gkf and
                     norm_gkf1 > norm_gkf*casscf.ah_grad_trust_region):
@@ -433,7 +441,7 @@ def rotate_orb_cc(casscf, mo_coeff, mo_phase, fcivec, fcasdm1, fcasdm2, eris, x0
                 t3m = log.timer('gen h_op', *t3m)
                 g_orb = g_kf = g_kf1
                 norm_gorb = norm_gkf = norm_gkf1
-                dr = [0 for _ in dr]
+                dr = [np.zeros_like(dr_) for dr_ in dr]
     
     u = casscf.update_rotate_matrix(dr, u)
     yield u, g_kf, ihop+jkcount, dxi
