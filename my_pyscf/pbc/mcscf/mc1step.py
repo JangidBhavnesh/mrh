@@ -19,7 +19,7 @@ logger = lib.logger
 '''
 I think these reference are utmost useful, if anyone is trying to implement the CASSCF.
 1. Chem Phy. 1980, 48, 157-173
-2. Ph. Scripta, 1980, 21, 323-327
+2. Phys. Scripta, 1980, 21, 323-327
 3. Theo Chem Acc 1997, 97, 88-95
 4. CPL 2017, 683, 291-299
 5. JCP 2019, 150, 194106
@@ -97,8 +97,8 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
     
     # First convert the casdm1 and casdm2 to k-space.
     # The constructed dm1 would be in MO basis.
-    dm1 = np.empty((nkpts, nmo, nmo), dtype=casdm1.dtype)
-    casdm1_kpts = np.empty((nkpts, ncas, ncas), dtype=casdm1.dtype)
+    dm1 = np.zeros((nkpts, nmo, nmo), dtype=casdm1.dtype)
+    casdm1_kpts = np.zeros((nkpts, ncas, ncas), dtype=casdm1.dtype)
     idx = np.arange(ncore)
     
     for k in range(nkpts):
@@ -107,10 +107,10 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
         dm1[k][ncore:nocc, ncore:nocc] = casdm1_k
         casdm1_kpts[k] = casdm1_k
     
-    casdm2_kpts = np.empty((nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas), dtype=casdm1.dtype)
+    casdm2_kpts = np.zeros((nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas), dtype=casdm1.dtype)
 
     for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
-        k4 = kconserv(k1, k2, k3)
+        k4 = kconserv[k1, k2, k3]
         dm2_k = 1.0/nkpts * np.einsum('iP, jQ, PQRS, kR, lS->ijkl', 
                                       mo_phase[k1].conj(), mo_phase[k2], casdm2, mo_phase[k3].conj(), mo_phase[k4])
         casdm2_kpts[k1, k2, k3] = dm2_k
@@ -120,9 +120,8 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
     vhf_a = np.zeros((nkpts, nmo, nmo), dtype=dtype)
     g_dm2 = np.zeros((nkpts, nmo, ncas), dtype=dtype)
 
-    hdm2 = np.empty((nkpts, nkpts, nkpts, nmo, ncas, nmo, ncas), dtype=dtype)
+    hdm2 = np.zeros((nkpts, nkpts, nkpts, nmo, ncas, nmo, ncas), dtype=dtype)
     
-    sl = np.arange(nocc)
     reshape_ = (nmo, nmo, ncas, ncas)
 
     for k in range(nkpts):
@@ -130,6 +129,8 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
             k4 = kconserv[k1, k2, k3]
             if k != k4: continue
             else:
+                # Collect the contribution from different k1, k2 and k3 whenever they are
+                # equalsto the k4.
                 # I think we should not loop over nmo, because it will be solved for 
                 # a given k-point. To remove the loop over nmo, as done in the molecular
                 # code, I have first converted that code without for loop, matched it with loop.
@@ -148,10 +149,9 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
                 # papa = ppaa = jtmp = ktmp = dm2tmp = None
                 ppaa = eris.ppaa[k1, k2, k3]
                 papa = eris.papa[k1, k2, k3]
-                dm1 = casdm1_kpts[k4]
                 dm2 = casdm2_kpts[k1, k2, k3]
-                vhf_a[k4] = np.einsum('pquv,uv->pq', ppaa, casdm1)
-                vhf_a[k4] -= 0.5*np.einsum('puqv,uv->pq', papa, casdm1)
+                vhf_a[k4] += np.einsum('pquv,uv->pq', ppaa, casdm1_kpts[k4])
+                vhf_a[k4] -= 0.5*np.einsum('puqv,uv->pq', papa, casdm1_kpts[k4])
                 # TODO: Double check this conjugation..
                 #dm2t = (dm2.conj().transpose(1,2,0,3) + dm2.conj().transpose(0,2,1,3)).reshape(ncasncas, ncasncas)
                 dm2t = (dm2.transpose(1,2,0,3) + dm2.conj().transpose(0,2,1,3)).reshape(ncasncas, ncasncas)
@@ -160,14 +160,15 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
                 g_dm2[k4] += np.einsum('puuv->pv', jtmp[:, ncore:nocc, :, :])
                 ktmp = lib.dot(papa.conj().transpose(0,2,1,3).reshape(nmonmo, ncasncas), dm2t).reshape(reshape_)
                 hdm2[k1, k2, k3] = (ktmp + jtmp).conj().transpose(0, 2, 1, 3)
-                jkcaa[k4]  = 6.0 * np.einsum('iuiv,uv->iu', papa[:nocc, :, :nocc, :], casdm1)
-                jkcaa[k4] -= 2.0 * np.einsum('iiuv,uv->iu', ppaa[:nocc, :nocc, :, :], casdm1)
+                jkcaa[k4]  += 6.0 * np.einsum('iuiv,uv->iu', papa[:nocc, :, :nocc, :], casdm1_kpts[k4])
+                jkcaa[k4] -= 2.0 * np.einsum('iiuv,uv->iu', ppaa[:nocc, :nocc, :, :], casdm1_kpts[k4])
     
     ppaa = papa = jtmp = ktmp = temp = None
     
     vhf_ca = np.zeros_like(vhf_a, dtype=dtype)
-    h1e_mo = np.zeros_like((nkpts, nmo, nmo), dtype=dtype)
-    g = np.zeros_like(h1e_mo, dtype=dtype)
+    
+    h1e_mo = np.zeros((nkpts,nmo,nmo), dtype=dtype)
+    g = np.zeros((nkpts,nmo,nmo), dtype=dtype)
 
     hcore = mc.get_hcore() # (nkpts, nao, nao)
     for k in range(nkpts):
@@ -197,7 +198,7 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
             dm_c = 2.0 * np.dot(mo_c, mo_c.conj().T)
             casdm1_k = reduce(np.dot, (mo_phase[k], casdm1, mo_phase[k].conj().T))
             dm_a = reduce(np.dot, (mo_a, casdm1_k, mo_a.conj().T))
-            vj, vk = mc.get_jk(mc._scf.cell, (dm_c, dm_a), kpts=kpts[k])
+            vj, vk = mc.get_jk(mc._scf.cell, (dm_c, dm_a), kpts=kpts[k]) # Need to double check this.
             vhf_c = reduce(np.dot, (mo1.conj().T, vj[0]-vk[0]*0.5, mo1[:,:nocc]))
             vhf_a = reduce(np.dot, (mo1.conj().T, vj[1]-vk[1]*0.5, mo1[:,:nocc]))
             h1e_mo1k = reduce(np.dot, (u[k].conj().T, h1e_mo[k], u[k][:,:nocc]))
@@ -249,7 +250,7 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
         return [mc.pack_uniq_var(grd - grd.conj().T) for grd in g]    
     
     # Hessian diagonal
-    hdiag = np.empty((nkpts, nmo, ncas), dtype=dtype)
+    hdiag = np.empty((nkpts, nmo, nmo), dtype=dtype)
     for k in range(nkpts):
         temp = np.einsum('ii, jj->ij', h1e_mo[k], dm1[k])
         temp -= h1e_mo[k] * dm1[k]
@@ -280,11 +281,17 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
         hdiag[k][:nocc,ncore:nocc] -= jkcaa[k]
         hdiag[k][ncore:nocc,:nocc] -= jkcaa[k].conj().T
 
-        v_diag = np.einsum('ijij->ij', hdm2[k])
-        hdiag[k][ncore:nocc,:] += v_diag.conj().T
-        hdiag[k][:,ncore:nocc] += v_diag
+        # hdm2 have k1, k2, k3, so it will only contribute to the diagonal
+        # when k1, k2 and k3 are equal to the k of interest. 
+        for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
+            k4 = kconserv[k1, k2, k3]
+            if k4 != k: continue
+            else:
+                v_diag = np.einsum('ijij->ij', hdm2[k1, k2, k3])
+                hdiag[k][ncore:nocc,:] += v_diag.conj().T
+                hdiag[k][:,ncore:nocc] += v_diag
 
-    g_orb = np.hstack([mc.pack_uniq_var(g[k], g[k].conj().T) 
+    g_orb = np.hstack([mc.pack_uniq_var(g[k] - g[k].conj().T) 
                        for k in range(nkpts)])
     h_diag = np.hstack([mc.pack_uniq_var(hdiag[k]) 
                         for k in range(nkpts)])
@@ -307,7 +314,7 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
             
             if ncore > 0:
                 # I need to modify this function: mc.update_jk_in_ah as well.
-                va, vc = mc.update_jk_in_ah(mo_coeff[k], x1, casdm1_kpts[k], eris, kptindx)
+                va, vc = mc.update_jk_in_ah(mo_coeff[k], x1, casdm1_kpts[k], eris, k)
                 x2[k][ncore:nocc] += va
                 x2[k][:ncore,ncore:] += vc
             
@@ -317,15 +324,16 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
     
     return g_orb, gorb_update, h_op, h_diag
 
-
-def rotate_orb_cc(casscf, mo_coeff, mo_phase, fcivec, fcasdm1, fcasdm2, eris, x0_guess=None,
-                conv_tol_grad=1e-4, max_stepsize=None, verbose=None):
+#TODO: make mo_coeff as tagged array then mo_phase can be added to it.
+def rotate_orb_cc(casscf, mo_coeff, mo_phase, fcivec, fcasdm1, fcasdm2,
+                  eris, x0_guess=None, conv_tol_grad=1e-4, max_stepsize=None,
+                  verbose=None):
     log = logger.new_logger(casscf, verbose)
     if max_stepsize is None: max_stepsize = casscf.max_stepsize
     t3m = (logger.process_clock(), logger.perf_counter())
     u = [1,]*casscf.nkpts
     g_orb, gorb_update, h_op, h_diag = \
-        gen_g_hop(casscf, mo_coeff, mo_phase, u, fcasdm1, fcasdm2, eris)
+        gen_g_hop(casscf, mo_coeff, mo_phase, u, fcasdm1(), fcasdm2(), eris)
     
     g_kf = g_orb
     norm_gkf = norm_gorb = np.array([np.linalg.norm(g_orb_) for g_orb_ in g_orb])
@@ -333,15 +341,17 @@ def rotate_orb_cc(casscf, mo_coeff, mo_phase, fcivec, fcasdm1, fcasdm2, eris, x0
     log.debug('    max|g|=%5.3g', np.max(norm_gorb)) # Max norm of the orbital gradient (Should print the k-pt as well)
     t3m = log.timer('gen h_op', *t3m)
     
-    if all(norm_gorb < conv_tol_grad*.3):
+    if all(norm_gorb < conv_tol_grad * 0.3):
         u = casscf.update_rotate_matrix(g_orb*0)
         yield u, g_orb, 1, x0_guess
         return
     
+    # This is preconditioner for orbital optimization using iterative solver.
     def precond(x, e):
         hdiagd = np.zeros_like(h_diag)
+        assert len(x) == len(h_diag)
         for k in range(casscf.nkpts):
-            hdiagd[k] = h_diag - (e - casscf.ah_level_shift)
+            hdiagd[k] = h_diag[k] - (e - casscf.ah_level_shift)
             hdiagd[k][abs(hdiagd[k]) < 1e-8] = 1e-8
             x[k] /= hdiagd[k]
             norm_x = np.linalg.norm(x[k])
@@ -358,7 +368,10 @@ def rotate_orb_cc(casscf, mo_coeff, mo_phase, fcivec, fcasdm1, fcasdm2, eris, x0
     ikf = 0
     
     g_op = lambda: g_orb
-    problem_size = np.array(g_orb).size
+    
+    problem_size = np.array([np.array(g_orb_).size for g_orb_ in g_orb])
+    assert problem_size.sum() == problem_size[0] * len(g_orb)
+    problem_size = problem_size[0]
 
     for ah_end, ihop, w, dxi, hdxi, residual, seig \
         in ciah.davidson_cc(h_op, g_op, precond, x0_guess,
@@ -367,10 +380,10 @@ def rotate_orb_cc(casscf, mo_coeff, mo_phase, fcivec, fcasdm1, fcasdm2, eris, x0
     
         norm_residual = np.mean([np.linalg.norm(residual_) for residual_ in residual])
         if (ah_end or ihop == casscf.ah_max_cycle or 
-            ((norm_residual < casscf.ah_start_tol) and (ihop >= casscf.ah_start_cycle)) or 
-            (seig < casscf.ah_lindep)):
+            ((norm_residual < casscf.ah_start_tol) and 
+             (ihop >= casscf.ah_start_cycle)) or (seig < casscf.ah_lindep)):
             imic += 1
-            dxmax = np.max(abs(dxi))
+            dxmax = np.max(np.abs(dxi))
             if ihop == problem_size:
                 log.debug1('... Hx=g fully converged for small systems')
 
@@ -414,12 +427,14 @@ def rotate_orb_cc(casscf, mo_coeff, mo_phase, fcivec, fcasdm1, fcasdm2, eris, x0
 
                 g_kf1 = gorb_update(u, fcivec())
                 jkcount += 1
+
                 norm_gkf1 = np.mean([np.linalg.norm(g_kf1_) for g_kf1_ in g_kf1])
                 norm_dg = np.mean([np.linalg.norm(g_kf1_ - g_orb_) 
                                    for g_kf1_, g_orb_ in zip(g_kf1, g_orb)])
                 log.debug('    |g|=%5.3g (keyframe), |g-correction|=%5.3g',
                           norm_gkf1, norm_dg)
                 
+                # For out of trust region
                 if (norm_dg > norm_gorb*casscf.ah_grad_trust_region and
                     norm_gkf1 > norm_gkf and
                     norm_gkf1 > norm_gkf*casscf.ah_grad_trust_region):
@@ -433,7 +448,7 @@ def rotate_orb_cc(casscf, mo_coeff, mo_phase, fcivec, fcasdm1, fcasdm2, eris, x0
                 t3m = log.timer('gen h_op', *t3m)
                 g_orb = g_kf = g_kf1
                 norm_gorb = norm_gkf = norm_gkf1
-                dr = [0 for _ in dr]
+                dr = [np.zeros_like(dr_) for dr_ in dr]
     
     u = casscf.update_rotate_matrix(dr, u)
     yield u, g_kf, ihop+jkcount, dxi
