@@ -198,7 +198,7 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
             dm_c = 2.0 * np.dot(mo_c, mo_c.conj().T)
             casdm1_k = reduce(np.dot, (mo_phase[k], casdm1, mo_phase[k].conj().T))
             dm_a = reduce(np.dot, (mo_a, casdm1_k, mo_a.conj().T))
-            vj, vk = mc.get_jk(mc._scf.cell, (dm_c, dm_a), kpts=kpts[k])
+            vj, vk = mc.get_jk(mc._scf.cell, (dm_c, dm_a), kpts=kpts[k]) # Need to double check this.
             vhf_c = reduce(np.dot, (mo1.conj().T, vj[0]-vk[0]*0.5, mo1[:,:nocc]))
             vhf_a = reduce(np.dot, (mo1.conj().T, vj[1]-vk[1]*0.5, mo1[:,:nocc]))
             h1e_mo1k = reduce(np.dot, (u[k].conj().T, h1e_mo[k], u[k][:,:nocc]))
@@ -351,7 +351,7 @@ def rotate_orb_cc(casscf, mo_coeff, mo_phase, fcivec, fcasdm1, fcasdm2,
         hdiagd = np.zeros_like(h_diag)
         assert len(x) == len(h_diag)
         for k in range(casscf.nkpts):
-            hdiagd[k] = h_diag - (e - casscf.ah_level_shift)
+            hdiagd[k] = h_diag[k] - (e - casscf.ah_level_shift)
             hdiagd[k][abs(hdiagd[k]) < 1e-8] = 1e-8
             x[k] /= hdiagd[k]
             norm_x = np.linalg.norm(x[k])
