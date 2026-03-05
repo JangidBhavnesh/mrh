@@ -186,7 +186,6 @@ def _localize (las, frags_orbs, mo_coeff, spin, lo_coeff, fock, ao_ovlp, freeze_
         mo_orbsym[i:j] = mo_orbsym[i:j][idx]
     if has_orbsym: mo_coeff = tag_array (mo_coeff, orbsym=mo_orbsym)
     else: mo_coeff = np.array (mo_coeff) # remove spurious tag
-    print("MO OCCUPANCY DURING GUESS", mo_occ[ncore:nocc])
     return mo_coeff
 
 def localize_init_guess (las, frags_atoms, mo_coeff=None, spin=None, lo_coeff=None, fock=None,
