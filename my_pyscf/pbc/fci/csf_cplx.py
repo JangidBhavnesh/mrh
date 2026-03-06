@@ -4,7 +4,7 @@ from pyscf import lib
 from pyscf import __config__
 from pyscf.fci import direct_uhf, direct_spin1
 from pyscf.csf_fci.csf import CSFFCISolver as realCSFFCISolver
-from pyscf.csf_fci.csf import unpack_h1e_cs, get_init_guess
+from pyscf.csf_fci.csf import unpack_h1e_cs, get_init_guess, make_hdiag_csf as make_hdiag_csf_real
 from pyscf.lib.numpy_helper import tag_array
 
 from mrh.my_pyscf.pbc.fci import direct_spin1_cplx
@@ -47,16 +47,34 @@ def get_init_guess(norb, nelec, nroots, hdiag_csf, transformer):
     return ci0out
 
 def make_hdiag_det (fci, h1e, eri, nrob, nelec):
-    # To make the hdiag, currently I am making an approximation, where I am 
-    # only using the real hdiag, and adding some noise to the imag part.
+    '''
+    hdiag = <\psi_I|H_real + i*H_imag|\psi_I> = <\psi_I|H_real|\psi_I> + i*<\psi_I|H_imag|\psi_I> 
+    '''
     h1ea, h1eb = unpack_h1e_ab(h1e)
     hdiag = direct_uhf.make_hdiag([h1ea.real, h1eb.real], [eri.real, eri.real, eri.real], nrob, nelec)
     hdiag_out = hdiag.astype(np.complex128)
     hdiag_out.real = hdiag
-    hdiag_out.imag = 1e-6 * hdiag
+    hdiag_out.imag  = direct_uhf.make_hdiag([h1ea.imag, h1eb.imag], [eri.imag, eri.imag, eri.imag], nrob, nelec)
     hdiag = None
     return hdiag_out
 
+def make_hdiag_csf (h1e, eri, norb, nelec, transformer, hdiag_det=None, max_memory=None):
+    '''
+    Make the diagonal of the Hamiltonian in the CSF basis. Basically, we have the Hamiltonian
+    diagonal in the determinant basis (hdiag_det). We will transform the real and imaginary parts of the Hamiltonian
+    separately to get the Hamiltonian diagonal in the CSF basis.
+    '''
+    if hdiag_det is None:
+        hdiag_det = make_hdiag_det (None, h1e, eri, norb, nelec)
+
+    hdiag_csf = make_hdiag_csf_real(
+        h1e.real, eri.real, norb, nelec, transformer, hdiag_det=hdiag_det.real, max_memory=max_memory)
+    hdiag_csf_out = hdiag_csf.astype(np.complex128)
+    hdiag_csf_out.real = hdiag_csf
+    hdiag_csf_out.imag = make_hdiag_csf_real(
+        h1e.imag, eri.imag, norb, nelec, transformer, hdiag_det=hdiag_det.imag, max_memory=max_memory)
+    hdiag_csf = None
+    return hdiag_csf_out
 
 def pspace(**args):
     pass
