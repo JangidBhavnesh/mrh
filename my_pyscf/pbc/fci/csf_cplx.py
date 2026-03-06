@@ -2,13 +2,15 @@ import numpy as np
 
 from pyscf import lib
 from pyscf import __config__
-from pyscf.fci import direct_uhf
+from pyscf.fci import direct_uhf, direct_spin1
 from pyscf.csf_fci.csf import CSFFCISolver as realCSFFCISolver
-from pyscf.csf_fci.csf import unpack_h1e_cs
+from pyscf.csf_fci.csf import unpack_h1e_cs, get_init_guess
 from pyscf.lib.numpy_helper import tag_array
 
 from mrh.my_pyscf.pbc.fci import direct_spin1_cplx
 
+_unpack_nelec = direct_spin1_cplx._unpack_nelec
+_get_init_guess = direct_spin1_cplx.get_init_guess
 '''
 # Okay Great. Let me implement the CSFsolver with complex Hamiltonian.
 # Logic of CSFSolvers in PySCF:
@@ -22,11 +24,30 @@ from mrh.my_pyscf.pbc.fci import direct_spin1_cplx
 # matrix is not constructed and stored in the memory). The U matrix is real only.
 '''
 
+@lib.with_doc(get_init_guess.__doc__)
+def get_init_guess(norb, nelec, nroots, hdiag_csf, transformer):
+    '''
+    Get the initial guess for the FCI calculation in the CSF basis
+    '''
+    ncsf_sym = transformer.ncsf
+    assert (ncsf_sym >= nroots), "Can't find {} roots among only {} CSFs of symmetry {}".format (
+        nroots, ncsf_sym, transformer.wfnsym)
+    hdiag_csf_real = transformer.pack_csf (hdiag_csf.real)
+    hdiag_csf_imag = transformer.pack_csf (hdiag_csf.imag)
+    hdiag_csf = hdiag_csf_real + 1j * hdiag_csf_imag
+    hdiag_csf_real = hdiag_csf_imag = None
+    ci0 = _get_init_guess(ncsf_sym, 1, nroots, hdiag_csf, nelec)
+    assert ci0[0].dtype == hdiag_csf[0].dtype == np.complex128
+    ci0out = ci0.astype(np.complex128)
+    ci0out.real = transformer.vec_csf2det (ci0.real)
+    ci0out.imag = transformer.vec_csf2det (ci0.imag)
+    ci0 = None
+    return ci0out
+
 def pspace(**args):
     pass
 
-def get_init_guess(**args):
-    pass
+
 
 def kernel(**args):
     pass

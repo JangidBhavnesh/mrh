@@ -71,8 +71,8 @@ def _get_init_guess_cplx(na, nb, nroots, hdiag, nelec):
             x[int(addr)] = 1.0 + 0.0j
             ci0.append(x.view(direct_spin1.FCIvector))
 
-    ci0[0][0]  += (1e-3 + 1e-5j)
-    ci0[0][-1] -= (1e-5 - 1e-5j)
+    ci0[0][0]  += (1e-5 + 1e-7j)
+    ci0[0][-1] -= (1e-5 - 1e-7j)
     return ci0
 
 def get_init_guess_cplx(norb, nelec, nroots, hdiag):
