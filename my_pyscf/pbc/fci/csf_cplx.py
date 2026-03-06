@@ -10,6 +10,8 @@ from pyscf.lib.numpy_helper import tag_array
 from mrh.my_pyscf.pbc.fci import direct_spin1_cplx
 
 _unpack_nelec = direct_spin1_cplx._unpack_nelec
+unpack_h1e_ab = direct_spin1_cplx.unpack_h1e_ab
+
 _get_init_guess = direct_spin1_cplx.get_init_guess
 '''
 # Okay Great. Let me implement the CSFsolver with complex Hamiltonian.
@@ -44,17 +46,24 @@ def get_init_guess(norb, nelec, nroots, hdiag_csf, transformer):
     ci0 = None
     return ci0out
 
+def make_hdiag_det (fci, h1e, eri, nrob, nelec):
+    # To make the hdiag, currently I am making an approximation, where I am 
+    # only using the real hdiag, and adding some noise to the imag part.
+    h1ea, h1eb = unpack_h1e_ab(h1e)
+    hdiag = direct_uhf.make_hdiag([h1ea.real, h1eb.real], [eri.real, eri.real, eri.real], nrob, nelec)
+    hdiag_out = hdiag.astype(np.complex128)
+    hdiag_out.real = hdiag
+    hdiag_out.imag = 1e-6 * hdiag
+    hdiag = None
+    return hdiag_out
+
+
 def pspace(**args):
     pass
 
 
 
 def kernel(**args):
-    pass
-
-def make_hdiag_det (h1e, eri, nrob, nelec):
-    # Implement the make_hdiag the real csfsolver calls the direct_uhf.make_hdiag.
-    # However that won't be directly applicable as the h1e and eri are complex.
     pass
 
 
