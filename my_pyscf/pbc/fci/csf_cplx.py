@@ -472,7 +472,7 @@ def kernel(fci, h1e, eri, norb, nelec, smult=None, idx_sym=None, ci0=None,
                     max_cycle=max_cycle, max_space=max_space, nroots=nroots,
                     max_memory=max_memory, verbose=verbose, follow_state=True,
                     tol_residual=tol_residual, **kwargs)
-    print(e)
+    
     t0 = lib.logger.timer_debug1 (fci, "csf.kernel: running fci.eig", *t0)
     if nroots > 1:
         creal = np.array([transformer.vec_csf2det (ci, order='C') for ci in c.real])
@@ -619,7 +619,7 @@ if __name__ == "__main__":
     print("Ground state energy: ", e)
 
     h1 = mf.mo_coeff.conj ().T @ mf.get_hcore () @ mf.mo_coeff
-    h1 = h1 #+ 1e-10 * 1j
+    h1 = h1 + 1e-10 * 1j
     h1 = 0.5*(h1 + h1.T.conj())
     
     h2 = ao2mo.restore (1, ao2mo.full (mf._eri, mf.mo_coeff), mol.nao_nr ())
@@ -628,16 +628,10 @@ if __name__ == "__main__":
     h2 = 0.5*(h2 + h2.transpose(1, 0, 3, 2).conj())
     h2 = 0.5*(h2 + h2.transpose(3, 2, 1, 0).conj())
 
-    # cplx_cisolver = FCISolver (smult=1)
-    # e_cplx, c_cplx = cplx_cisolver.kernel (h1, h2, norb, nelec, ecore=h0)
-    # print("Ground state energy with complex Hamiltonian: ", e_cplx, h0)
+    cplx_cisolver = FCISolver (smult=1)
+    e_cplx, c_cplx = cplx_cisolver.kernel (h1, h2, norb, nelec, ecore=h0)
+    print("Ground state energy: ", e_cplx)
 
-    e, c = cisolver.kernel (h1, h2, norb, nelec, ecore=h0, verbose=lib.logger.DEBUG)
-    print("Ground state energy: ", e)
-
-    exit()
     cplx_cisolver_det = direct_spin1_cplx.FCISolver ()
     e_cplx_det, c_cplx_det = cplx_cisolver_det.kernel (h1, h2, norb, nelec, ecore=h0)
-    e_tot = cplx_cisolver_det.energy(h1, h2, c_cplx_det, norb, nelec)
-    print("Total energy", e_tot)
-    print("Ground state energy with complex Hamiltonian in determinant basis: ", e_cplx_det)
+    print("Ground state energy: ", e_cplx_det)
