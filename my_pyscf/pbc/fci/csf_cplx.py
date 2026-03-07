@@ -110,8 +110,8 @@ def _debug_g2e (fci, g2e, eri, norb):
 def pspace(fci, h1e, eri, norb, nelec, transformer,
            hdiag_det=None, hdiag_csf=None, npsp=200, max_memory=None):
     '''
-    In the pspace Davidson solver, we construct a Hamiltonian in smaller subspace and then those eigenvectos are projected
-    to entire subspace and been used for the Davidson solver. 
+    In the pspace Davidson solver, we construct a Hamiltonian in smaller subspace and then those eigenvectos
+    are projected to entire subspace and been used for the Davidson solver. 
     # Total Hamiltonian:
         H = H_real + 1j * H_imag
           = <I|H_real|J> + 1j * <I|H_imag|J>
@@ -121,7 +121,9 @@ def pspace(fci, h1e, eri, norb, nelec, transformer,
     if norb > 63: raise NotImplementedError('norb > 63')
     if max_memory is None: max_memory=fci.max_memory
 
-    # In complex Hamiltonian, I am not sure of ao2mo.restore, so I always keep the eri in the 4D format. 
+    # In complex Hamiltonian, I don't think ao2mo.restore works,
+    # so I always keep the eri in the 4D format. 
+    
     assert (h1e.dtype == eri.dtype), "h1e and eri must have the same dtype"
     assert h1e.shape == (norb, norb), "h1e must be a square matrix of shape (norb, norb)"
     assert eri.shape == (norb, norb, norb, norb), "eri must be a 4D array of shape (norb, norb, norb, norb)"
@@ -141,9 +143,8 @@ def pspace(fci, h1e, eri, norb, nelec, transformer,
 
     # For Hermitian Hamiltonians, diagonals elements are dominated by the real-part, that's why
     # I am using only real-part for ranking/selection.
-    hdiag_det_real = hdiag_det.real
+    
     hdiag_csf_real = hdiag_csf.real
-
     csf_addr = np.arange(hdiag_csf_real.size, dtype=np.int32)
     
     if transformer.wfnsym is None:
