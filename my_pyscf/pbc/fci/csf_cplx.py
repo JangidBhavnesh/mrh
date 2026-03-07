@@ -1,20 +1,24 @@
 import numpy as np
+import ctypes
+import scipy
 
 from pyscf import lib
 from pyscf import __config__
-from pyscf.fci import direct_uhf, direct_spin1
+from pyscf.fci import direct_uhf, direct_spin1, cistring
 from pyscf.csf_fci.csf import CSFFCISolver as realCSFFCISolver
 from pyscf.csf_fci.csf import unpack_h1e_cs, get_init_guess, make_hdiag_csf as make_hdiag_csf_real
-from pyscf.csf_fci.csf import _debug_g2e as _debug_g2e_real
+from pyscf.csf_fci.csf import _debug_g2e as _debug_g2e_real, pspace as pspace_real
 from pyscf.lib.numpy_helper import tag_array
-from pyscf.csf_fci.csfstring import count_all_csfs, get_spin_evecs
+from pyscf.csf_fci.csfstring import count_all_csfs
 
 from mrh.my_pyscf.pbc.fci import direct_spin1_cplx
 
+libfci = lib.load_library('libfci')
+
 _unpack_nelec = direct_spin1_cplx._unpack_nelec
 unpack_h1e_ab = direct_spin1_cplx.unpack_h1e_ab
-
 _get_init_guess = direct_spin1_cplx.get_init_guess
+
 '''
 # Okay Great. Let me implement the CSFsolver with complex Hamiltonian.
 # Logic of CSFSolvers in PySCF:
@@ -34,15 +38,19 @@ def get_init_guess(norb, nelec, nroots, hdiag_csf, transformer):
     Get the initial guess for the FCI calculation in the CSF basis
     '''
     ncsf_sym = transformer.ncsf
+    dtype = hdiag_csf.dtype == np.complex128
     assert (ncsf_sym >= nroots), "Can't find {} roots among only {} CSFs of symmetry {}".format (
         nroots, ncsf_sym, transformer.wfnsym)
     hdiag_csf_real = transformer.pack_csf (hdiag_csf.real)
-    hdiag_csf_imag = transformer.pack_csf (hdiag_csf.imag)
-    hdiag_csf = hdiag_csf_real + 1j * hdiag_csf_imag
-    hdiag_csf_real = hdiag_csf_imag = None
-    ci0 = _get_init_guess(ncsf_sym, 1, nroots, hdiag_csf, nelec)
-    assert ci0[0].dtype == hdiag_csf[0].dtype == np.complex128
-    ci0out = ci0.astype(np.complex128)
+    hdiag_csf_2 = hdiag_csf_real.astype(dtype)
+    hdiag_csf_2.real = hdiag_csf_real
+    hdiag_csf_2.imag = transformer.pack_csf (hdiag_csf.imag)
+    hdiag_csf_real = None
+
+    ci0 = _get_init_guess(ncsf_sym, 1, nroots, hdiag_csf_2, nelec)
+    assert ci0[0].dtype == hdiag_csf[0].dtype == dtype
+
+    ci0out = ci0.astype(dtype)
     ci0out.real = transformer.vec_csf2det (ci0.real)
     ci0out.imag = transformer.vec_csf2det (ci0.imag)
     ci0 = None
@@ -50,15 +58,22 @@ def get_init_guess(norb, nelec, nroots, hdiag_csf, transformer):
 
 def make_hdiag_det (fci, h1e, eri, nrob, nelec):
     '''
-    hdiag = <\psi_I|H_real + i*H_imag|\psi_I> = <\psi_I|H_real|\psi_I> + i*<\psi_I|H_imag|\psi_I> 
+    hdiag = <\psi_I|H_real + i*H_imag|\psi_I> = <\psi_I|H_real|\psi_I> + i*<\psi_I|H_imag|\psi_I>.
+    For the Hermitian Hamiltonian, the diagoan elements are real.  
     '''
+    dtype = h1e.dtype == np.complex128, "You are using wrong function for real Hamiltonian" 
     h1ea, h1eb = unpack_h1e_ab(h1e)
-    hdiag = direct_uhf.make_hdiag([h1ea.real, h1eb.real], [eri.real, eri.real, eri.real], nrob, nelec)
-    hdiag_out = hdiag.astype(np.complex128)
-    hdiag_out.real = hdiag
-    hdiag_out.imag  = direct_uhf.make_hdiag([h1ea.imag, h1eb.imag], [eri.imag, eri.imag, eri.imag], nrob, nelec)
-    hdiag = None
-    return hdiag_out
+    hdiag_real = direct_uhf.make_hdiag([h1ea.real, h1eb.real], [eri.real, eri.real, eri.real], nrob, nelec)
+    hdiag = hdiag_real.astype(dtype)
+    hdiag.real = hdiag_real
+    # I think below sanity check would be done if verbosity is higher than DEBUG.
+    hdiag_imag  = direct_uhf.make_hdiag([h1ea.imag, h1eb.imag], [eri.imag, eri.imag, eri.imag], nrob, nelec)
+    if np.abs(hdiag_imag).max() > 1e-6:
+        lib.logger.warning("The imaginary part of the Hamiltonian diagonal in the determinant basis "
+        "is not negligible: max imaginary part = %s", np.amax(np.abs(hdiag_imag)))
+    hdiag.imag = 0
+    hdiag = hdiag_imag = None
+    return hdiag
 
 def make_hdiag_csf (h1e, eri, norb, nelec, transformer, hdiag_det=None, max_memory=None):
     '''
@@ -69,141 +84,203 @@ def make_hdiag_csf (h1e, eri, norb, nelec, transformer, hdiag_det=None, max_memo
     if hdiag_det is None:
         hdiag_det = make_hdiag_det (None, h1e, eri, norb, nelec)
 
-    hdiag_csf = make_hdiag_csf_real(
+    dtype = h1e.dtype == hdiag_det == np.complex128, "You are using wrong function for real Hamiltonian"
+
+    hdiag_csf_real = make_hdiag_csf_real(
         h1e.real, eri.real, norb, nelec, transformer, hdiag_det=hdiag_det.real, max_memory=max_memory)
-    hdiag_csf_out = hdiag_csf.astype(np.complex128)
-    hdiag_csf_out.real = hdiag_csf
-    hdiag_csf_out.imag = make_hdiag_csf_real(
+    hdiag_csf = hdiag_csf_real.astype(dtype)
+    hdiag_csf.real = hdiag_csf_real
+
+    # Should be done in higher verbosity level.
+    hdiag_csf_imag = make_hdiag_csf_real(
         h1e.imag, eri.imag, norb, nelec, transformer, hdiag_det=hdiag_det.imag, max_memory=max_memory)
-    hdiag_csf = None
-    return hdiag_csf_out
+    if np.abs(hdiag_csf_imag).max() > 1e-6:
+        lib.logger.warning("The imaginary part of the Hamiltonian diagonal in the determinant basis "
+        "is not negligible: max imaginary part = %s", np.amax(np.abs(hdiag_csf_imag)))
+    hdiag_csf.imag = 0
+    hdiag_csf_real = hdiag_csf_imag = None
+    return hdiag_csf
 
 def _debug_g2e (fci, g2e, eri, norb):
     _debug_g2e_real (fci, g2e.real, eri.real, norb)
     _debug_g2e_real (fci, g2e.imag, eri.imag, norb)
     return
 
-def pspace (fci, h1e, eri, norb, nelec, transformer, hdiag_det=None, hdiag_csf=None, npsp=200, max_memory=None):
-    ''' Note that getting pspace for npsp CSFs is substantially more costly than getting it for npsp determinants,
-    until I write code than can evaluate Hamiltonian matrix elements of CSFs directly. On the other hand
-    a pspace of determinants contains many redundant degrees of freedom for the same reason. Therefore I have
-    reduced the default pspace size by a factor of 2.'''
+@lib.with_doc(pspace_real.__doc__)
+def pspace(fci, h1e, eri, norb, nelec, transformer,
+           hdiag_det=None, hdiag_csf=None, npsp=200, max_memory=None):
+    '''
+    In the pspace Davidson solver, we construct a Hamiltonian in smaller subspace and then those eigenvectos are projected
+    to entire subspace and been used for the Davidson solver. 
+    # Total Hamiltonian:
+        H = H_real + 1j * H_imag
+          = <I|H_real|J> + 1j * <I|H_imag|J>
+    '''
     m0 = lib.current_memory ()[0]
-    if norb > 63:
-        raise NotImplementedError('norb > 63')
+    
+    if norb > 63: raise NotImplementedError('norb > 63')
     if max_memory is None: max_memory=fci.max_memory
+
+    # In complex Hamiltonian, I am not sure of ao2mo.restore, so I always keep the eri in the 4D format. 
+    assert (h1e.dtype == eri.dtype), "h1e and eri must have the same dtype"
+    assert h1e.shape == (norb, norb), "h1e must be a square matrix of shape (norb, norb)"
+    assert eri.shape == (norb, norb, norb, norb), "eri must be a 4D array of shape (norb, norb, norb, norb)"
 
     t0 = (lib.logger.process_clock (), lib.logger.perf_counter ())
     neleca, nelecb = _unpack_nelec(nelec)
     h1e = np.ascontiguousarray(h1e)
-    eri = ao2mo.restore(1, eri, norb)
     nb = cistring.num_strings(norb, nelecb)
+
+    # Compute the diagonal elements in both the determinant and CSF basis.
     if hdiag_det is None:
         hdiag_det = fci.make_hdiag(h1e, eri, norb, nelec)
     if hdiag_csf is None:
         hdiag_csf = fci.make_hdiag_csf(h1e, eri, norb, nelec, hdiag_det=hdiag_det, max_memory=max_memory)
-    csf_addr = np.arange (hdiag_csf.size, dtype=np.int32)
+    
+    assert hdiag_csf.dtype == hdiag_det.dtype == h1e.dtype
+
+    # For Hermitian Hamiltonians, diagonals elements are dominated by the real-part, that's why
+    # I am using only real-part for ranking/selection.
+    hdiag_det_real = hdiag_det.real
+    hdiag_csf_real = hdiag_csf.real
+
+    csf_addr = np.arange(hdiag_csf_real.size, dtype=np.int32)
+    
     if transformer.wfnsym is None:
-        ncsf_sym = hdiag_csf.size
+        ncsf_sym = hdiag_csf_real.size
     else:
         idx_sym = transformer.confsym[transformer.econf_csf_mask] == transformer.wfnsym
-        ncsf_sym = np.count_nonzero (idx_sym)
+        ncsf_sym = np.count_nonzero(idx_sym)
         csf_addr = csf_addr[idx_sym]
+
     if ncsf_sym > npsp:
         try:
-            csf_addr = csf_addr[np.argpartition(hdiag_csf[csf_addr], npsp-1)[:npsp]]
+            csf_addr = csf_addr[np.argpartition(hdiag_csf_real[csf_addr], npsp - 1)[:npsp]]
         except AttributeError:
-            csf_addr = csf_addr[np.argsort(hdiag_csf[csf_addr])[:npsp]]
+            csf_addr = csf_addr[np.argsort(hdiag_csf_real[csf_addr])[:npsp]]
 
-
-
-    # To build
-    econf_addr = np.unique (transformer.econf_csf_mask[csf_addr])
-    det_addr = np.concatenate ([np.nonzero (transformer.econf_det_mask == conf)[0]
-        for conf in econf_addr])
-
+    econf_addr = np.unique(transformer.econf_csf_mask[csf_addr])
+    det_addr = np.concatenate([np.nonzero(transformer.econf_det_mask == conf)[0] 
+                               for conf in econf_addr])
+    
     npsp_det = len(det_addr)
     npsp_csf = len(csf_addr)
 
-    lib.logger.debug (fci, ("csf.pspace: Lowest-energy %s CSFs correspond to %s configurations"
-        " which are spanned by %s determinants"), npsp_csf, econf_addr.size, npsp_det)
+    lib.logger.debug(fci, ("csf.pspace: Lowest-energy %s CSFs correspond to %s configurations "
+                           "which are spanned by %s determinants"), npsp_csf, econf_addr.size, npsp_det)
 
     addra, addrb = divmod(det_addr, nb)
     stra = cistring.addrs2str(norb, neleca, addra)
     strb = cistring.addrs2str(norb, nelecb, addrb)
+
     safety_factor = 1.2
-    nfloats_h0 = (npsp_det+npsp_csf)**2.0
-    mem_h0 = safety_factor * nfloats_h0 * np.dtype (float).itemsize / 1e6
-    deltam = lib.current_memory ()[0] - m0
+    nfloats_h0 = (npsp_det + npsp_csf) ** 2.0
+    mem_h0 = safety_factor * nfloats_h0 * h1e.dtype.itemsize / 1e6
+    deltam = lib.current_memory()[0] - m0
     mem_remaining = max_memory - deltam
     memstr = ("pspace_size of {} CSFs -> {} determinants requires {} MB, cf {} MB "
-              "remaining memory").format (npsp_csf, npsp_det, mem_h0, mem_remaining)
+              "remaining memory").format(npsp_csf, npsp_det, mem_h0, mem_remaining)
+    
     if mem_h0 > mem_remaining:
-        raise MemoryError (memstr)
-    lib.logger.debug (fci, memstr)
-    h0 = np.ascontiguousarray(np.zeros((npsp_det,npsp_det), dtype=np.float64))
-    h1e_ab = unpack_h1e_ab (h1e)
-    h1e_a = np.ascontiguousarray(h1e_ab[0])
-    h1e_b = np.ascontiguousarray(h1e_ab[1])
-    g2e = ao2mo.restore(1, eri, norb)
-    g2e_ab = g2e_bb = g2e_aa = g2e
-    _debug_g2e (fci, g2e, eri, norb) # Exploring g2e nan bug; remove later?
-    t0 = lib.logger.timer_debug1 (fci, "csf.pspace: index manipulation", *t0)
+        raise MemoryError(memstr)
+    
+    lib.logger.debug(fci, memstr)
 
-    libfci.FCIpspace_h0tril_uhf(h0.ctypes.data_as(ctypes.c_void_p),
-                                h1e_a.ctypes.data_as(ctypes.c_void_p),
-                                h1e_b.ctypes.data_as(ctypes.c_void_p),
-                                g2e_aa.ctypes.data_as(ctypes.c_void_p),
-                                g2e_ab.ctypes.data_as(ctypes.c_void_p),
-                                g2e_bb.ctypes.data_as(ctypes.c_void_p),
-                                stra.ctypes.data_as(ctypes.c_void_p),
-                                strb.ctypes.data_as(ctypes.c_void_p),
-                                ctypes.c_int(norb), ctypes.c_int(npsp_det))
-    t0 = lib.logger.timer_debug1 (fci, "csf.pspace: pspace Hamiltonian in determinant basis", *t0)
+    h1e_ab = unpack_h1e_ab(h1e)
+    h1e_a = np.asarray(h1e_ab[0], order='C')
+    h1e_b = np.asarray(h1e_ab[1], order='C')
+    g2e = np.asarray(eri, order='C')
+    g2e_aa = g2e_ab = g2e_bb = g2e
 
+    # Check the g2e for nans/infs.
+    _debug_g2e(fci, g2e, eri, norb)
+    
+    t0 = lib.logger.timer_debug1(fci, "csf.pspace: index manipulation", *t0)
+
+    def _build_h0tril(h1e_a, h1e_b, g2e_aa, g2e_ab, g2e_bb):
+        h0tril = np.ascontiguousarray(np.zeros((npsp_det, npsp_det), dtype=np.float64, order='C'))
+        h1e_a = np.ascontiguousarray(h1e_a)
+        h1e_b = np.ascontiguousarray(h1e_b)
+        g2e_aa = np.ascontiguousarray(g2e_aa)
+        g2e_ab = np.ascontiguousarray(g2e_ab)
+        g2e_bb = np.ascontiguousarray(g2e_bb)
+
+        libfci.FCIpspace_h0tril_uhf(
+            h0tril.ctypes.data_as(ctypes.c_void_p),
+            np.ascontiguousarray(h1e_a,  dtype=np.float64).ctypes.data_as(ctypes.c_void_p),
+            np.ascontiguousarray(h1e_b,  dtype=np.float64).ctypes.data_as(ctypes.c_void_p),
+            np.ascontiguousarray(g2e_aa, dtype=np.float64).ctypes.data_as(ctypes.c_void_p),
+            np.ascontiguousarray(g2e_ab, dtype=np.float64).ctypes.data_as(ctypes.c_void_p),
+            np.ascontiguousarray(g2e_bb, dtype=np.float64).ctypes.data_as(ctypes.c_void_p),
+            stra.ctypes.data_as(ctypes.c_void_p),
+            strb.ctypes.data_as(ctypes.c_void_p),
+            ctypes.c_int(norb), ctypes.c_int(npsp_det))
+        return h0tril
+
+    h0real = _build_h0tril(h1e_a.real, h1e_b.real, g2e_aa.real, g2e_ab.real, g2e_bb.real)
+    h0 = h0real.astype(h1e.dtype)
+    h0.real = h0real
+    h0.imag = _build_h0tril(h1e_a.imag, h1e_b.imag, g2e_aa.imag, g2e_ab.imag, g2e_bb.imag)
+    h0real = None
+
+    # Fill the diagonal elements.
     for i in range(npsp_det):
-        h0[i,i] = hdiag_det[det_addr[i]]
-    h0 = lib.hermi_triu(h0)
+        h0.real[i, i] = hdiag_det.real[det_addr[i]]
+        h0.imag[i, i] = hdiag_det.imag[det_addr[i]]
 
+    t0 = lib.logger.timer_debug1(fci, "csf.pspace: pspace Hamiltonian in determinant basis", *t0)
+
+    # Now fill the upper triangular part.
+    h0.real = lib.hermi_triu(h0.real)
+    h0.imag = lib.hermi_triu(h0.imag, hermi=2)
+
+    # Sanity Checks CSF transform
     try:
-        if fci.verbose > lib.logger.DEBUG1: evals_before = scipy.linalg.eigh (h0)[0]
+        if fci.verbose > lib.logger.DEBUG1: evals_before = scipy.linalg.eigh(h0)[0]
     except ValueError as e:
-        lib.logger.debug1 (fci, ("ERROR: h0 has {} infs, {} nans; h1e_a has {} infs, {} nans; "
-            "h1e_b has {} infs, {} nans; g2e has {} infs, {} nans, norb = {}, npsp_det = {}").format (
-            np.count_nonzero (np.isinf (h0)), np.count_nonzero (np.isnan (h0)),
-            np.count_nonzero (np.isinf (h1e_a)), np.count_nonzero (np.isnan (h1e_a)),
-            np.count_nonzero (np.isinf (h1e_b)), np.count_nonzero (np.isnan (h1e_b)),
-            np.count_nonzero (np.isinf (g2e)), np.count_nonzero (np.isnan (g2e)),
+        lib.logger.debug1(fci,("ERROR: h0 has {} infs, {} nans; h1e_a has {} infs, {} nans; "
+            "h1e_b has {} infs, {} nans; g2e has {} infs, {} nans, norb = {}, npsp_det = {}").format(
+            np.count_nonzero(np.isinf(h0)), np.count_nonzero(np.isnan(h0)),
+            np.count_nonzero(np.isinf(h1e_a)), np.count_nonzero(np.isnan(h1e_a)),
+            np.count_nonzero(np.isinf(h1e_b)), np.count_nonzero(np.isnan(h1e_b)),
+            np.count_nonzero(np.isinf(g2e)), np.count_nonzero(np.isnan(g2e)),
             norb, npsp_det))
-
-        evals_before = np.zeros (npsp_det)
+        evals_before = np.zeros(npsp_det)
         raise (e) from None
 
-    h0, csf_addr = transformer.mat_det2csf_confspace (h0, econf_addr)
-    t0 = lib.logger.timer_debug1 (fci, "csf.pspace: transform pspace Hamiltonian into CSF basis", *t0)
+    # It's time to transform determinant basis h0 to CSF basis
+    h0.real, csf_addr = transformer.mat_det2csf_confspace(h0.real, econf_addr)
+    h0.imag, csf_addr_temp = transformer.mat_det2csf_confspace(h0.imag, econf_addr)
 
+    # Sanity Check
+    assert np.array_equal(csf_addr, csf_addr_temp), \
+        "Real and Imaginary part transformation resulted in different CSF addresses; "\
+            "There might be some problem"
+    
+    t0 = lib.logger.timer_debug1(fci, "csf.pspace: transform pspace Hamiltonian into CSF basis", *t0)
+
+    # Sanity Checks after the transformation
     if fci.verbose > lib.logger.DEBUG1:
-        lib.logger.debug1 (fci, "csf.pspace: eigenvalues of h0 before transformation %s", evals_before)
-        evals_after = scipy.linalg.eigh (h0)[0]
-        lib.logger.debug1 (fci, "csf.pspace: eigenvalues of h0 after transformation %s", evals_after)
-        idx = [np.argmin (np.abs (evals_before - ev)) for ev in evals_after]
+        lib.logger.debug1(fci, "csf.pspace: eigenvalues of h0 before transformation %s", evals_before)
+        evals_after = scipy.linalg.eigh(h0)[0]
+        lib.logger.debug1(fci, "csf.pspace: eigenvalues of h0 after transformation %s", evals_after)
+        idx = [np.argmin(np.abs(evals_before - ev)) for ev in evals_after]
         resid = evals_after - evals_before[idx]
-        lib.logger.debug1 (fci, "csf.pspace: best h0 eigenvalue matching differences after transformation: %s", resid)
-        lib.logger.debug1 (fci, "csf.pspace: if the transformation of h0 worked the following number will be zero: %s",
-                           np.max (np.abs(resid)))
+        lib.logger.debug1(fci, "csf.pspace: best h0 eigenvalue matching differences after transformation: %s", resid)
+        lib.logger.debug1(fci, "csf.pspace: if the transformation of h0 worked the following number will be zero: %s", np.max(np.abs(resid)))
 
-    # We got extra CSFs from building the configurations most of the time.
-    lib.logger.debug1 (fci, "csf_solver.pspace: asked for %s-CSF pspace; found %s CSFs",
-                       csf_addr.size, npsp_csf)
+    lib.logger.debug1(fci, "csf_solver.pspace: asked for %s-CSF pspace; found %s CSFs", csf_addr.size, npsp_csf)
+    
     if csf_addr.size > npsp_csf:
+        h0diag_real = np.diag(h0).real
         try:
-            csf_addr_2 = np.argpartition(np.diag (h0), npsp_csf-1)[:npsp_csf]
+            csf_addr_2 = np.argpartition(h0diag_real, npsp_csf - 1)[:npsp_csf]
         except AttributeError:
-            csf_addr_2 = np.argsort(np.diag (h0))[:npsp_csf]
+            csf_addr_2 = np.argsort(h0diag_real)[:npsp_csf]
         csf_addr = csf_addr[csf_addr_2]
-        h0 = h0[np.ix_(csf_addr_2,csf_addr_2)]
+        h0 = h0[np.ix_(csf_addr_2, csf_addr_2)]
 
-    t0 = lib.logger.timer_debug1 (fci, "csf.pspace wrapup", *t0)
+    t0 = lib.logger.timer_debug1(fci, "csf.pspace wrapup", *t0)
     return csf_addr, h0
 
 def kernel(fci, h1e, eri, norb, nelec, smult=None, idx_sym=None, ci0=None,
