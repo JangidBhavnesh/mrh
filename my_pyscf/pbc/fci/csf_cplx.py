@@ -8,7 +8,7 @@ from pyscf import __config__
 from pyscf.fci import direct_uhf, direct_spin1, cistring
 from pyscf.csf_fci.csf import CSFFCISolver as realCSFFCISolver, FCISolver as realFCISolver
 from pyscf.csf_fci.csf import unpack_h1e_cs, unpack_h1e_ab, get_init_guess, make_hdiag_csf as make_hdiag_csf_real
-from pyscf.csf_fci.csf import _debug_g2e as _debug_g2e_real, pspace as pspace_real
+from pyscf.csf_fci.csf import _debug_g2e as _debug_g2e_real, pspace as pspace_real, get_init_guess as get_init_guess_real
 from pyscf.lib.numpy_helper import tag_array
 from pyscf.csf_fci.csfstring import count_all_csfs
 from pyscf.csf_fci.csfstring import CSFTransformer
@@ -38,35 +38,51 @@ HDIAG_IMAG_TOL = 1e-3
 '''
 
 @lib.with_doc(get_init_guess.__doc__)
+# def get_init_guess(norb, nelec, nroots, hdiag_csf, transformer):
+#     '''
+#     Get the initial guess for the FCI calculation in the CSF basis
+#     '''
+#     ncsf_sym = transformer.ncsf
+#     assert np.iscomplexobj(hdiag_csf), "You are using wrong function for real Hamiltonian"
+#     dtype = hdiag_csf.dtype
+#     assert (ncsf_sym >= nroots), "Can't find {} roots among only {} CSFs of symmetry {}".format (
+#         nroots, ncsf_sym, transformer.wfnsym)
+#     hdiag_csf_real = transformer.pack_csf (hdiag_csf.real)
+#     hdiag_csf_2 = hdiag_csf_real.astype(dtype)
+#     hdiag_csf_2.real = hdiag_csf_real
+#     hdiag_csf_2.imag = transformer.pack_csf (hdiag_csf.imag)
+#     hdiag_csf_real = None
+
+#     ci0 = _get_init_guess(ncsf_sym, 1, nroots, hdiag_csf_2, nelec)
+#     assert ci0[0].dtype == hdiag_csf[0].dtype == dtype
+
+#     # ci0 is always returned as the list.
+#     ci0out = []
+#     for c in ci0:
+#         c = np.asarray(c)
+#         cout_real = transformer.vec_csf2det(c.real, normalize=False)
+#         cout = cout_real.astype(dtype)
+#         cout.real = cout_real
+#         cout.imag = transformer.vec_csf2det(c.imag, normalize=False)
+#         cout /= np.linalg.norm(cout)
+#         ci0out.append(cout)
+#     ci0 = None
+#     return np.asarray(ci0out)
+
 def get_init_guess(norb, nelec, nroots, hdiag_csf, transformer):
     '''
-    Get the initial guess for the FCI calculation in the CSF basis
+    The complex version of get_init_guess has some problem. To debug that, let me start with
+    real version of get_init_guess and then make it complex. 
     '''
-    ncsf_sym = transformer.ncsf
     assert np.iscomplexobj(hdiag_csf), "You are using wrong function for real Hamiltonian"
-    dtype = hdiag_csf.dtype
-    assert (ncsf_sym >= nroots), "Can't find {} roots among only {} CSFs of symmetry {}".format (
-        nroots, ncsf_sym, transformer.wfnsym)
-    hdiag_csf_real = transformer.pack_csf (hdiag_csf.real)
-    hdiag_csf_2 = hdiag_csf_real.astype(dtype)
-    hdiag_csf_2.real = hdiag_csf_real
-    hdiag_csf_2.imag = transformer.pack_csf (hdiag_csf.imag)
-    hdiag_csf_real = None
-
-    ci0 = _get_init_guess(ncsf_sym, 1, nroots, hdiag_csf_2, nelec)
-    assert ci0[0].dtype == hdiag_csf[0].dtype == dtype
-
-    # ci0 is always returned as the list.
-    ci0out = []
-    for c in ci0:
-        c = np.asarray(c)
-        cout_real = transformer.vec_csf2det(c.real)
-        cout = cout_real.astype(dtype)
-        cout.real = cout_real
-        cout.imag = transformer.vec_csf2det(c.imag)
-        ci0out.append(cout)
-    ci0 = None
-    return np.asarray(ci0out)
+    cireal = get_init_guess_real(norb, nelec, nroots, hdiag_csf.real, transformer)
+    ciout = []
+    for c in cireal:
+        cout = c.astype(hdiag_csf.dtype)
+        cout.real = c
+        cout.imag = 1e-8
+        ciout.append(cout)
+    return np.asarray(ciout)
 
 def make_hdiag_det (fci, h1e, eri, nrob, nelec):
     '''
@@ -479,7 +495,7 @@ def kernel(fci, h1e, eri, norb, nelec, smult=None, idx_sym=None, ci0=None,
         hx_out.real = hx_real
         hx_out.imag = hx_imag
         hx_real = hx_imag = x_detreal = x_det = None
-        return hx_out
+        return hx_out.ravel()
     
     t0 = lib.logger.timer_debug1 (fci, "csf.kernel: make hop", *t0)
 
@@ -487,6 +503,8 @@ def kernel(fci, h1e, eri, norb, nelec, smult=None, idx_sym=None, ci0=None,
         if hasattr(fci, 'get_init_guess'):
             def ci0 ():
                 ci0_det = fci.get_init_guess(norb, nelec, nroots, hdiag_csf)
+                print(type(ci0_det), ci0_det.shape, ci0_det.dtype)
+                exit()
                 ci0_csfreal = transformer.vec_det2csf (ci0_det.real)
                 ci0_csf = ci0_csfreal.astype(ci0_det.dtype)
                 ci0_csf.real = ci0_csfreal
@@ -502,7 +520,6 @@ def kernel(fci, h1e, eri, norb, nelec, smult=None, idx_sym=None, ci0=None,
                     x0.append(x)
                 return x0
     else:
-        
         if isinstance(ci0, np.ndarray) and ci0.size == na*nb:
             ci0real = transformer.vec_det2csf (ci0.real.ravel ())
             ci0imag = transformer.vec_det2csf (ci0.imag.ravel ())
@@ -540,6 +557,8 @@ def kernel(fci, h1e, eri, norb, nelec, smult=None, idx_sym=None, ci0=None,
     if max_space is None: max_space = fci.max_space
     tol_residual = getattr(fci, 'conv_tol_residual', None)
 
+    print(ci0())
+    exit()
     e, c = fci.eig(hop, ci0, precond, tol=tol, lindep=lindep,
                     max_cycle=max_cycle, max_space=max_space, nroots=nroots,
                     max_memory=max_memory, verbose=verbose, follow_state=True,
@@ -653,6 +672,7 @@ class FCISolver(cplxCSFFCISolver, direct_spin1_cplx.FCISolver):
                                      self.level_shift)
         else:
             # Note: H0 in pspace may break symmetry.
+            print(hdiag[0])
             return make_pspace_precond(hdiag, pspaceig, pspaceci, addr,
                                        self.level_shift)
         
