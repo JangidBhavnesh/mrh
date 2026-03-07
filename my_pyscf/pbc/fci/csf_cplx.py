@@ -289,6 +289,7 @@ def kernel(fci, h1e, eri, norb, nelec, smult=None, idx_sym=None, ci0=None,
            nroots=None, davidson_only=None, pspace_size=None, max_memory=None,
            orbsym=None, wfnsym=None, ecore=0, transformer=None, **kwargs):
     '''
+    kernel function.
     '''
     t0 = (lib.logger.process_clock (), lib.logger.perf_counter ())
     if 'verbose' in kwargs:
@@ -341,8 +342,8 @@ def kernel(fci, h1e, eri, norb, nelec, smult=None, idx_sym=None, ci0=None,
             return pw[0]+ecore, civec
         elif nroots > 1:
             civeccsf = np.empty((nroots,ncsf_sym), dtype=pw.dtype)
-            civeccsf[:,:] = pv[:,:nroots].T # Should I take the conj here?
-            civecreal = transformer.vec_csf2det (civeccsf)
+            civeccsf[:,:] = pv[:,:nroots].T # Should I take the conj here?: I think no.
+            civecreal = transformer.vec_csf2det (civeccsf.real)
             civec = civecreal.astype(pw.dtype)
             civec.real = civecreal
             civec.imag = transformer.vec_csf2det (civeccsf.imag)
@@ -352,7 +353,7 @@ def kernel(fci, h1e, eri, norb, nelec, smult=None, idx_sym=None, ci0=None,
         elif abs(pw[0]-pw[1]) > 1e-12:
             civeccsf = np.empty((ncsf_sym), dtype=pw.dtype)
             civeccsf[:] = pv[:,0]
-            civecreal = transformer.vec_csf2det (civeccsf)
+            civecreal = transformer.vec_csf2det (civeccsf.real)
             civec = civecreal.astype(pw.dtype)
             civec.real = civecreal
             civec.imag = transformer.vec_csf2det (civeccsf.imag)
@@ -403,12 +404,12 @@ def kernel(fci, h1e, eri, norb, nelec, smult=None, idx_sym=None, ci0=None,
                     x[addr[i]] = 1.0 + 1e-10j
                     x0.append(x)
                 return x0
-    # Done uptill here.
     else:
+        
         if isinstance(ci0, np.ndarray) and ci0.size == na*nb:
             ci0real = transformer.vec_det2csf (ci0.real.ravel ())
             ci0imag = transformer.vec_det2csf (ci0.imag.ravel ())
-            ci0_out = ci0real.astype(ci0.dtype)
+            ci0_out = np.asarray(ci0real, dtype=ci0.dtype)
             ci0_out.real = ci0real
             ci0_out.imag = ci0imag
             ci0real = ci0imag = None
@@ -420,14 +421,19 @@ def kernel(fci, h1e, eri, norb, nelec, smult=None, idx_sym=None, ci0=None,
                 ci0 = np.ascontiguousarray (ci0)
                 if nrow==1: ci0 = ci0[0]
                 ci0 = transformer.vec_det2csf (ci0)
-                ci0 = [c for c in ci0.reshape (nrow, -1)]
-                return ci0
+                ci0 = np.asarray(ci0).reshape(nrow, -1)
+                return [c for c in ci0]
+            
             ci0real = to_csf_vec (ci0.real)
             ci0imag = to_csf_vec (ci0.imag)
-            ci0 = ci0real[0].astype(ci0.real.dtype)
-            ci0.real = ci0real
-            ci0.imag = ci0imag
-            ci0real = ci0imag = None
+            ci0_out = []
+            for r, im in zip(ci0real, ci0imag):
+                c = np.asarray(r, dtype=np.complex128)
+                c.real = r
+                c.imag = im
+                ci0_out.append(c)
+
+            ci0 = ci0_out
     
     t0 = lib.logger.timer_debug1 (fci, "csf.kernel: ci0 handling", *t0)
 
