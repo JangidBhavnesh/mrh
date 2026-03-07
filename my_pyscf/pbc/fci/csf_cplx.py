@@ -5,7 +5,9 @@ from pyscf import __config__
 from pyscf.fci import direct_uhf, direct_spin1
 from pyscf.csf_fci.csf import CSFFCISolver as realCSFFCISolver
 from pyscf.csf_fci.csf import unpack_h1e_cs, get_init_guess, make_hdiag_csf as make_hdiag_csf_real
+from pyscf.csf_fci.csf import _debug_g2e as _debug_g2e_real
 from pyscf.lib.numpy_helper import tag_array
+from pyscf.csf_fci.csfstring import count_all_csfs, get_spin_evecs
 
 from mrh.my_pyscf.pbc.fci import direct_spin1_cplx
 
@@ -76,14 +78,144 @@ def make_hdiag_csf (h1e, eri, norb, nelec, transformer, hdiag_det=None, max_memo
     hdiag_csf = None
     return hdiag_csf_out
 
+def _debug_g2e (fci, g2e, eri, norb):
+    _debug_g2e_real (fci, g2e.real, eri.real, norb)
+    _debug_g2e_real (fci, g2e.imag, eri.imag, norb)
+    return
+
 def pspace(**args):
     pass
 
 
+def kernel(fci, h1e, eri, norb, nelec, smult=None, idx_sym=None, ci0=None,
+           tol=None, lindep=None, max_cycle=None, max_space=None,
+           nroots=None, davidson_only=None, pspace_size=None, max_memory=None,
+           orbsym=None, wfnsym=None, ecore=0, transformer=None, **kwargs):
+    '''
+    '''
+    t0 = (lib.logger.process_clock (), lib.logger.perf_counter ())
+    if 'verbose' in kwargs:
+        verbose = kwargs['verbose']
+        kwargs.pop ('verbose')
+    else:
+        verbose = lib.logger.Logger (stdout=fci.stdout, verbose=fci.verbose)
+    
+    # I think we should do the sanity check always:
+    fci.check_sanity()
 
-def kernel(**args):
-    pass
+    if nroots is None: nroots = fci.nroots
+    if pspace_size is None: pspace_size = fci.pspace_size
+    if davidson_only is None: davidson_only = fci.davidson_only
+    if transformer is None: transformer = fci.transformer
+    if max_memory is None: max_memory = fci.max_memory
 
+    nelec = neleca, nelecb = _unpack_nelec(nelec, fci.spin)
+    t0 = lib.logger.timer_debug1 (fci, "csf.kernel: throat-clearing", *t0)
+    hdiag_det = fci.make_hdiag (h1e, eri, norb, nelec)
+    t0 = lib.logger.timer_debug1 (fci, "csf.kernel: hdiag_det", *t0)
+    hdiag_csf = fci.make_hdiag_csf (h1e, eri, norb, nelec, hdiag_det=hdiag_det, max_memory=max_memory)
+    t0 = lib.logger.timer_debug1 (fci, "csf.kernel: hdiag_csf", *t0)
+    ncsf_all = count_all_csfs (norb, neleca, nelecb, smult)
+    if idx_sym is None: ncsf_sym = ncsf_all
+    else: ncsf_sym = np.count_nonzero (idx_sym)
+    nroots = min(ncsf_sym, nroots)
+    if nroots is not None:
+        assert (ncsf_sym >= nroots), "Can't find {} roots among only {} CSFs".format (nroots, ncsf_sym)
+    link_indexa, link_indexb = direct_spin1._unpack(norb, nelec, None)
+    na = link_indexa.shape[0]
+    nb = link_indexb.shape[0]
+    t0 = lib.logger.timer_debug1 (fci, "csf.kernel: throat-clearing", *t0)
+    addr, h0 = fci.pspace(h1e, eri, norb, nelec, idx_sym=idx_sym, hdiag_det=hdiag_det, hdiag_csf=hdiag_csf,
+                        npsp=max(pspace_size,nroots))
+    lib.logger.debug1 (fci, 'csf.kernel: error of hdiag_csf: %s', np.amax (np.abs (hdiag_csf[addr]-np.diag (h0))))
+    t0 = lib.logger.timer_debug1 (fci, "csf.kernel: make pspace", *t0)
+    if pspace_size > 0:
+        pw, pv = fci.eig (h0)
+    else:
+        pw = pv = None
+
+    if pspace_size >= ncsf_sym and not davidson_only:
+        if ncsf_sym == 1:
+            civecreal = transformer.vec_csf2det (pv[:,0].real.reshape (1,1))
+            civec = civecreal.astype(np.complex128)
+            civec.real = civecreal
+            civec.imag = transformer.vec_csf2det (pv[:,0].imag.reshape (1,1))
+            civecreal = None
+            return pw[0]+ecore, civec
+        elif nroots > 1:
+            civeccsf = np.empty((nroots,ncsf_sym), dtype=pw.dtype)
+            civeccsf[:,:] = pv[:,:nroots].T # Should I take the conj here?
+            civecreal = transformer.vec_csf2det (civeccsf)
+            civec = civecreal.astype(pw.dtype)
+            civec.real = civecreal
+            civec.imag = transformer.vec_csf2det (civeccsf.imag)
+            civecreal = None
+            return pw[:nroots]+ecore, [c.reshape(na,nb) for c in civec]
+        
+        elif abs(pw[0]-pw[1]) > 1e-12:
+            civeccsf = np.empty((ncsf_sym), dtype=pw.dtype)
+            civeccsf[:] = pv[:,0]
+            civecreal = transformer.vec_csf2det (civeccsf)
+            civec = civecreal.astype(pw.dtype)
+            civec.real = civecreal
+            civec.imag = transformer.vec_csf2det (civeccsf.imag)
+            civecreal = None
+            return pw[0]+ecore, civec.reshape(na,nb)
+        return None
+
+    t0 = lib.logger.timer_debug1 (fci, "csf.kernel: throat-clearing", *t0)
+    if idx_sym is None:
+        precond = fci.make_precond(hdiag_csf, pw, pv, addr)
+    else:
+        addr_bool = np.zeros (ncsf_all, dtype=np.bool_)
+        addr_bool[addr] = True
+        precond = fci.make_precond(hdiag_csf[idx_sym], pw, pv, addr_bool[idx_sym])
+    t0 = lib.logger.timer_debug1 (fci, "csf.kernel: make preconditioner", *t0)
+    h2e = fci.absorb_h1e(h1e, eri, norb, nelec, 0.5)
+    t0 = lib.logger.timer_debug1 (fci, "csf.kernel: h2e", *t0)
+    
+    def hop(x):
+        x_det = transformer.vec_csf2det (x.real)
+        x_det += 1j * transformer.vec_csf2det (x.imag)
+        hx = fci.contract_2e(h2e, x_det, norb, nelec, (link_indexa,link_indexb))
+        hx_real = transformer.vec_det2csf (hx.real, normalize=False).ravel ()
+        hx_imag = transformer.vec_det2csf (hx.imag, normalize=False).ravel ()
+        hx_out = hx_real.astype(hx.dtype)
+        hx_out.real = hx_real
+        hx_out.imag = hx_imag
+        hx_real = hx_imag = None
+        return hx_out
+    t0 = lib.logger.timer_debug1 (fci, "csf.kernel: make hop", *t0)
+
+    if ci0 is None:
+        if hasattr(fci, 'get_init_guess'):
+            def ci0 ():
+                ci0_det = fci.get_init_guess(norb, nelec, nroots, hdiag_csf)
+                ci0_csfreal = transformer.vec_det2csf (ci0_det.real)
+                ci0_csf = ci0_csfreal.astype(ci0_det.dtype)
+                ci0_csf.real = ci0_csfreal
+                ci0_csf.imag = transformer.vec_det2csf (ci0_det.imag)
+                ci0_csfreal = ci0_det = None
+                return ci0_csf
+        else:
+            def ci0():
+                x0 = []
+                for i in range(nroots):
+                    x = np.zeros(ncsf_sym, dtype=h1e.dtype)
+                    x[addr[i]] = 1.0 + 1e-10j
+                    x0.append(x)
+                return x0
+    # Done uptill here.
+    else:
+        if isinstance(ci0, np.ndarray) and ci0.size == na*nb:
+            ci0 = [transformer.vec_det2csf (ci0.ravel ())]
+        else:
+            nrow = len (ci0)
+            ci0 = np.asarray (ci0).reshape (nrow, -1, order='C')
+            ci0 = np.ascontiguousarray (ci0)
+            if nrow==1: ci0 = ci0[0]
+            ci0 = transformer.vec_det2csf (ci0)
+            ci0 = [c for c in ci0.reshape (nrow, -1)]
 
 class cplxCSFFCISolver:
     '''
