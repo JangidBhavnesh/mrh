@@ -1,23 +1,24 @@
 import numpy as np
 import ctypes
 import scipy
+import warnings
 
 from pyscf import lib
 from pyscf import __config__
 from pyscf.fci import direct_uhf, direct_spin1, cistring
-from pyscf.csf_fci.csf import CSFFCISolver as realCSFFCISolver
-from pyscf.csf_fci.csf import unpack_h1e_cs, get_init_guess, make_hdiag_csf as make_hdiag_csf_real
+from pyscf.csf_fci.csf import CSFFCISolver as realCSFFCISolver, FCISolver as realFCISolver
+from pyscf.csf_fci.csf import unpack_h1e_cs, unpack_h1e_ab, get_init_guess, make_hdiag_csf as make_hdiag_csf_real
 from pyscf.csf_fci.csf import _debug_g2e as _debug_g2e_real, pspace as pspace_real
 from pyscf.lib.numpy_helper import tag_array
 from pyscf.csf_fci.csfstring import count_all_csfs
+from pyscf.csf_fci.csfstring import CSFTransformer
 
 from mrh.my_pyscf.pbc.fci import direct_spin1_cplx
 
 libfci = lib.load_library('libfci')
 
 _unpack_nelec = direct_spin1_cplx._unpack_nelec
-unpack_h1e_ab = direct_spin1_cplx.unpack_h1e_ab
-_get_init_guess = direct_spin1_cplx.get_init_guess
+_get_init_guess = direct_spin1_cplx._get_init_guess_cplx
 
 '''
 # Okay Great. Let me implement the CSFsolver with complex Hamiltonian.
@@ -38,7 +39,8 @@ def get_init_guess(norb, nelec, nroots, hdiag_csf, transformer):
     Get the initial guess for the FCI calculation in the CSF basis
     '''
     ncsf_sym = transformer.ncsf
-    dtype = hdiag_csf.dtype == np.complex128
+    assert np.iscomplexobj(hdiag_csf), "You are using wrong function for real Hamiltonian"
+    dtype = hdiag_csf.dtype
     assert (ncsf_sym >= nroots), "Can't find {} roots among only {} CSFs of symmetry {}".format (
         nroots, ncsf_sym, transformer.wfnsym)
     hdiag_csf_real = transformer.pack_csf (hdiag_csf.real)
@@ -50,29 +52,38 @@ def get_init_guess(norb, nelec, nroots, hdiag_csf, transformer):
     ci0 = _get_init_guess(ncsf_sym, 1, nroots, hdiag_csf_2, nelec)
     assert ci0[0].dtype == hdiag_csf[0].dtype == dtype
 
-    ci0out = ci0.astype(dtype)
-    ci0out.real = transformer.vec_csf2det (ci0.real)
-    ci0out.imag = transformer.vec_csf2det (ci0.imag)
+    # ci0 is always returned as the list.
+    ci0out = []
+    for c in ci0:
+        c = np.asarray(c)
+        cout_real = transformer.vec_csf2det(c.real)
+        cout = cout_real.astype(dtype)
+        cout.real = cout_real
+        cout.imag = transformer.vec_csf2det(c.imag)
+        ci0out.append(cout)
     ci0 = None
-    return ci0out
+    return np.asarray(ci0out)
 
 def make_hdiag_det (fci, h1e, eri, nrob, nelec):
     '''
     hdiag = <\psi_I|H_real + i*H_imag|\psi_I> = <\psi_I|H_real|\psi_I> + i*<\psi_I|H_imag|\psi_I>.
     For the Hermitian Hamiltonian, the diagoan elements are real.  
     '''
-    dtype = h1e.dtype == np.complex128, "You are using wrong function for real Hamiltonian" 
+    assert np.iscomplexobj(h1e), "You are using wrong function for real Hamiltonian"
+    dtype = h1e.dtype
     h1ea, h1eb = unpack_h1e_ab(h1e)
     hdiag_real = direct_uhf.make_hdiag([h1ea.real, h1eb.real], [eri.real, eri.real, eri.real], nrob, nelec)
     hdiag = hdiag_real.astype(dtype)
     hdiag.real = hdiag_real
     # I think below sanity check would be done if verbosity is higher than DEBUG.
     hdiag_imag  = direct_uhf.make_hdiag([h1ea.imag, h1eb.imag], [eri.imag, eri.imag, eri.imag], nrob, nelec)
-    if np.abs(hdiag_imag).max() > 1e-6:
-        lib.logger.warning("The imaginary part of the Hamiltonian diagonal in the determinant basis "
-        "is not negligible: max imaginary part = %s", np.amax(np.abs(hdiag_imag)))
+    if np.abs(hdiag_imag).max() > 1e-3:
+           warnings.warn(
+        "The imaginary part of the Hamiltonian diagonal in the determinant basis "
+        f"is not negligible: max imaginary part = {np.max(np.abs(hdiag_imag))}"
+    )
     hdiag.imag = 0
-    hdiag = hdiag_imag = None
+    hdiag_real = hdiag_imag = None
     return hdiag
 
 def make_hdiag_csf (h1e, eri, norb, nelec, transformer, hdiag_det=None, max_memory=None):
@@ -84,8 +95,8 @@ def make_hdiag_csf (h1e, eri, norb, nelec, transformer, hdiag_det=None, max_memo
     if hdiag_det is None:
         hdiag_det = make_hdiag_det (None, h1e, eri, norb, nelec)
 
-    dtype = h1e.dtype == hdiag_det == np.complex128, "You are using wrong function for real Hamiltonian"
-
+    assert np.iscomplexobj(h1e) and np.iscomplexobj(hdiag_det), "You are using wrong function for real Hamiltonian"
+    dtype = h1e.dtype
     hdiag_csf_real = make_hdiag_csf_real(
         h1e.real, eri.real, norb, nelec, transformer, hdiag_det=hdiag_det.real, max_memory=max_memory)
     hdiag_csf = hdiag_csf_real.astype(dtype)
@@ -231,9 +242,17 @@ def pspace(fci, h1e, eri, norb, nelec, transformer,
 
     t0 = lib.logger.timer_debug1(fci, "csf.pspace: pspace Hamiltonian in determinant basis", *t0)
 
-    # Now fill the upper triangular part.
-    h0.real = lib.hermi_triu(h0.real)
-    h0.imag = lib.hermi_triu(h0.imag, hermi=2)
+    # # Now fill the upper triangular part.
+    # h0.real = lib.hermi_triu(h0.real)
+    # h0.imag = lib.hermi_triu(h0.imag, hermi=2)
+    h0real = np.ascontiguousarray(h0.real)
+    h0imag = np.ascontiguousarray(h0.imag)
+    h0 = h0.astype(h1e.dtype)
+    h0.real = lib.hermi_triu(h0real)
+    h0.imag = lib.hermi_triu(h0imag, hermi=2)
+    h0real = h0imag = None
+    # h0.real = np.ascontiguousarray(lib.hermi_triu(h0.real))
+    # h0.imag = np.ascontiguousarray(lib.hermi_triu(h0.imag, hermi=2))
 
     # Sanity Checks CSF transform
     try:
@@ -250,9 +269,12 @@ def pspace(fci, h1e, eri, norb, nelec, transformer,
         raise (e) from None
 
     # It's time to transform determinant basis h0 to CSF basis
-    h0.real, csf_addr = transformer.mat_det2csf_confspace(h0.real, econf_addr)
-    h0.imag, csf_addr_temp = transformer.mat_det2csf_confspace(h0.imag, econf_addr)
-
+    h0csf_real, csf_addr = transformer.mat_det2csf_confspace(h0.real, econf_addr)
+    h0csf_imag, csf_addr_temp = transformer.mat_det2csf_confspace(h0.imag, econf_addr)
+    h0 = h0csf_real.astype(h1e.dtype)
+    h0.real = h0csf_real
+    h0.imag = h0csf_imag
+    h0csf_real = h0csf_imag = None
     # Sanity Check
     assert np.array_equal(csf_addr, csf_addr_temp), \
         "Real and Imaginary part transformation resulted in different CSF addresses; "\
@@ -310,6 +332,7 @@ def kernel(fci, h1e, eri, norb, nelec, smult=None, idx_sym=None, ci0=None,
     nelec = neleca, nelecb = _unpack_nelec(nelec, fci.spin)
     t0 = lib.logger.timer_debug1 (fci, "csf.kernel: throat-clearing", *t0)
     hdiag_det = fci.make_hdiag (h1e, eri, norb, nelec)
+
     t0 = lib.logger.timer_debug1 (fci, "csf.kernel: hdiag_det", *t0)
     hdiag_csf = fci.make_hdiag_csf (h1e, eri, norb, nelec, hdiag_det=hdiag_det, max_memory=max_memory)
     t0 = lib.logger.timer_debug1 (fci, "csf.kernel: hdiag_csf", *t0)
@@ -373,15 +396,17 @@ def kernel(fci, h1e, eri, norb, nelec, smult=None, idx_sym=None, ci0=None,
     t0 = lib.logger.timer_debug1 (fci, "csf.kernel: h2e", *t0)
     
     def hop(x):
-        x_det = transformer.vec_csf2det (x.real)
-        x_det += 1j * transformer.vec_csf2det (x.imag)
+        x_detreal = transformer.vec_csf2det (x.real)
+        x_det = x_detreal.astype(x.dtype)
+        x_det.real = x_detreal
+        x_det.imag = transformer.vec_csf2det (x.imag)
         hx = fci.contract_2e(h2e, x_det, norb, nelec, (link_indexa,link_indexb))
         hx_real = transformer.vec_det2csf (hx.real, normalize=False).ravel ()
         hx_imag = transformer.vec_det2csf (hx.imag, normalize=False).ravel ()
         hx_out = hx_real.astype(hx.dtype)
         hx_out.real = hx_real
         hx_out.imag = hx_imag
-        hx_real = hx_imag = None
+        hx_real = hx_imag = x_detreal = x_det = None
         return hx_out
     
     t0 = lib.logger.timer_debug1 (fci, "csf.kernel: make hop", *t0)
@@ -447,6 +472,7 @@ def kernel(fci, h1e, eri, norb, nelec, smult=None, idx_sym=None, ci0=None,
                     max_cycle=max_cycle, max_space=max_space, nroots=nroots,
                     max_memory=max_memory, verbose=verbose, follow_state=True,
                     tol_residual=tol_residual, **kwargs)
+    print(e)
     t0 = lib.logger.timer_debug1 (fci, "csf.kernel: running fci.eig", *t0)
     if nroots > 1:
         creal = np.array([transformer.vec_csf2det (ci, order='C') for ci in c.real])
@@ -459,10 +485,11 @@ def kernel(fci, h1e, eri, norb, nelec, smult=None, idx_sym=None, ci0=None,
     else:
         creal = transformer.vec_csf2det (c.real, order='C')
         cimag = transformer.vec_csf2det (c.imag, order='C')
-        c = creal.astype(creal.dtype)
-        c.real = creal
-        c.imag = cimag
+        cout = creal.astype(c.dtype)
+        cout.real = creal
+        cout.imag = cimag
         creal = cimag = None
+        c = cout
         
     t0 = lib.logger.timer_debug1 (fci, "csf.kernel: transforming final ci vector", *t0)
     if nroots > 1:
@@ -478,13 +505,13 @@ class cplxCSFFCISolver:
     # which are directly needed.
     # This class won't be of any use for standalone.
     '''
-    _keys = {'smult', 'trasnsformers'}
+    _keys = {'smult', 'transformer'}
     pspace_size = getattr(__config__, 'fci_csf_FCI_pspace_size', 200)
     make_hdiag = make_hdiag_det
 
     def __init__ (self, smult, **args):
         self.smult = smult
-        self.transformers = None
+        self.transformer = None
         super().__init__ (**args)
 
     def make_hdiag_csf(self, h1e, eri, norb, nelec, hdiag_det=None, smult=None, max_memory=None):
@@ -494,8 +521,7 @@ class cplxCSFFCISolver:
             self.smult = smult
         self.check_transformer_cache ()
         max_memory = max_memory if max_memory is not None else self.max_memory
-
-        return self.make_hdiag_csf(h1e, eri, norb, nelec, self.transformer, hdiag_det=hdiag_det, 
+        return make_hdiag_csf(h1e, eri, norb, nelec, self.transformer, hdiag_det=hdiag_det, 
                                    max_memory=max_memory)
 
     def absorb_h1e(self, h1e, eri, norb, nelec, fac=1):
@@ -505,8 +531,8 @@ class cplxCSFFCISolver:
             h2eff = tag_array(h2eff, h1e_s=h1e_s)
         return h2eff
     
-    log_transformer_cache = lib.module_method(realCSFFCISolver.log_transformer_cache)
-    print_transformer_cache = lib.module_method(realCSFFCISolver.print_transformer_cache)
+    log_transformer_cache = realCSFFCISolver.log_transformer_cache
+    print_transformer_cache = realCSFFCISolver.print_transformer_cache
 
     def contract_2e(self, eris, fcivec, norb, nelec, link_index=None, **kwargs):
         hc = super().contract_2e(eris, fcivec, norb, nelec, link_index=link_index, **kwargs)
@@ -559,5 +585,59 @@ class FCISolver(cplxCSFFCISolver, direct_spin1_cplx.FCISolver):
         self.eci, self.ci = e, c
         return e, c
 
-    check_transformer_cache = lib.module_method(realCSFFCISolver.check_transformer_cache)
     
+    def check_transformer_cache (self):
+        assert (isinstance (self.smult, (int, np.number)))
+        neleca, nelecb = _unpack_nelec (self.nelec)
+        if self.transformer is None:
+            self.transformer = CSFTransformer (self.norb, neleca, nelecb, self.smult,
+                                               max_memory=self.max_memory)
+        else:
+            self.transformer._update_spin_cache (self.norb, neleca, nelecb, self.smult)
+
+    #check_transformer_cache = realFCISolver.check_transformer_cache
+
+
+if __name__ == "__main__":
+    from pyscf import gto, fci, scf, lib, ao2mo
+    from pyscf.csf_fci import csf_solver
+    from mrh.my_pyscf.pbc.fci import direct_spin1_cplx
+    mol = gto.M (atom='H 0 0 0; F 0 0 1.1', basis='sto3g', output='01-csf_fci.log',
+                verbose=lib.logger.INFO)
+    mol.build ()
+    mf = scf.RHF (mol).run ()
+
+    h0 = mf.energy_nuc ()
+    h1 = mf.mo_coeff.conj ().T @ mf.get_hcore () @ mf.mo_coeff
+    h2 = ao2mo.restore (1, ao2mo.full (mf._eri, mf.mo_coeff), mol.nao_nr ())
+    cisolver = csf_solver (mol, smult=1)
+
+    norb = mol.nao_nr ()
+    nelec = (5, 5)
+
+    e, c = cisolver.kernel (h1, h2, norb, nelec, ecore=h0, verbose=lib.logger.DEBUG)
+    print("Ground state energy: ", e)
+
+    h1 = mf.mo_coeff.conj ().T @ mf.get_hcore () @ mf.mo_coeff
+    h1 = h1 #+ 1e-10 * 1j
+    h1 = 0.5*(h1 + h1.T.conj())
+    
+    h2 = ao2mo.restore (1, ao2mo.full (mf._eri, mf.mo_coeff), mol.nao_nr ())
+    h2 = h2 + 1e-10 * 1j
+    h2 = 0.5*(h2 + h2.transpose(2, 3, 0, 1))
+    h2 = 0.5*(h2 + h2.transpose(1, 0, 3, 2).conj())
+    h2 = 0.5*(h2 + h2.transpose(3, 2, 1, 0).conj())
+
+    # cplx_cisolver = FCISolver (smult=1)
+    # e_cplx, c_cplx = cplx_cisolver.kernel (h1, h2, norb, nelec, ecore=h0)
+    # print("Ground state energy with complex Hamiltonian: ", e_cplx, h0)
+
+    e, c = cisolver.kernel (h1, h2, norb, nelec, ecore=h0, verbose=lib.logger.DEBUG)
+    print("Ground state energy: ", e)
+
+    exit()
+    cplx_cisolver_det = direct_spin1_cplx.FCISolver ()
+    e_cplx_det, c_cplx_det = cplx_cisolver_det.kernel (h1, h2, norb, nelec, ecore=h0)
+    e_tot = cplx_cisolver_det.energy(h1, h2, c_cplx_det, norb, nelec)
+    print("Total energy", e_tot)
+    print("Ground state energy with complex Hamiltonian in determinant basis: ", e_cplx_det)
