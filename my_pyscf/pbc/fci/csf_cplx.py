@@ -326,6 +326,51 @@ def make_diag_precond(hdiag, level_shift=1e-3):
         return dx / diagd
     return precond
 
+@lib.with_doc(direct_spin1.make_pspace_precond.__doc__)
+def make_pspace_precond(hdiag, pspaceig, pspaceci, addr, level_shift=0):
+    hdiag = np.asarray(hdiag)
+    pspaceig = np.asarray(pspaceig)
+    pspaceci = np.asarray(pspaceci)
+    addr = np.asarray(addr)
+
+    def precond(r, e0, x0, *args):
+        r = np.asarray(r)
+        x0 = np.asarray(x0)
+        e0r = np.real(e0)
+
+        # Full-space diagonal inverse
+        denom = hdiag - (e0r - level_shift)
+        denom = denom.astype(hdiag.dtype, copy=True)
+        
+        # For very small denominators, lets set them to a small number to 
+        # avoid numerical instability. 
+        denom[np.abs(denom) < 1e-8] = 1e-8 + 0j
+
+        hdiaginv = 1.0 / denom
+        hdiaginv[np.abs(hdiaginv) > 1e8] = 1e8
+
+        # P-space inverse in eigenbasis:
+        pdenom = pspaceig - (e0r - level_shift)
+        pdenom = np.asarray(pdenom, dtype=pspaceig.dtype).copy()
+        pdenom[np.abs(pdenom) < 1e-8] = 1e-8
+        h0e0inv = np.dot(pspaceci / pdenom, pspaceci.conj().T)
+
+        # Apply preconditioner to x0 and residual
+        h0x0 = x0 * hdiaginv
+        h0x0[addr] = np.dot(h0e0inv, x0[addr])
+
+        h0r = r * hdiaginv
+        h0r[addr] = np.dot(h0e0inv, r[addr])
+
+        # For complex number innder product, using vdot instead of dot.
+        denom_e1 = np.vdot(x0, h0x0)
+        if abs(denom_e1) < 1e-14: e1 = 0.0
+        else: e1 = np.vdot(x0, h0r) / denom_e1
+        x1 = r - e1 * x0
+        x1 *= hdiaginv
+        return x1
+    return precond
+
 def kernel(fci, h1e, eri, norb, nelec, smult=None, idx_sym=None, ci0=None,
            tol=None, lindep=None, max_cycle=None, max_space=None,
            nroots=None, davidson_only=None, pspace_size=None, max_memory=None,
@@ -601,6 +646,7 @@ class FCISolver(cplxCSFFCISolver, direct_spin1_cplx.FCISolver):
         self.check_transformer_cache ()
         return get_init_guess (norb, nelec, nroots, hdiag_csf, self.transformer)
 
+    # Needed to replace the pspace preconditioner with the one suitable for complex Hamiltonian.
     def make_precond(self, hdiag, pspaceig=None, pspaceci=None, addr=None):
         if pspaceig is None:
             return make_diag_precond(hdiag, pspaceig, pspaceci, addr,
