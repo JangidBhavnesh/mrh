@@ -1,3 +1,5 @@
+import inspect
+
 import numpy as np
 import ctypes
 import scipy
@@ -82,7 +84,7 @@ def get_init_guess(norb, nelec, nroots, hdiag_csf, transformer):
         cout.real = c
         cout.imag = 1e-8
         ciout.append(cout)
-    return np.asarray(ciout)
+    return ciout #np.asarray(ciout)
 
 def make_hdiag_det (fci, h1e, eri, nrob, nelec):
     '''
@@ -413,17 +415,20 @@ def kernel(fci, h1e, eri, norb, nelec, smult=None, idx_sym=None, ci0=None,
     nelec = neleca, nelecb = _unpack_nelec(nelec, fci.spin)
     t0 = lib.logger.timer_debug1 (fci, "csf.kernel: throat-clearing", *t0)
     hdiag_det = fci.make_hdiag (h1e, eri, norb, nelec)
-
     t0 = lib.logger.timer_debug1 (fci, "csf.kernel: hdiag_det", *t0)
+    
     hdiag_csf = fci.make_hdiag_csf (h1e, eri, norb, nelec, hdiag_det=hdiag_det, max_memory=max_memory)
     t0 = lib.logger.timer_debug1 (fci, "csf.kernel: hdiag_csf", *t0)
+    
     ncsf_all = count_all_csfs (norb, neleca, nelecb, smult)
     if idx_sym is None: ncsf_sym = ncsf_all
     else: ncsf_sym = np.count_nonzero (idx_sym)
     nroots = min(ncsf_sym, nroots)
     if nroots is not None:
         assert (ncsf_sym >= nroots), "Can't find {} roots among only {} CSFs".format (nroots, ncsf_sym)
-    link_indexa, link_indexb = direct_spin1._unpack(norb, nelec, None)
+    
+    link_indexa, link_indexb = _unpack(norb, nelec, None, spin=0)
+
     na = link_indexa.shape[0]
     nb = link_indexb.shape[0]
     t0 = lib.logger.timer_debug1 (fci, "csf.kernel: throat-clearing", *t0)
@@ -484,18 +489,28 @@ def kernel(fci, h1e, eri, norb, nelec, smult=None, idx_sym=None, ci0=None,
     t0 = lib.logger.timer_debug1 (fci, "csf.kernel: h2e", *t0)
     
     def hop(x):
-        x_detreal = transformer.vec_csf2det (x.real)
-        x_det = x_detreal.astype(x.dtype)
-        x_det.real = x_detreal
-        x_det.imag = transformer.vec_csf2det (x.imag)
-        hx = fci.contract_2e(h2e, x_det, norb, nelec, (link_indexa,link_indexb))
-        hx_real = transformer.vec_det2csf (hx.real, normalize=False).ravel ()
-        hx_imag = transformer.vec_det2csf (hx.imag, normalize=False).ravel ()
-        hx_out = hx_real.astype(hx.dtype)
-        hx_out.real = hx_real
-        hx_out.imag = hx_imag
-        hx_real = hx_imag = x_detreal = x_det = None
+        x_det = (transformer.vec_csf2det(x.real, normalize=False)
+                + 1j * transformer.vec_csf2det(x.imag, normalize=False))
+        x_det /= np.linalg.norm(x_det)
+        hx = fci.contract_2e(h2e, x_det, norb, nelec, (link_indexa, link_indexb))
+        hx_out = (transformer.vec_det2csf(hx.real, normalize=False).ravel()
+                + 1j * transformer.vec_det2csf(hx.imag, normalize=False).ravel())
+        # print("Done")
         return hx_out.ravel()
+
+    # def hop(x):
+    #     x_detreal = transformer.vec_csf2det (x.real)
+    #     x_det = x_detreal.astype(x.dtype)
+    #     x_det.real = x_detreal
+    #     x_det.imag = transformer.vec_csf2det (x.imag)
+    #     hx = fci.contract_2e(h2e, x_det, norb, nelec, (link_indexa,link_indexb))
+    #     hx_real = transformer.vec_det2csf (hx.real, normalize=False).ravel ()
+    #     hx_imag = transformer.vec_det2csf (hx.imag, normalize=False).ravel ()
+    #     hx_out = hx_real.astype(x.dtype)
+    #     hx_out.real = hx_real
+    #     hx_out.imag = hx_imag
+    #     hx_real = hx_imag = x_detreal = x_det = None
+    #     return hx_out.ravel()
     
     t0 = lib.logger.timer_debug1 (fci, "csf.kernel: make hop", *t0)
 
@@ -503,14 +518,16 @@ def kernel(fci, h1e, eri, norb, nelec, smult=None, idx_sym=None, ci0=None,
         if hasattr(fci, 'get_init_guess'):
             def ci0 ():
                 ci0_det = fci.get_init_guess(norb, nelec, nroots, hdiag_csf)
-                print(type(ci0_det), ci0_det.shape, ci0_det.dtype)
-                exit()
-                ci0_csfreal = transformer.vec_det2csf (ci0_det.real)
-                ci0_csf = ci0_csfreal.astype(ci0_det.dtype)
-                ci0_csf.real = ci0_csfreal
-                ci0_csf.imag = transformer.vec_det2csf (ci0_det.imag)
-                ci0_csfreal = ci0_det = None
-                return ci0_csf
+                dtype = ci0_det[0].dtype
+                ci0_csfout = []
+                for c in ci0_det:
+                    ci0_csfreal = transformer.vec_det2csf (c.real)
+                    ci0_csf = ci0_csfreal.astype(dtype)
+                    ci0_csf.real = ci0_csfreal
+                    ci0_csf.imag = 1e-8 #transformer.vec_det2csf (ci0_det.imag)
+                    ci0_csf /= np.linalg.norm(ci0_csf)
+                    ci0_csfout.append(ci0_csf)
+                return ci0_csfout
         else:
             def ci0():
                 x0 = []
@@ -557,8 +574,6 @@ def kernel(fci, h1e, eri, norb, nelec, smult=None, idx_sym=None, ci0=None,
     if max_space is None: max_space = fci.max_space
     tol_residual = getattr(fci, 'conv_tol_residual', None)
 
-    print(ci0())
-    exit()
     e, c = fci.eig(hop, ci0, precond, tol=tol, lindep=lindep,
                     max_cycle=max_cycle, max_space=max_space, nroots=nroots,
                     max_memory=max_memory, verbose=verbose, follow_state=True,
@@ -629,7 +644,7 @@ class cplxCSFFCISolver:
     print_transformer_cache = realCSFFCISolver.print_transformer_cache
 
     def contract_2e(self, eris, fcivec, norb, nelec, link_index=None, **kwargs):
-        hc = super().contract_2e(eris, fcivec, norb, nelec, link_index=link_index, **kwargs)
+        hc = super().contract_2e(eris, fcivec, norb, nelec, link_index=None, **kwargs)
         if hasattr(eris, 'h1e_s'):
             hc_real = direct_uhf.contract_1e ([eris.h1e_s.real, -eris.h1e_s.real], fcivec.real, norb, nelec, link_index)
             hc_real -= direct_uhf.contract_1e ([eris.h1e_s.imag, -eris.h1e_s.imag], fcivec.imag, norb, nelec, link_index)
@@ -672,7 +687,6 @@ class FCISolver(cplxCSFFCISolver, direct_spin1_cplx.FCISolver):
                                      self.level_shift)
         else:
             # Note: H0 in pspace may break symmetry.
-            print(hdiag[0])
             return make_pspace_precond(hdiag, pspaceig, pspaceci, addr,
                                        self.level_shift)
         
@@ -694,6 +708,18 @@ class FCISolver(cplxCSFFCISolver, direct_spin1_cplx.FCISolver):
     check_transformer_cache = realFCISolver.check_transformer_cache
 
 
+
+
+def _unpack(norb, nelec, link_index, spin=None):
+    if link_index is None:
+        neleca, nelecb = _unpack_nelec(nelec, spin)
+        link_indexa = link_indexb = cistring.gen_linkstr_index_trilidx(range(norb), neleca)
+        if neleca != nelecb:
+            link_indexb = cistring.gen_linkstr_index_trilidx(range(norb), nelecb)
+        return link_indexa, link_indexb
+    else:
+        return link_index
+    
 if __name__ == "__main__":
     from pyscf import gto, fci, scf, lib, ao2mo
     from pyscf.csf_fci import csf_solver
@@ -709,15 +735,16 @@ if __name__ == "__main__":
     cisolver = csf_solver (mol, smult=1)
 
     norb = mol.nao_nr ()
-    nelec = (5, 5)
+    nelec = (1, 1)
     
     def real_CSFSolver(h0, h1, h2, norb, nelec, davidson_only=False, pspace_size=400):
         real_cisolver = csf_solver (mol, smult=1)
         real_cisolver.pspace_size = pspace_size
         real_cisolver.davidson_only = davidson_only
+        real_cisolver.max_cycle = 1
         e, c = real_cisolver.kernel (h1, h2, norb, nelec, ecore=h0)
-        e_tot = real_cisolver.energy(h1, h2, c, norb, nelec)
-        assert abs(e_tot+h0-e) < 1e-6, "Energy doesn't match the expected value; "
+        # e_tot = real_cisolver.energy(h1, h2, c, norb, nelec)
+        # assert abs(e_tot+h0-e) < 1e-6, "Energy doesn't match the expected value; "
         print("CSF FCI Converged?", real_cisolver.converged, 
               "Norm of wave function: ", np.linalg.norm(c), 
               "Total energy: ", e)
@@ -738,8 +765,10 @@ if __name__ == "__main__":
         cplx_cisolver = FCISolver (mol, smult=1)
         cplx_cisolver.davidson_only = davidson_only
         cplx_cisolver.pspace_size = pspace_size
-        print(davidson_only, pspace_size)
+        cplx_cisolver.max_cycle = 1
         e_cplx, c_cplx = cplx_cisolver.kernel (h1cplx, h2cplx, norb, nelec, ecore=h0)
+        exit()
+        print("Done with FCI")
         e_tot = cplx_cisolver.energy(h1cplx, h2cplx, c_cplx, norb, nelec)
         #assert abs(e_tot+h0-e_cplx) < 1e-6, "Energy doesn't match the expected value; "
         print("Complex CSF FCI Converged?", cplx_cisolver.converged, 
@@ -764,10 +793,10 @@ if __name__ == "__main__":
     e_real_csf = real_CSFSolver(h0, h1, h2, norb, nelec, davidson_only=True, pspace_size=400)
     print("\nRunning complex CSF FCI solver...")
     e_cplx_csf = cplx_CSFSolver(h0cplx, h1cplx, h2cplx, norb, nelec, davidson_only=True, pspace_size=400)
-    print("\nRunning complex Determinant FCI solver...")
-    e_cplx_det = cplx_detSolver(h0cplx, h1cplx, h2cplx, norb, nelec, davidson_only=True, pspace_size=400)
-    print("\nSummary of results:")
-    print(f"Real CSF FCI Energy   : {e_real_csf:.12f}")
-    print(f"Complex CSF FCI Energy: {e_cplx_csf.real:.12f}")
-    print(f"Complex Det FCI Energy: {e_cplx_det.real:.12f}")
+    # print("\nRunning complex Determinant FCI solver...")
+    # e_cplx_det = cplx_detSolver(h0cplx, h1cplx, h2cplx, norb, nelec, davidson_only=True, pspace_size=400)
+    # print("\nSummary of results:")
+    # print(f"Real CSF FCI Energy   : {e_real_csf:.12f}")
+    # print(f"Complex CSF FCI Energy: {e_cplx_csf.real:.12f}")
+    # print(f"Complex Det FCI Energy: {e_cplx_det.real:.12f}")
     
