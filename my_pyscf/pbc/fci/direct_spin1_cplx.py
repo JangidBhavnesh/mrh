@@ -71,8 +71,8 @@ def _get_init_guess_cplx(na, nb, nroots, hdiag, nelec):
             x[int(addr)] = 1.0 + 0.0j
             ci0.append(x.view(direct_spin1.FCIvector))
 
-    ci0[0][0]  += (1e-3 + 1e-5j)
-    ci0[0][-1] -= (1e-5 - 1e-5j)
+    ci0[0][0]  += (1e-5 + 1e-7j)
+    ci0[0][-1] -= (1e-5 - 1e-7j)
     return ci0
 
 def get_init_guess_cplx(norb, nelec, nroots, hdiag):
@@ -156,7 +156,7 @@ def contract_2e(eri, fcivec, norb, nelec, link_index=None):
     if fcivec.dtype == eri.dtype == np.float64:
         fcivec = np.asarray(fcivec, order='C')
         eri = np.asarray(eri, order='C')
-        ci1 = np.zeros_like(fcivec) 
+        ci1 = np.zeros_like(fcivec)
 
         libfci.FCIcontract_2es1(eri.ctypes.data_as(ctypes.c_void_p),
                                 fcivec.ctypes.data_as(ctypes.c_void_p),
@@ -474,13 +474,9 @@ class FCISolver(direct_spin1.FCISolver):
 
 FCI = FCISolver
 
-def _unpack(norb, nelec, link_index):
+def _unpack(norb, nelec, link_index, spin=None):
     if link_index is None:
-        if isinstance(nelec, (int, np.number)):
-            nelecb = nelec//2
-            neleca = nelec - nelecb
-        else:
-            neleca, nelecb = nelec
+        neleca, nelecb = _unpack_nelec(nelec, spin)
         link_indexa = cistring.gen_linkstr_index(range(norb), neleca)
         link_indexb = cistring.gen_linkstr_index(range(norb), nelecb)
         return link_indexa, link_indexb
