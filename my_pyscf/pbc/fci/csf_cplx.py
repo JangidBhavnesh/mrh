@@ -751,7 +751,7 @@ class cplxCSFFCISolver:
     print_transformer_cache = realCSFFCISolver.print_transformer_cache
 
     def contract_2e(self, eris, fcivec, norb, nelec, link_index=None, **kwargs):
-        hc = super().contract_2e(eris, fcivec, norb, nelec, link_index=None, **kwargs)
+        hc = super().contract_2e(eris, fcivec, norb, nelec, link_index=link_index, **kwargs)
         if hasattr(eris, 'h1e_s'):
             hc_real = direct_uhf.contract_1e ([eris.h1e_s.real, -eris.h1e_s.real], fcivec.real, norb, nelec, link_index)
             hc_real -= direct_uhf.contract_1e ([eris.h1e_s.imag, -eris.h1e_s.imag], fcivec.imag, norb, nelec, link_index)
@@ -777,7 +777,6 @@ class FCISolver(cplxCSFFCISolver, direct_spin1_cplx.FCISolver):
     '''
     Complex FCI in CSFSolver. 
     '''
-
     def get_init_guess(self, norb, nelec, nroots, hdiag_csf, **kwargs):
         '''
         Get the initial guess for the FCI calculation in the CSF basis.
@@ -793,7 +792,6 @@ class FCISolver(cplxCSFFCISolver, direct_spin1_cplx.FCISolver):
             return make_diag_precond(hdiag, pspaceig, pspaceci, addr,
                                      self.level_shift)
         else:
-            # Note: H0 in pspace may break symmetry.
             return make_pspace_precond(hdiag, pspaceig, pspaceci, addr,
                                        self.level_shift)
         
@@ -819,8 +817,8 @@ if __name__ == "__main__":
     from pyscf import gto, fci, scf, lib, ao2mo
     from pyscf.csf_fci import csf_solver
     from mrh.my_pyscf.pbc.fci import direct_spin1_cplx
-    mol = gto.Mole(atom='H 0 0 0; H 0 0 1.1', basis='STO-6G',
-                verbose=0) #lib.logger.DEBUG)
+    mol = gto.Mole(atom='H 0 0 0; F 0 0 1.1', basis='STO-6G',
+                verbose=lib.logger.DEBUG)
     mol.build ()
     mf = scf.RHF (mol).run ()
     h0 = mf.energy_nuc ()
@@ -829,7 +827,7 @@ if __name__ == "__main__":
     cisolver = csf_solver (mol, smult=1)
 
     norb = mol.nao_nr ()
-    nelec = (1, 1)
+    nelec = (5, 5)
     
     def real_CSFSolver(h0, h1, h2, norb, nelec, davidson_only=False, pspace_size=400):
         real_cisolver = csf_solver (mol, smult=1)
@@ -862,7 +860,6 @@ if __name__ == "__main__":
         cplx_cisolver.max_cycle = 50
         cplx_cisolver.nroots = 1
         e_cplx, c_cplx = cplx_cisolver.kernel (h1cplx, h2cplx, norb, nelec, ecore=h0)
-        print("Done with FCI")
         e_tot = cplx_cisolver.energy(h1cplx, h2cplx, c_cplx, norb, nelec)
         assert abs(e_tot+h0-e_cplx) < 1e-6, "Energy doesn't match the expected value; "
         print("Complex CSF FCI Converged?", cplx_cisolver.converged, 
