@@ -21,7 +21,6 @@ libfci = lib.load_library('libfci')
 
 # Note, that the _unpack function should be called from the direct_spin1_cplx, as the 
 # _unpack from direct_spin1 will store the link_idx in the tril format.
-
 _unpack = direct_spin1_cplx._unpack
 _unpack_nelec = direct_spin1_cplx._unpack_nelec
 _get_init_guess = direct_spin1_cplx._get_init_guess_cplx
@@ -36,48 +35,34 @@ HDIAG_IMAG_TOL = 1e-3
 #   2. Contruct the Hamiltonian in det basis (using PySCF infrastructure), then transform to CSF basis.
 #   3. Solve the eigenvalue problem (exact or Davidson) in CSF basis.
 #   4. Transform the eigenvectors back to det basis.
+#   5. For the Davidson solver, the matrix-vector product are computed in the det basis and then transformed 
+#      to CSF basis for the Davidson solver.
 
-# Now for the complex CI vec of type (a+ib), to use the CSFSolver, the transformation
-# will be a_csf + i*b_csf = U * (a_det + i*b_det), where U is the det to CSF transformation matrix (not this is
+# Now for the complex CI vec of type (a+ib), to use the CSFSolver, the transformation (det to CSF)
+# will be a_csf + i*b_csf = U * (a_det + i*b_det), where U is the det to CSF transformation matrix (Note: this
 # matrix is not constructed and stored in the memory). The U matrix is real only.
 '''
 
-@lib.with_doc(get_init_guess.__doc__)
-# def get_init_guess(norb, nelec, nroots, hdiag_csf, transformer):
-#     '''
-#     Get the initial guess for the FCI calculation in the CSF basis
-#     '''
-#     ncsf_sym = transformer.ncsf
-#     assert np.iscomplexobj(hdiag_csf), "You are using wrong function for real Hamiltonian"
-#     dtype = hdiag_csf.dtype
-#     assert (ncsf_sym >= nroots), "Can't find {} roots among only {} CSFs of symmetry {}".format (
-#         nroots, ncsf_sym, transformer.wfnsym)
-#     hdiag_csf_real = transformer.pack_csf (hdiag_csf.real)
-#     hdiag_csf_2 = hdiag_csf_real.astype(dtype)
-#     hdiag_csf_2.real = hdiag_csf_real
-#     hdiag_csf_2.imag = transformer.pack_csf (hdiag_csf.imag)
-#     hdiag_csf_real = None
-
-#     ci0 = _get_init_guess(ncsf_sym, 1, nroots, hdiag_csf_2, nelec)
-#     assert ci0[0].dtype == hdiag_csf[0].dtype == dtype
-
-#     # ci0 is always returned as the list.
-#     ci0out = []
-#     for c in ci0:
-#         c = np.asarray(c)
-#         cout_real = transformer.vec_csf2det(c.real, normalize=False)
-#         cout = cout_real.astype(dtype)
-#         cout.real = cout_real
-#         cout.imag = transformer.vec_csf2det(c.imag, normalize=False)
-#         cout /= np.linalg.norm(cout)
-#         ci0out.append(cout)
-#     ci0 = None
-#     return np.asarray(ci0out)
-
 def get_init_guess(norb, nelec, nroots, hdiag_csf, transformer):
     '''
-    The complex version of get_init_guess has some problem. To debug that, let me start with
-    real version of get_init_guess and then make it complex. 
+    Also check the doc: csf_fci.csf.get_init_guess
+    Get the initial guess for the FCI calculation in the CSF basis.
+    Note: for initial guess, I am using the real part of CI vectors only.
+    The imaginary part would be small, since the hdiag_csf should be real-dominated.
+    args:
+        norb: int
+            number of active space orbitals
+        nelec: tuple (neleca, nelecb) or int
+            number of electrons
+        nroots: int
+            number of roots
+        hdiag_csf: np.ndarray of size (1, ncsf)
+            diagonal of the Hamiltonian in the CSF basis
+        transformer: CSFTransformer object
+            the transformer object that can transform between det and CSF basis.
+    returns:
+        ciout: list of np.ndarray
+            list of initial guess CI vectors in the determinant basis.
     '''
     assert np.iscomplexobj(hdiag_csf), "You are using wrong function for real Hamiltonian"
     cireal = get_init_guess_real(norb, nelec, nroots, hdiag_csf.real, transformer)
@@ -85,9 +70,11 @@ def get_init_guess(norb, nelec, nroots, hdiag_csf, transformer):
     for c in cireal:
         cout = c.astype(hdiag_csf.dtype)
         cout.real = c
-        cout.imag = 1e-8
+        cout.imag = 1e-12 # Only adding some noise.
+        cout /= np.linalg.norm(cout) # Normalizing it.
         ciout.append(cout)
-    return ciout #np.asarray(ciout)
+    cireal = None
+    return ciout
 
 def make_hdiag_det (fci, h1e, eri, nrob, nelec):
     '''
