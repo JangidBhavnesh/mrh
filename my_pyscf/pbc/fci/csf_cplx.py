@@ -412,12 +412,13 @@ def pspace(fci, h1e, eri, norb, nelec, transformer,
     return csf_addr, h0
 
 # The Davidson solver is used for iterative solving the eigen vectos for the a large sparse matrix.
-# Initially, a few guess vectors are provided, then in each iteration, the matrix-vector product is computed and then
-# the subspace Hamiltonian is constructed and diagonalized to get the Ritz values and Ritz vectors, then the residual is 
-# computed and preconditioned to get the new guess vector for the next iteration. Till the convergence is reached.
-# Alternatively, in QC, there is pspace Davidson solver, where the Hamiltonian is constructed in a smaller subspace exactly
-# and then those eigenvectors are projected to entire subspace and been used for the Davidson solver.
-# Below I am defining the preconditioners for the Davidson solvers.
+# Initially, a few guess vectors are provided, then in each iteration, the matrix-vector product is 
+# computed and then the subspace Hamiltonian is constructed and diagonalized to get the Ritz values 
+# and Ritz vectors, then the residual is computed and preconditioned to get the new guess vector for 
+# the next iteration. Till the convergence is reached.
+# Alternatively, in QC, there is pspace Davidson solver, where the Hamiltonian is constructed in a smaller 
+# subspace exactly and then those eigenvectors are projected to entire subspace and been used for the 
+# Davidson solver. Below I am defining the preconditioners for the Davidson solvers.
 
 def make_diag_precond(hdiag, level_shift=1e-3):
     '''
@@ -535,6 +536,7 @@ def kernel(fci, h1e, eri, norb, nelec, smult=None, idx_sym=None, ci0=None,
     if nroots is not None:
         assert (ncsf_sym >= nroots), "Can't find {} roots among only {} CSFs".format (nroots, ncsf_sym)
     
+    # Remember, this _unpack should be used from direct_spin1_cplx.
     link_indexa, link_indexb = _unpack(norb, nelec, None, spin=0)
 
     na = link_indexa.shape[0]
@@ -547,31 +549,34 @@ def kernel(fci, h1e, eri, norb, nelec, smult=None, idx_sym=None, ci0=None,
 
     # Making sure h0 is Hermitian.
     h0 = 0.5 * (h0 + h0.conj().T)
+
     if pspace_size > 0:
         pw, pv = fci.eig(h0)
     else:
         pw = pv = None
 
     dtype = h1e.dtype
-
     if pspace_size >= ncsf_sym and not davidson_only:
         if ncsf_sym == 1:
-            civecreal = transformer.vec_csf2det (pv[:,0].real.reshape (1,1))
+            civecreal = transformer.vec_csf2det (pv[:,0].real.reshape (1,1), normalize=False)
             civec = civecreal.astype(dtype)
             civec.real = civecreal
-            civec.imag = transformer.vec_csf2det (pv[:,0].imag.reshape (1,1))
+            civec.imag = transformer.vec_csf2det (pv[:,0].imag.reshape (1,1), normalize=False)
             civecreal = None
+            civec /= np.linalg.norm(civec)
             return pw[0]+ecore, civec
         elif nroots > 1:
-            civeccsf = np.empty((nroots,ncsf_sym), dtype=dtype)
-            civeccsf[:,:] = pv[:,:nroots].T # Should I take the conj here?: I think no.
-            civecreal = transformer.vec_csf2det (civeccsf.real)
-            civec = civecreal.astype(dtype)
-            civec.real = civecreal
-            civec.imag = transformer.vec_csf2det (civeccsf.imag)
+            civecout = []
+            for i in range(nroots):
+                civeccsf = pv[:,i].T # Should I take the conj here?: I think no.
+                civecreal = transformer.vec_csf2det (civeccsf.real, normalize=False)
+                civec = civecreal.astype(dtype)
+                civec.real = civecreal
+                civec.imag = transformer.vec_csf2det (civeccsf.imag, normalize=False)
+                civec /= np.linalg.norm(civec)
+                civecout.append(civec.reshape(na,nb))
             civecreal = None
-            return pw[:nroots]+ecore, [c.reshape(na,nb) for c in civec]
-        
+            return pw[:nroots]+ecore, civecout
         elif abs(pw[0]-pw[1]) > 1e-12:
             civeccsf = np.empty((ncsf_sym), dtype=dtype)
             civeccsf[:] = pv[:,0]
@@ -595,30 +600,20 @@ def kernel(fci, h1e, eri, norb, nelec, smult=None, idx_sym=None, ci0=None,
     t0 = lib.logger.timer_debug1 (fci, "csf.kernel: make preconditioner", *t0)
     h2e = fci.absorb_h1e(h1e, eri, norb, nelec, 0.5)
     t0 = lib.logger.timer_debug1 (fci, "csf.kernel: h2e", *t0)
-    
+
     def hop(x):
         x_det = (transformer.vec_csf2det(x.real, normalize=False)
                 + 1j * transformer.vec_csf2det(x.imag, normalize=False))
-        x_det /= np.linalg.norm(x_det)
+        if nroots > 1:
+            for i in range(nroots):
+                x_det[i] /= np.linalg.norm(x_det[i])
+        elif nroots == 1:
+            x_det /= np.linalg.norm(x_det)
         hx = fci.contract_2e(h2e, x_det, norb, nelec, (link_indexa, link_indexb))
         hx_out = (transformer.vec_det2csf(hx.real, normalize=False).ravel()
                 + 1j * transformer.vec_det2csf(hx.imag, normalize=False).ravel())
         return hx_out.ravel()
 
-    # def hop(x):
-    #     x_detreal = transformer.vec_csf2det (x.real)
-    #     x_det = x_detreal.astype(x.dtype)
-    #     x_det.real = x_detreal
-    #     x_det.imag = transformer.vec_csf2det (x.imag)
-    #     hx = fci.contract_2e(h2e, x_det, norb, nelec, (link_indexa,link_indexb))
-    #     hx_real = transformer.vec_det2csf (hx.real, normalize=False).ravel ()
-    #     hx_imag = transformer.vec_det2csf (hx.imag, normalize=False).ravel ()
-    #     hx_out = hx_real.astype(x.dtype)
-    #     hx_out.real = hx_real
-    #     hx_out.imag = hx_imag
-    #     hx_real = hx_imag = x_detreal = x_det = None
-    #     return hx_out.ravel()
-    
     t0 = lib.logger.timer_debug1 (fci, "csf.kernel: make hop", *t0)
 
     if ci0 is None:
@@ -686,7 +681,7 @@ def kernel(fci, h1e, eri, norb, nelec, smult=None, idx_sym=None, ci0=None,
                     max_memory=max_memory, verbose=verbose, follow_state=True,
                     tol_residual=tol_residual, **kwargs)
     
-    dtype = c.dtype
+    dtype = c[0].dtype
 
     t0 = lib.logger.timer_debug1 (fci, "csf.kernel: running fci.eig", *t0)
     if nroots > 1:
@@ -863,6 +858,7 @@ if __name__ == "__main__":
         cplx_cisolver.davidson_only = davidson_only
         cplx_cisolver.pspace_size = pspace_size
         cplx_cisolver.max_cycle = 50
+        cplx_cisolver.nroots = 1
         e_cplx, c_cplx = cplx_cisolver.kernel (h1cplx, h2cplx, norb, nelec, ecore=h0)
         print("Done with FCI")
         e_tot = cplx_cisolver.energy(h1cplx, h2cplx, c_cplx, norb, nelec)
