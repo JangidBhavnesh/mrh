@@ -27,6 +27,7 @@ _get_init_guess = direct_spin1_cplx._get_init_guess_cplx
 
 # Global variables:
 HDIAG_IMAG_TOL = 1e-3
+IMAG_NOISE = 1e-12
 
 '''
 # Okay Great. Let me implement the CSFsolver with complex Hamiltonian.
@@ -70,32 +71,60 @@ def get_init_guess(norb, nelec, nroots, hdiag_csf, transformer):
     for c in cireal:
         cout = c.astype(hdiag_csf.dtype)
         cout.real = c
-        cout.imag = 1e-12 # Only adding some noise.
+        cout.imag = IMAG_NOISE # Only adding some noise.
         cout /= np.linalg.norm(cout) # Normalizing it.
         ciout.append(cout)
     cireal = None
     return ciout
 
-def make_hdiag_det (fci, h1e, eri, nrob, nelec):
+def make_hdiag_det (fci, h1e, eri, norb, nelec):
     '''
     hdiag = <\psi_I|H_real + i*H_imag|\psi_I> = <\psi_I|H_real|\psi_I> + i*<\psi_I|H_imag|\psi_I>.
-    For the Hermitian Hamiltonian, the diagoan elements are real.  
+    For the Hermitian Hamiltonian, the diagoan elements are real. Still the output array would be
+    complex to avoid any datatype bug in any other part of the code.
+    args:
+        fci: FCISolver object?
+            I don't know why it's needed but keeping it consistent with actual csfsolver function.
+        h1e: np.ndarray of shape (norb, norb)
+            one-electron integrals
+        eri: np.ndarray of shape (norb, norb, norb, norb)
+            two-electron integrals in chemist's notation
+        norb: int
+            number of active space orbitals
+        nelec: tuple (neleca, nelecb) or int
+            number of active space electrons
+    returns:
+        hdiag: np.ndarray of shape (ndet,)
+            diagonal of the Hamiltonian in the determinant basis.
     '''
-    assert np.iscomplexobj(h1e), "You are using wrong function for real Hamiltonian"
+    assert np.iscomplexobj(h1e) and np.iscomplexobj(eri), \
+        "You are using wrong function for real Hamiltonian"
+    
     dtype = h1e.dtype
+    
     h1ea, h1eb = unpack_h1e_ab(h1e)
-    hdiag_real = direct_uhf.make_hdiag([h1ea.real, h1eb.real], [eri.real, eri.real, eri.real], nrob, nelec)
+    hdiag_real = direct_uhf.make_hdiag(
+        [h1ea.real, h1eb.real], 
+        [eri.real, eri.real, eri.real], 
+        norb, nelec)
     hdiag = hdiag_real.astype(dtype)
     hdiag.real = hdiag_real
-    # I think below sanity check would be done if verbosity is higher than DEBUG.
-    hdiag_imag  = direct_uhf.make_hdiag([h1ea.imag, h1eb.imag], [eri.imag, eri.imag, eri.imag], nrob, nelec)
-    if np.abs(hdiag_imag).max() > 1e-3:
-           warnings.warn(
-        "The imaginary part of the Hamiltonian diagonal in the determinant basis "
-        f"is not negligible: max imaginary part = {np.max(np.abs(hdiag_imag))}"
-    )
-    hdiag.imag = 0
-    hdiag_real = hdiag_imag = None
+
+    if fci.verbose > lib.logger.DEBUG:
+        hdiag_imag  = direct_uhf.make_hdiag(
+            [h1ea.imag, h1eb.imag], 
+            [eri.imag, eri.imag, eri.imag], 
+            norb, nelec)
+        if np.abs(hdiag_imag).max() > HDIAG_IMAG_TOL:
+            msg = ("The imaginary part of the Hamiltonian diagonal in "
+            f"the determinant basis is not negligible: max imaginary part = \
+            {np.max(np.abs(hdiag_imag))}.")
+            warnings.warn(msg)
+
+    hdiag.imag = IMAG_NOISE
+
+    hdiag_real = hdiag_imag = h1ea = h1eb =None
+    
     return hdiag
 
 def make_hdiag_csf (h1e, eri, norb, nelec, transformer, hdiag_det=None, max_memory=None):
