@@ -168,29 +168,58 @@ def make_hdiag_csf (h1e, eri, norb, nelec, transformer, hdiag_det=None, max_memo
         hdiag_csf_imag = make_hdiag_csf_real(
             h1e.imag, eri.imag, norb, nelec, transformer, 
             hdiag_det=hdiag_det.imag, max_memory=max_memory)
-    
-    if np.abs(hdiag_csf_imag).max() > HDIAG_IMAG_TOL:
-        lib.logger.warning("The imaginary part of the Hamiltonian diagonal in the CSF basis "
-        "is not negligible: max imaginary part = %s", np.amax(np.abs(hdiag_csf_imag)))
+        if np.abs(hdiag_csf_imag).max() > HDIAG_IMAG_TOL:
+            lib.logger.warning("The imaginary part of the Hamiltonian diagonal in the CSF basis "
+            "is not negligible: max imaginary part = %s", np.amax(np.abs(hdiag_csf_imag)))
 
     hdiag_csf.imag = 0
     hdiag_csf_real = hdiag_csf_imag = None
     return hdiag_csf
 
 def _debug_g2e (fci, g2e, eri, norb):
+    '''
+    Debugging 2e part, I am blindly copying the code from csf/csf.py and applying it for the real
+    and imag part. Can it be done more efficiently? Probably yes. 
+    '''
     _debug_g2e_real (fci, g2e.real, eri.real, norb)
     _debug_g2e_real (fci, g2e.imag, eri.imag, norb)
-    return
+    return None
 
-@lib.with_doc(pspace_real.__doc__)
 def pspace(fci, h1e, eri, norb, nelec, transformer,
            hdiag_det=None, hdiag_csf=None, npsp=200, max_memory=None):
     '''
-    In the pspace Davidson solver, we construct a Hamiltonian in smaller subspace and then those eigenvectos
-    are projected to entire subspace and been used for the Davidson solver. 
+    In the pspace Davidson solver, we construct a Hamiltonian in smaller subspace 
+    and then those eigenvectos are projected to entire subspace and been used for 
+    the Davidson solver. 
     # Total Hamiltonian:
         H = H_real + 1j * H_imag
           = <I|H_real|J> + 1j * <I|H_imag|J>
+    args:
+        fci: FCISolver object
+            the FCI solver object, needed for logging and some other utilities.
+        h1e: np.ndarray of shape (norb, norb)
+            one-electron integrals
+        eri: np.ndarray of shape (norb, norb, norb, norb)
+            two-electron integrals in chemist's notation
+        norb: int
+            number of active space orbitals
+        nelec: tuple (neleca, nelecb) or int
+            number of active space electrons
+        transformer: CSFTransformer object
+            the transformer object that can transform between det and CSF basis.
+        hdiag_det: np.ndarray of shape (ndet,)
+            diagonal of the Hamiltonian in the determinant basis. If not provided, it will be constructed.
+        hdiag_csf: np.ndarray of shape (ncsf,)
+            diagonal of the Hamiltonian in the CSF basis. If not provided, it will be constructed.
+        npsp: int
+            number of CSFs in the pspace.
+        max_memory: float
+            maximum memory usage in MB. If not provided, it will be taken from fci.max_memory.
+    returns:
+        csf_addr: np.ndarray of shape (npsp,)
+            the addresses of the CSFs in the pspace.
+        h0: np.ndarray of shape (npsp, npsp)
+            the Hamiltonian in the pspace.
     '''
     m0 = lib.current_memory ()[0]
     
@@ -199,10 +228,12 @@ def pspace(fci, h1e, eri, norb, nelec, transformer,
 
     # In complex Hamiltonian, I don't think ao2mo.restore works,
     # so I always keep the eri in the 4D format. 
-    
-    assert (h1e.dtype == eri.dtype), "h1e and eri must have the same dtype"
-    assert h1e.shape == (norb, norb), "h1e must be a square matrix of shape (norb, norb)"
-    assert eri.shape == (norb, norb, norb, norb), "eri must be a 4D array of shape (norb, norb, norb, norb)"
+    assert (h1e.dtype == eri.dtype), \
+        "h1e and eri must have the same dtype"
+    assert h1e.shape == (norb, norb), \
+        "h1e must be a square matrix of shape (norb, norb)"
+    assert eri.shape == (norb, norb, norb, norb), \
+        "eri must be a 4D array of shape (norb, norb, norb, norb)"
 
     t0 = (lib.logger.process_clock (), lib.logger.perf_counter ())
     neleca, nelecb = _unpack_nelec(nelec)
@@ -213,12 +244,14 @@ def pspace(fci, h1e, eri, norb, nelec, transformer,
     if hdiag_det is None:
         hdiag_det = fci.make_hdiag(h1e, eri, norb, nelec)
     if hdiag_csf is None:
-        hdiag_csf = fci.make_hdiag_csf(h1e, eri, norb, nelec, hdiag_det=hdiag_det, max_memory=max_memory)
+        hdiag_csf = fci.make_hdiag_csf(h1e, eri, norb, nelec, 
+                                       hdiag_det=hdiag_det, max_memory=max_memory, 
+                                       verbose=fci.verbose)
     
     assert hdiag_csf.dtype == hdiag_det.dtype == h1e.dtype
 
-    # For Hermitian Hamiltonians, diagonals elements are dominated by the real-part, that's why
-    # I am using only real-part for ranking/selection.
+    # For Hermitian Hamiltonians, diagonals elements are dominated by the 
+    # real-part, that's why I am using only real-part for ranking/selection.
     
     hdiag_csf_real = hdiag_csf.real
     csf_addr = np.arange(hdiag_csf_real.size, dtype=np.int32)
@@ -274,6 +307,7 @@ def pspace(fci, h1e, eri, norb, nelec, transformer,
     
     t0 = lib.logger.timer_debug1(fci, "csf.pspace: index manipulation", *t0)
 
+    # Compute the subspace Hamiltonian in the det basis.
     def _build_h0tril(h1e_a, h1e_b, g2e_aa, g2e_ab, g2e_bb):
         h0tril = np.ascontiguousarray(np.zeros((npsp_det, npsp_det), dtype=np.float64, order='C'))
         h1e_a = np.ascontiguousarray(h1e_a)
@@ -298,12 +332,15 @@ def pspace(fci, h1e, eri, norb, nelec, transformer,
     h0 = h0real.astype(h1e.dtype)
     h0.real = h0real
     h0.imag = _build_h0tril(h1e_a.imag, h1e_b.imag, g2e_aa.imag, g2e_ab.imag, g2e_bb.imag)
+    # Note, imaginary part of the Hamiltonian will be anti-hermitian.
+    # print("Is it antihermitian:", np.allclose(h0.imag, -h0.imag.conj().T)) # True
     h0real = None
 
     # Fill the diagonal elements.
-    for i in range(npsp_det):
-        h0.real[i, i] = hdiag_det.real[det_addr[i]]
-        h0.imag[i, i] = hdiag_det.imag[det_addr[i]]
+    # for i in range(npsp_det):
+    #     h0.real[i, i] = hdiag_det.real[det_addr[i]]
+    #     h0.imag[i, i] = hdiag_det.imag[det_addr[i]]
+    h0[np.arange(npsp_det), np.arange(npsp_det)] = hdiag_det[det_addr]
 
     t0 = lib.logger.timer_debug1(fci, "csf.pspace: pspace Hamiltonian in determinant basis", *t0)
 
@@ -314,14 +351,13 @@ def pspace(fci, h1e, eri, norb, nelec, transformer,
     h0imag = np.ascontiguousarray(h0.imag)
     h0 = h0.astype(h1e.dtype)
     h0.real = lib.hermi_triu(h0real)
-    h0.imag = lib.hermi_triu(h0imag, hermi=2)
+    h0.imag = lib.hermi_triu(h0imag, hermi=2) # 2 For Anti-Hermitian part.
     h0real = h0imag = None
-    # h0.real = np.ascontiguousarray(lib.hermi_triu(h0.real))
-    # h0.imag = np.ascontiguousarray(lib.hermi_triu(h0.imag, hermi=2))
-
-    # Sanity Checks CSF transform
+    
+    # Sanity Checks CSF transformations
     try:
-        if fci.verbose > lib.logger.DEBUG1: evals_before = scipy.linalg.eigh(h0)[0]
+        if fci.verbose > lib.logger.DEBUG1:
+            evals_before = scipy.linalg.eigh(h0)[0]
     except ValueError as e:
         lib.logger.debug1(fci,("ERROR: h0 has {} infs, {} nans; h1e_a has {} infs, {} nans; "
             "h1e_b has {} infs, {} nans; g2e has {} infs, {} nans, norb = {}, npsp_det = {}").format(
@@ -336,15 +372,17 @@ def pspace(fci, h1e, eri, norb, nelec, transformer,
     # It's time to transform determinant basis h0 to CSF basis
     h0csf_real, csf_addr = transformer.mat_det2csf_confspace(h0.real, econf_addr)
     h0csf_imag, csf_addr_temp = transformer.mat_det2csf_confspace(h0.imag, econf_addr)
+    h0 = None
     h0 = h0csf_real.astype(h1e.dtype)
     h0.real = h0csf_real
     h0.imag = h0csf_imag
-    h0csf_real = h0csf_imag = None
+
     # Sanity Check
     assert np.array_equal(csf_addr, csf_addr_temp), \
-        "Real and Imaginary part transformation resulted in different CSF addresses; "\
-            "There might be some problem"
-    
+        "Real and Imaginary part transformation resulted in different CSF "\
+        "addresses; There might be some problem"
+    csf_addr_temp = h0csf_real = h0csf_imag = None
+
     t0 = lib.logger.timer_debug1(fci, "csf.pspace: transform pspace Hamiltonian into CSF basis", *t0)
 
     # Sanity Checks after the transformation
@@ -355,9 +393,11 @@ def pspace(fci, h1e, eri, norb, nelec, transformer,
         idx = [np.argmin(np.abs(evals_before - ev)) for ev in evals_after]
         resid = evals_after - evals_before[idx]
         lib.logger.debug1(fci, "csf.pspace: best h0 eigenvalue matching differences after transformation: %s", resid)
-        lib.logger.debug1(fci, "csf.pspace: if the transformation of h0 worked the following number will be zero: %s", np.max(np.abs(resid)))
+        lib.logger.debug1(fci, "csf.pspace: if the transformation of h0 worked the following number " \
+        "will be zero: %s", np.max(np.abs(resid)))
 
-    lib.logger.debug1(fci, "csf_solver.pspace: asked for %s-CSF pspace; found %s CSFs", csf_addr.size, npsp_csf)
+    lib.logger.debug1(fci, "csf_solver.pspace: asked for %s-CSF pspace; found %s CSFs", 
+                      csf_addr.size, npsp_csf)
     
     if csf_addr.size > npsp_csf:
         h0diag_real = np.diag(h0).real
@@ -370,6 +410,14 @@ def pspace(fci, h1e, eri, norb, nelec, transformer,
 
     t0 = lib.logger.timer_debug1(fci, "csf.pspace wrapup", *t0)
     return csf_addr, h0
+
+# The Davidson solver is used for iterative solving the eigen vectos for the a large sparse matrix.
+# Initially, a few guess vectors are provided, then in each iteration, the matrix-vector product is computed and then
+# the subspace Hamiltonian is constructed and diagonalized to get the Ritz values and Ritz vectors, then the residual is 
+# computed and preconditioned to get the new guess vector for the next iteration. Till the convergence is reached.
+# Alternatively, in QC, there is pspace Davidson solver, where the Hamiltonian is constructed in a smaller subspace exactly
+# and then those eigenvectors are projected to entire subspace and been used for the Davidson solver.
+# Below I am defining the preconditioners for the Davidson solvers.
 
 def make_diag_precond(hdiag, level_shift=1e-3):
     '''
@@ -387,8 +435,25 @@ def make_diag_precond(hdiag, level_shift=1e-3):
         return dx / diagd
     return precond
 
-@lib.with_doc(direct_spin1.make_pspace_precond.__doc__)
 def make_pspace_precond(hdiag, pspaceig, pspaceci, addr, level_shift=0):
+    '''
+    Code adapated from the pyscf/fci/direct_spin1.py, but with some modification 
+    to handle the complex Hamiltonian.
+    args:
+        hdiag: np.ndarray of shape (ndet,)
+            diagonal of the Hamiltonian in the determinant basis.
+        pspaceig: np.ndarray of shape (npsp,)
+            eigenvalues of the Hamiltonian in the pspace.
+        pspaceci: np.ndarray of shape (npsp, npsp)
+            eigenvectors of the Hamiltonian in the pspace.
+        addr: np.ndarray of shape (npsp,)
+            the addresses of the determinants in the pspace.
+        level_shift: float
+            level shift for the preconditioner, default is 0.
+    returns:
+        precond: function
+            the preconditioner function that can be used in the Davidson solver.
+    '''
     hdiag = np.asarray(hdiag)
     pspaceig = np.asarray(pspaceig)
     pspaceci = np.asarray(pspaceci)
@@ -459,8 +524,8 @@ def kernel(fci, h1e, eri, norb, nelec, smult=None, idx_sym=None, ci0=None,
     t0 = lib.logger.timer_debug1 (fci, "csf.kernel: throat-clearing", *t0)
     hdiag_det = fci.make_hdiag (h1e, eri, norb, nelec)
     t0 = lib.logger.timer_debug1 (fci, "csf.kernel: hdiag_det", *t0)
-    
-    hdiag_csf = fci.make_hdiag_csf (h1e, eri, norb, nelec, hdiag_det=hdiag_det, max_memory=max_memory)
+    hdiag_csf = fci.make_hdiag_csf (h1e, eri, norb, nelec, hdiag_det=hdiag_det, 
+                                    max_memory=max_memory)
     t0 = lib.logger.timer_debug1 (fci, "csf.kernel: hdiag_csf", *t0)
     
     ncsf_all = count_all_csfs (norb, neleca, nelecb, smult)
