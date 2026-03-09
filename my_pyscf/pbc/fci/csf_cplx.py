@@ -19,9 +19,12 @@ from mrh.my_pyscf.pbc.fci import direct_spin1_cplx
 
 libfci = lib.load_library('libfci')
 
+# Note, that the _unpack function should be called from the direct_spin1_cplx, as the 
+# _unpack from direct_spin1 will store the link_idx in the tril format.
+
+_unpack = direct_spin1_cplx._unpack
 _unpack_nelec = direct_spin1_cplx._unpack_nelec
 _get_init_guess = direct_spin1_cplx._get_init_guess_cplx
-
 
 # Global variables:
 HDIAG_IMAG_TOL = 1e-3
@@ -598,6 +601,7 @@ def kernel(fci, h1e, eri, norb, nelec, smult=None, idx_sym=None, ci0=None,
         cout = creal.astype(dtype)
         cout.real = creal
         cout.imag = cimag
+        cout /= np.linalg.norm(cout)
         creal = cimag = None
         
     t0 = lib.logger.timer_debug1 (fci, "csf.kernel: transforming final ci vector", *t0)
@@ -708,21 +712,12 @@ class FCISolver(cplxCSFFCISolver, direct_spin1_cplx.FCISolver):
 
     check_transformer_cache = realFCISolver.check_transformer_cache
 
-
-def _unpack(norb, nelec, link_index=None, spin=None):
-    # In the direct_spin1._unpack function, the link_indexes are initialized as the empty matrices,
-    # therefore, in between runs some of those values are not filled by the C code cause problems in
-    # my csfsolver implementation. I have fixed it by initializing it as the zeros matrix at
-    # pyscf/pyscf/fci/cistring.py#L217
-
-    from pyscf.fci import direct_spin1
-    return direct_spin1._unpack(norb, nelec, link_index, spin)
     
 if __name__ == "__main__":
     from pyscf import gto, fci, scf, lib, ao2mo
     from pyscf.csf_fci import csf_solver
     from mrh.my_pyscf.pbc.fci import direct_spin1_cplx
-    mol = gto.Mole(atom='H 0 0 0; F 0 0 1.1', basis='STO-6G',
+    mol = gto.Mole(atom='H 0 0 0; H 0 0 1.1', basis='STO-6G',
                 verbose=0) #lib.logger.DEBUG)
     mol.build ()
     mf = scf.RHF (mol).run ()
