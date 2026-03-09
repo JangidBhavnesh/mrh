@@ -495,7 +495,6 @@ def kernel(fci, h1e, eri, norb, nelec, smult=None, idx_sym=None, ci0=None,
         hx = fci.contract_2e(h2e, x_det, norb, nelec, (link_indexa, link_indexb))
         hx_out = (transformer.vec_det2csf(hx.real, normalize=False).ravel()
                 + 1j * transformer.vec_det2csf(hx.imag, normalize=False).ravel())
-        # print("Done")
         return hx_out.ravel()
 
     # def hop(x):
@@ -583,27 +582,29 @@ def kernel(fci, h1e, eri, norb, nelec, smult=None, idx_sym=None, ci0=None,
 
     t0 = lib.logger.timer_debug1 (fci, "csf.kernel: running fci.eig", *t0)
     if nroots > 1:
-        creal = np.array([transformer.vec_csf2det (ci, order='C') for ci in c.real])
-        cimag = np.array([transformer.vec_csf2det (ci, order='C') for ci in c.imag])
-        c = creal.astype(dtype)
-        c.real = creal
-        c.imag = cimag
+        cout = []
+        for ciroot in c:
+            creal = transformer.vec_csf2det (ciroot.real, order='C', normalize=False)
+            cimag = transformer.vec_csf2det (ciroot.imag, order='C', normalize=False)
+            croot = creal.astype(dtype)
+            croot.real = creal
+            croot.imag = cimag
+            croot /= np.linalg.norm(croot)
+            cout.append(croot)
         creal = cimag = None
-        c = list(c) # Maintain the output format.
     else:
-        creal = transformer.vec_csf2det (c.real, order='C')
-        cimag = transformer.vec_csf2det (c.imag, order='C')
+        creal = transformer.vec_csf2det (c.real, order='C', normalize=False)
+        cimag = transformer.vec_csf2det (c.imag, order='C', normalize=False)
         cout = creal.astype(dtype)
         cout.real = creal
         cout.imag = cimag
         creal = cimag = None
-        c = cout
         
     t0 = lib.logger.timer_debug1 (fci, "csf.kernel: transforming final ci vector", *t0)
     if nroots > 1:
-        return e+ecore, [ci.reshape(na,nb) for ci in c]
+        return e+ecore, [ci.reshape(na,nb) for ci in cout]
     else:
-        return e+ecore, c.reshape(na,nb)
+        return e+ecore, cout.reshape(na,nb)
     
 class cplxCSFFCISolver:
     '''
@@ -708,27 +709,23 @@ class FCISolver(cplxCSFFCISolver, direct_spin1_cplx.FCISolver):
     check_transformer_cache = realFCISolver.check_transformer_cache
 
 
+def _unpack(norb, nelec, link_index=None, spin=None):
+    # In the direct_spin1._unpack function, the link_indexes are initialized as the empty matrices,
+    # therefore, in between runs some of those values are not filled by the C code cause problems in
+    # my csfsolver implementation. I have fixed it by initializing it as the zeros matrix at
+    # pyscf/pyscf/fci/cistring.py#L217
 
-
-def _unpack(norb, nelec, link_index, spin=None):
-    if link_index is None:
-        neleca, nelecb = _unpack_nelec(nelec, spin)
-        link_indexa = link_indexb = cistring.gen_linkstr_index_trilidx(range(norb), neleca)
-        if neleca != nelecb:
-            link_indexb = cistring.gen_linkstr_index_trilidx(range(norb), nelecb)
-        return link_indexa, link_indexb
-    else:
-        return link_index
+    from pyscf.fci import direct_spin1
+    return direct_spin1._unpack(norb, nelec, link_index, spin)
     
 if __name__ == "__main__":
     from pyscf import gto, fci, scf, lib, ao2mo
     from pyscf.csf_fci import csf_solver
     from mrh.my_pyscf.pbc.fci import direct_spin1_cplx
     mol = gto.Mole(atom='H 0 0 0; F 0 0 1.1', basis='STO-6G',
-                verbose=lib.logger.DEBUG)
+                verbose=0) #lib.logger.DEBUG)
     mol.build ()
     mf = scf.RHF (mol).run ()
-
     h0 = mf.energy_nuc ()
     h1 = mf.mo_coeff.conj ().T @ mf.get_hcore () @ mf.mo_coeff
     h2 = ao2mo.restore (1, ao2mo.full (mf._eri, mf.mo_coeff), mol.nao_nr ())
@@ -741,10 +738,10 @@ if __name__ == "__main__":
         real_cisolver = csf_solver (mol, smult=1)
         real_cisolver.pspace_size = pspace_size
         real_cisolver.davidson_only = davidson_only
-        real_cisolver.max_cycle = 1
+        real_cisolver.max_cycle = 50
         e, c = real_cisolver.kernel (h1, h2, norb, nelec, ecore=h0)
-        # e_tot = real_cisolver.energy(h1, h2, c, norb, nelec)
-        # assert abs(e_tot+h0-e) < 1e-6, "Energy doesn't match the expected value; "
+        e_tot = real_cisolver.energy(h1, h2, c, norb, nelec)
+        assert abs(e_tot+h0-e) < 1e-6, "Energy doesn't match the expected value; "
         print("CSF FCI Converged?", real_cisolver.converged, 
               "Norm of wave function: ", np.linalg.norm(c), 
               "Total energy: ", e)
@@ -765,12 +762,11 @@ if __name__ == "__main__":
         cplx_cisolver = FCISolver (mol, smult=1)
         cplx_cisolver.davidson_only = davidson_only
         cplx_cisolver.pspace_size = pspace_size
-        cplx_cisolver.max_cycle = 1
+        cplx_cisolver.max_cycle = 50
         e_cplx, c_cplx = cplx_cisolver.kernel (h1cplx, h2cplx, norb, nelec, ecore=h0)
-        exit()
         print("Done with FCI")
         e_tot = cplx_cisolver.energy(h1cplx, h2cplx, c_cplx, norb, nelec)
-        #assert abs(e_tot+h0-e_cplx) < 1e-6, "Energy doesn't match the expected value; "
+        assert abs(e_tot+h0-e_cplx) < 1e-6, "Energy doesn't match the expected value; "
         print("Complex CSF FCI Converged?", cplx_cisolver.converged, 
             "Norm of wave function: ", np.linalg.norm(c_cplx), 
             "Total energy: ", e_cplx)
@@ -783,7 +779,7 @@ if __name__ == "__main__":
 
         e_cplx_det, c_cplx_det = cplx_cisolver_det.kernel (h1cplx, h2cplx, norb, nelec, ecore=h0)
         e_tot = cplx_cisolver_det.energy(h1cplx, h2cplx, c_cplx_det, norb, nelec)
-        #assert abs(e_tot+h0-e_cplx_det) < 1e-6, "Energy doesn't match the expected value; "
+        assert abs(e_tot+h0-e_cplx_det) < 1e-6, "Energy doesn't match the expected value; "
         print("Complex Determinant FCI Converged?", cplx_cisolver_det.converged, 
               "Norm of wave function: ", np.linalg.norm(c_cplx_det), 
               "Total energy: ", e_cplx_det)
@@ -793,10 +789,10 @@ if __name__ == "__main__":
     e_real_csf = real_CSFSolver(h0, h1, h2, norb, nelec, davidson_only=True, pspace_size=400)
     print("\nRunning complex CSF FCI solver...")
     e_cplx_csf = cplx_CSFSolver(h0cplx, h1cplx, h2cplx, norb, nelec, davidson_only=True, pspace_size=400)
-    # print("\nRunning complex Determinant FCI solver...")
-    # e_cplx_det = cplx_detSolver(h0cplx, h1cplx, h2cplx, norb, nelec, davidson_only=True, pspace_size=400)
-    # print("\nSummary of results:")
-    # print(f"Real CSF FCI Energy   : {e_real_csf:.12f}")
-    # print(f"Complex CSF FCI Energy: {e_cplx_csf.real:.12f}")
-    # print(f"Complex Det FCI Energy: {e_cplx_det.real:.12f}")
+    print("\nRunning complex Determinant FCI solver...")
+    e_cplx_det = cplx_detSolver(h0cplx, h1cplx, h2cplx, norb, nelec, davidson_only=True, pspace_size=400)
+    print("\nSummary of results:")
+    print(f"Real CSF FCI Energy   : {e_real_csf:.12f}")
+    print(f"Complex CSF FCI Energy: {e_cplx_csf.real:.12f}")
+    print(f"Complex Det FCI Energy: {e_cplx_det.real:.12f}")
     
