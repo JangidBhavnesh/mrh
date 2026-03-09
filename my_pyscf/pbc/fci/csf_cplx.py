@@ -623,10 +623,10 @@ def kernel(fci, h1e, eri, norb, nelec, smult=None, idx_sym=None, ci0=None,
                 dtype = ci0_det[0].dtype
                 ci0_csfout = []
                 for c in ci0_det:
-                    ci0_csfreal = transformer.vec_det2csf (c.real)
+                    ci0_csfreal = transformer.vec_det2csf (c.real, normalize=False)
                     ci0_csf = ci0_csfreal.astype(dtype)
                     ci0_csf.real = ci0_csfreal
-                    ci0_csf.imag = 1e-8 #transformer.vec_det2csf (ci0_det.imag)
+                    ci0_csf.imag = IMAG_NOISE
                     ci0_csf /= np.linalg.norm(ci0_csf)
                     ci0_csfout.append(ci0_csf)
                 return ci0_csfout
@@ -635,16 +635,17 @@ def kernel(fci, h1e, eri, norb, nelec, smult=None, idx_sym=None, ci0=None,
                 x0 = []
                 for i in range(nroots):
                     x = np.zeros(ncsf_sym, dtype=h1e.dtype)
-                    x[addr[i]] = 1.0 + 1e-10j
+                    x[addr[i]] = 1.0 + IMAG_NOISE
                     x0.append(x)
                 return x0
     else:
         if isinstance(ci0, np.ndarray) and ci0.size == na*nb:
-            ci0real = transformer.vec_det2csf (ci0.real.ravel ())
-            ci0imag = transformer.vec_det2csf (ci0.imag.ravel ())
+            ci0real = transformer.vec_det2csf (ci0.real.ravel (), normalize=False)
+            ci0imag = transformer.vec_det2csf (ci0.imag.ravel (), normalize=False)
             ci0_out = np.asarray(ci0real, dtype=ci0.dtype)
             ci0_out.real = ci0real
             ci0_out.imag = ci0imag
+            ci0_out /= np.linalg.norm(ci0_out)
             ci0real = ci0imag = None
             ci0 = [ci0_out]
         else:
@@ -653,7 +654,7 @@ def kernel(fci, h1e, eri, norb, nelec, smult=None, idx_sym=None, ci0=None,
                 ci0 = np.asarray (ci0).reshape (nrow, -1, order='C')
                 ci0 = np.ascontiguousarray (ci0)
                 if nrow==1: ci0 = ci0[0]
-                ci0 = transformer.vec_det2csf (ci0)
+                ci0 = transformer.vec_det2csf (ci0, normalize=False)
                 ci0 = np.asarray(ci0).reshape(nrow, -1)
                 return [c for c in ci0]
             
@@ -664,6 +665,7 @@ def kernel(fci, h1e, eri, norb, nelec, smult=None, idx_sym=None, ci0=None,
                 c = np.asarray(r, dtype=np.complex128)
                 c.real = r
                 c.imag = im
+                c /= np.linalg.norm(c)
                 ci0_out.append(c)
 
             ci0 = ci0_out
