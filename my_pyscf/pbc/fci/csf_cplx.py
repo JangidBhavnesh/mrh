@@ -110,45 +110,69 @@ def make_hdiag_det (fci, h1e, eri, norb, nelec):
     hdiag = hdiag_real.astype(dtype)
     hdiag.real = hdiag_real
 
-    if fci.verbose > lib.logger.DEBUG:
+    if fci is not None and fci.verbose > lib.logger.DEBUG:
         hdiag_imag  = direct_uhf.make_hdiag(
             [h1ea.imag, h1eb.imag], 
             [eri.imag, eri.imag, eri.imag], 
             norb, nelec)
         if np.abs(hdiag_imag).max() > HDIAG_IMAG_TOL:
-            msg = ("The imaginary part of the Hamiltonian diagonal in "
-            f"the determinant basis is not negligible: max imaginary part = \
-            {np.max(np.abs(hdiag_imag))}.")
-            warnings.warn(msg)
-
+            lib.logger.warning("The imaginary part of the Hamiltonian diagonal in the determinant basis "
+                               "is not negligible: max imaginary part = %s", np.max(np.abs(hdiag_imag)))
+            
     hdiag.imag = IMAG_NOISE
 
     hdiag_real = hdiag_imag = h1ea = h1eb =None
     
     return hdiag
 
-def make_hdiag_csf (h1e, eri, norb, nelec, transformer, hdiag_det=None, max_memory=None):
+def make_hdiag_csf (h1e, eri, norb, nelec, transformer, hdiag_det=None, max_memory=None, verbose=lib.logger.INFO):
     '''
     Make the diagonal of the Hamiltonian in the CSF basis. Basically, we have the Hamiltonian
-    diagonal in the determinant basis (hdiag_det). We will transform the real and imaginary parts of the Hamiltonian
-    separately to get the Hamiltonian diagonal in the CSF basis.
+    diagonal in the determinant basis (hdiag_det). We will transform it to the CSF basis.
+    args:
+        h1e: np.ndarray of shape (norb, norb)
+            one-electron integrals
+        eri: np.ndarray of shape (norb, norb, norb, norb)
+            two-electron integrals in chemist's notation
+        norb: int
+            number of active space orbitals
+        nelec: tuple (neleca, nelecb) or int
+            number of active space electrons
+        transformer: CSFTransformer object
+            the transformer object that can transform between det and CSF basis.
+        hdiag_det: np.ndarray of shape (ndet,)
+            diagonal of the Hamiltonian in the determinant basis.
+        max_memory: float
+            maximum memory usage.
+        verbose: int
+            verbosity level.
+    returns:
+        hdiag_csf: np.ndarray of shape (ncsf,)
+            diagonal of the Hamiltonian in the CSF basis.
     '''
+    # Constructs the hdiag_det if it is not provided.
     if hdiag_det is None:
         hdiag_det = make_hdiag_det (None, h1e, eri, norb, nelec)
 
-    assert np.iscomplexobj(h1e) and np.iscomplexobj(hdiag_det), "You are using wrong function for real Hamiltonian"
+    assert np.iscomplexobj(h1e) and np.iscomplexobj(hdiag_det), \
+        "You are using wrong function for real Hamiltonian"
     dtype = h1e.dtype
     hdiag_csf_real = make_hdiag_csf_real(
-        h1e.real, eri.real, norb, nelec, transformer, hdiag_det=hdiag_det.real, max_memory=max_memory)
+        h1e.real, eri.real, norb, nelec, transformer, 
+        hdiag_det=hdiag_det.real, max_memory=max_memory)
+    
     hdiag_csf = hdiag_csf_real.astype(dtype)
     hdiag_csf.real = hdiag_csf_real
 
-    # Should be done in higher verbosity level.
-    hdiag_csf_imag = make_hdiag_csf_real(
-        h1e.imag, eri.imag, norb, nelec, transformer, hdiag_det=hdiag_det.imag, max_memory=max_memory)
-    if np.abs(hdiag_csf_imag).max() > 1e-6:
-        lib.logger.warning("The imaginary part of the Hamiltonian diagonal in the determinant basis "
+    if verbose > lib.logger.DEBUG:
+        hdiag_csf_imag = make_hdiag_csf_real(
+            h1e.imag, eri.imag, norb, nelec, transformer, 
+            hdiag_det=hdiag_det.imag, max_memory=max_memory)
+    
+    if np.abs(hdiag_csf_imag).max() > HDIAG_IMAG_TOL:
+        lib.logger.warning("The imaginary part of the Hamiltonian diagonal in the CSF basis "
         "is not negligible: max imaginary part = %s", np.amax(np.abs(hdiag_csf_imag)))
+
     hdiag_csf.imag = 0
     hdiag_csf_real = hdiag_csf_imag = None
     return hdiag_csf
