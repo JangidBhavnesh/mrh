@@ -157,6 +157,7 @@ def make_hdiag_csf (h1e, eri, norb, nelec, transformer, hdiag_det=None, max_memo
     assert np.iscomplexobj(h1e) and np.iscomplexobj(hdiag_det), \
         "You are using wrong function for real Hamiltonian"
     dtype = h1e.dtype
+    
     hdiag_csf_real = make_hdiag_csf_real(
         h1e.real, eri.real, norb, nelec, transformer, 
         hdiag_det=hdiag_det.real, max_memory=max_memory)
@@ -737,6 +738,7 @@ class cplxCSFFCISolver:
             self.smult = smult
         self.check_transformer_cache ()
         max_memory = max_memory if max_memory is not None else self.max_memory
+        print(max_memory)
         return make_hdiag_csf(h1e, eri, norb, nelec, self.transformer, hdiag_det=hdiag_det, 
                                    max_memory=max_memory)
 
@@ -804,7 +806,6 @@ class FCISolver(cplxCSFFCISolver, direct_spin1_cplx.FCISolver):
 
         e, c = kernel (self, h1e, eri, norb, nelec, smult=self.smult,
                        idx_sym=None, ci0=ci0, transformer=self.transformer,
-                       verbose=lib.logger.DEBUG,
                        **kwargs)
 
         self.eci, self.ci = e, c
