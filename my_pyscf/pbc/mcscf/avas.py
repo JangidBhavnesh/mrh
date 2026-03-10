@@ -5,6 +5,7 @@ from functools import reduce
 from pyscf import lib, __config__
 from pyscf.lib import logger
 from pyscf.pbc import gto, scf
+from pyscf.mcscf import avas as molAVAS
 
 '''
 Atomic valence active orbitals (AVAS)
@@ -27,50 +28,19 @@ OPENSHELL_OPTION = getattr(__config__, 'mcscf_avas_openshell_option', 2)
 CANONICALIZE = getattr(__config__, 'mcscf_avas_canonicalize', True)
 
 
+@lib.with_doc(molAVAS.kernel.__doc__)
 def kernel(mf, aolabels, threshold=THRESHOLD, minao=MINAO, with_iao=WITH_IAO,
            openshell_option=OPENSHELL_OPTION, canonicalize=CANONICALIZE,
            ncore=0, verbose=None):
-    '''AVAS method to construct mcscf active space.
-    Args:
-        mf : an :class:`SCF` object
-
-        aolabels : string or a list of strings
-            AO labels for AO active space
-
-    Kwargs:
-        threshold : float
-            Tructing threshold of the AO-projector above which AOs are kept in
-            the active space.
-        minao : str
-            A reference AOs for AVAS.
-        with_iao : bool
-            Whether to use IAO localization to construct the reference active AOs.
-        openshell_option : int
-            How to handle singly-occupied orbitals in the active space. The
-            singly-occupied orbitals are projected as part of alpha orbitals
-            if openshell_option=2, or completely kept in active space if
-            openshell_option=3.  See Section III.E option 2 or 3 of the
-            reference paper for more details.
-        canonicalize : bool
-            Orbitals defined in AVAS method are local orbitals.  Symmetrizing
-            the core, active and virtual space.
-        ncore : integer
-            Number of core orbitals to be excluded from the AVAS method.
-
-    Returns:
-        active-space-size, #-active-electrons, orbital-initial-guess-for-CASCI/CASSCF
-    '''
-
     # Detect whether the underline object is cell or mol
     # if it is mol, then point to molecular AVAS call.
-
     if hasattr(mf, 'cell'):
         mol_or_cell = mf.cell
     elif hasattr(mf, 'mol'):
         mol_or_cell = mf.mol
     else:
         raise RuntimeError('The input mf must be a SCF object with mol or cell')
-    
+        
     if getattr(mol_or_cell, 'pbc_intor', None):
         avas_obj = pbcAVAS(mf, aolabels, threshold, minao, with_iao,
                             openshell_option, canonicalize, ncore, verbose)
@@ -402,6 +372,6 @@ class AVAS(lib.StreamObject):
 
         return self.ncas, self.nelecas, self.mo_coeff
 
-from pyscf.mcscf import avas as molAVAS
+
 molAVAS = molAVAS.AVAS
 pbcAVAS = AVAS
