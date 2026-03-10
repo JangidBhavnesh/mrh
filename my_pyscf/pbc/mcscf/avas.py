@@ -1,18 +1,24 @@
+import numpy as np
+import scipy.linalg
+from functools import reduce
+
+from pyscf import lib, __config__
+from pyscf.lib import logger
+from pyscf.pbc import gto, scf
+
 '''
 Atomic valence active orbitals (AVAS)
 Ref. J. Chem. Theory Comput. 2017, 13, 4063−4078
 
 Here, I have adapting the AVAS algorithm for the selection of active space 
-with the PBC MCSCF. Probably with the k-point sampling as well!.
-'''
+with the PBC MCSCF. Probably with the k-point sampling as well!. 
 
-import numpy as np
-import scipy.linalg
-from functools import reduce
-from pyscf import lib
-from pyscf.pbc import gto, scf
-from pyscf import __config__
-from pyscf.lib import logger
+I can not use the molecular AVAS off the shelf because the AVAS uses AOs which are defined 
+for the molecule and not for the periodic system, second the overlap is also computed for 
+molecule not for the periodic system. Third and most important it can not be used with
+k-point sampling (as in kmf) and complex numbers. So, I have to adapt the AVAS algorithm 
+for the periodic system.
+'''
 
 THRESHOLD = getattr(__config__, 'mcscf_avas_threshold', 0.2)
 MINAO = getattr(__config__, 'mcscf_avas_minao', 'minao')
