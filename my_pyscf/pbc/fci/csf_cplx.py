@@ -724,8 +724,8 @@ class cplxCSFFCISolver:
     pspace_size = getattr(__config__, 'fci_csf_FCI_pspace_size', 200)
     make_hdiag = make_hdiag_det
 
-    def __init__ (self, mol, smult, **args):
-        self.mol = mol
+    def __init__ (self, cell, smult, **args):
+        self.cell = cell
         self.smult = smult
         self.transformer = None
         super().__init__ (**args)
