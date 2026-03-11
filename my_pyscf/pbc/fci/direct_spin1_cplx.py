@@ -31,12 +31,14 @@ from pyscf.fci import cistring, direct_spin1
 from pyscf.fci.addons import _unpack_nelec
 
 from mrh.my_pyscf.pbc.fci import rdm_helper
+from mrh.my_pyscf.pbc.fci import spin_op
 
 libfci = direct_spin1.libfci
 
 # Some global variables
 HDIAG_IMAG_TOL = 1e-3
 IMAG_NOISE = 1e-12
+HERMI_THRESH = 1e-6
 
 def get_init_guess_cplx(norb, nelec, nroots, hdiag):
     '''
@@ -429,7 +431,6 @@ def make_pspace_precond(hdiag, pspaceig, pspaceci, addr, level_shift=0):
 class FCISolver(direct_spin1.FCISolver):
     def __init__(self, *args, **kwargs):
         direct_spin1.FCISolver.__init__(self, *args, **kwargs)
-        # pspace constructor only supports Hermitian Hamiltonian
         self.davidson_only = True
 
     def contract_1e(self, h1e, fcivec, norb, nelec, link_index=None):
@@ -465,36 +466,26 @@ class FCISolver(direct_spin1.FCISolver):
                tol=None, lindep=None, max_cycle=None, max_space=None,
                nroots=None, davidson_only=None, pspace_size=None,
                orbsym=None, wfnsym=None, ecore=0, **kwargs):
-        if isinstance(nelec, (int, np.number)):
-            nelecb = nelec//2
-            neleca = nelec - nelecb
-        else:
-            neleca, nelecb = nelec
+        link_indexa, link_indexb = _unpack(norb, nelec, None)
 
-        link_indexa = cistring.gen_linkstr_index(range(norb), neleca)
-        link_indexb = cistring.gen_linkstr_index(range(norb), nelecb)
-        
+        # TODO: write the kernel_ms1 to avoid any warnings.
         e, c = direct_spin1.kernel_ms1(self, h1e, eri, norb, nelec, ci0,
                                        (link_indexa,link_indexb),
-                                       tol, lindep, max_cycle, max_space, nroots,
-                                       davidson_only, pspace_size, ecore=ecore,
-                                       **kwargs)
+                                       tol=tol, lindep=lindep, max_cycle=max_cycle, max_space=max_space,
+                                        nroots=nroots, davidson_only=davidson_only, pspace_size=pspace_size, 
+                                        ecore=ecore, **kwargs)
         self.eci, self.ci = e, c
         return e, c
 
     def eig(self, op, x0=None, precond=None, **kwargs):
         if isinstance(op, np.ndarray):
-            self.converged = True
-            return scipy.linalg.eigh(op)
+            try:
+                assert np.max(op - op.conj().T) < HERMI_THRESH, "The Hamiltonian matrix is not hermitian."
+                self.converged = True
+                return scipy.linalg.eigh(op)
+            except Exception as e:
+                raise RuntimeError(f"Failed to diagonalize matrix: {e}")
 
-        # TODO: check the hermitian of Hamiltonian then determine whether to
-        # call the non-hermitian diagonalization solver davidson_nosym1
-        if False:
-            warnings.warn('direct_nosym.kernel is not able to diagonalize '
-                        'non-Hermitian Hamiltonian. If h1e and h2e is not '
-                        'hermtian, calling symmetric diagonalization in eig '
-                        'can lead to wrong results.')
-        
         self.converged, e, ci = \
                 lib.davidson1(lambda xs: [op(x) for x in xs],
                               x0, precond, lessio=self.lessio, **kwargs)
@@ -533,7 +524,6 @@ class FCISolver(direct_spin1.FCISolver):
         return make_rdm12_py(fcivec, norb, nelec, link_index, reorder)
     
     def spin_square(self, fcivec, norb, nelec):
-        from mrh.my_pyscf.pbc.fci import spin_op
         return spin_op.spin_square0(fcivec, norb, nelec)
 
 FCI = FCISolver
