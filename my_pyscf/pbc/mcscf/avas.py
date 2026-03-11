@@ -56,16 +56,26 @@ def _kernel(avas_obj, mf, mo_coeff, mo_occ, mo_energy, ovlp, log, baslst, pcell,
     '''
     if isinstance(mf, scf.uhf.UHF):
         log.note('UHF/UKS object is found.  AVAS takes alpha orbitals only')
-        mo_coeff = mf.mo_coeff[0]
-        mo_occ = mf.mo_occ[0]
-        mo_energy = mf.mo_energy[0]
+        mo_coeff = mo_coeff[0]
+        mo_occ = mo_occ[0]
+        mo_energy = mo_energy[0]
     else:
-        mo_coeff = mf.mo_coeff
-        mo_occ = mf.mo_occ
-        mo_energy = mf.mo_energy
+        mo_coeff = mo_coeff
+        mo_occ = mo_occ
+        mo_energy = mo_energy
 
     ncore = avas_obj.ncore
     nocc = np.count_nonzero(mo_occ != 0)
+
+    if isinstance(mo_coeff, list):
+        assert len(mo_coeff) == 1
+        mo_coeff = mo_coeff[0]
+    if isinstance(mo_occ, list):
+        assert len(mo_occ) == 1
+        mo_occ = mo_occ[0]
+    if isinstance(mo_energy, list):
+        assert len(mo_energy) == 1
+        mo_energy = mo_energy[0]
 
     log.info('  Total number of HF MOs  is equal to    %d' ,mo_coeff.shape[1])
     log.info('  Number of occupied HF MOs is equal to  %d', nocc)
