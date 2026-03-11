@@ -13,7 +13,8 @@ from my_pyscf.pbc.mcscf import avas
 # Description of the tests: I will select the active space using the p-AVAS code, then using those
 # mo_coeff, I will run the kmf again, the computed energies in the rotated basis should match.
 
-# Test-1: Gamma-point periodic mean-field calculation
+# Test-0: Gamma point periodi mean-field using scf.RHF (It stored mo_coeff like molecular code)
+# Test-1: Gamma-point periodic mean-field calculation using scf.KRHF (it stores mo_coeff like kmf)
 # Test-2: k-point periodic mean-field calculation, additionally I have also compared the energy 
 # at each k-point, which should also match.
 # TODO: Check with Pseudo potentials, which will be more relevant for real applications.
@@ -47,8 +48,26 @@ def run_kmf(cell, kmesh=[1, 1, 1]):
     kmf.kernel()
     return kmf
 
+def run_mf(cell):
+    mf = scf.RHF(cell).density_fit()
+    mf.exxdiv = None
+    mf.conv_tol = 1e-10
+    mf.kernel()
+    return mf
+
 class KnownValues(unittest.TestCase):
-    def test_kmf_gamma(self):
+
+    def test_kmf_gamma0(self):
+        cell = get_cell(nU=1)
+        mf = run_mf(cell)
+        e_mf = mf.e_tot
+        ncore = cell.nelectron // 2
+        mo_coeff = avas.kernel(mf, ['H 1s'], minao=cell.basis)[2]
+        dm = 2.0*mo_coeff[:, :ncore] @ mo_coeff[:, :ncore].conj().T
+        e_mf_avas = mf.energy_tot(dm=dm)
+        self.assertAlmostEqual(e_mf, e_mf_avas, places=7)
+
+    def test_kmf_gamma1(self):
         cell = get_cell(nU=1)
         kmf = run_kmf(cell, kmesh=[1, 1, 1])
         e_kmf = kmf.e_tot
