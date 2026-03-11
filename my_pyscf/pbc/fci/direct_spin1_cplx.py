@@ -37,47 +37,6 @@ libfci = direct_spin1.libfci
 # Some global variables
 HDIAG_IMAG_TOL = 1e-3
 
-def _get_init_guess_cplx(na, nb, nroots, hdiag, nelec):
-    """
-    Complex-CI initial guesses: pick the nroots lowest diagonal determinants
-    and return CI vectors as complex128 views.
-    """
-    ci0 = []
-    neleca, nelecb = _unpack_nelec(nelec)
-
-    hdiag = np.asarray(hdiag)
-
-    if neleca == nelecb and na == nb:
-        htri = lib.pack_tril(hdiag.reshape(na, na))
-
-        if htri.size <= nroots:
-            addrs = np.arange(htri.size)
-        else:
-            addrs = np.argpartition(htri, nroots - 1)[:nroots]
-            addrs = np.sort(addrs)
-
-        for addr in addrs:
-            addra = int(((2*addr + 0.25)**0.5) - 0.5 + 1e-7)
-            addrb = int(addr - addra*(addra + 1)//2)
-
-            x = np.zeros((na, na), dtype=np.complex128)
-            x[addra, addrb] = 1.0 + 0.0j
-            ci0.append(x.ravel().view(direct_spin1.FCIvector))
-    else:
-        if hdiag.size <= nroots:
-            addrs = np.arange(hdiag.size)
-        else:
-            addrs = np.argpartition(hdiag, nroots - 1)[:nroots]
-
-        for addr in addrs:
-            x = np.zeros((na * nb,), dtype=np.complex128)
-            x[int(addr)] = 1.0 + 0.0j
-            ci0.append(x.view(direct_spin1.FCIvector))
-
-    ci0[0][0]  += (1e-5 + 1e-7j)
-    ci0[0][-1] -= (1e-5 - 1e-7j)
-    return ci0
-
 def get_init_guess_cplx(norb, nelec, nroots, hdiag):
     """Complex-CI initial guess: lowest diagonal determinants."""
     neleca, nelecb = _unpack_nelec(nelec)
