@@ -59,7 +59,6 @@ def get_cell(basis='STO-6G', pseudo=None, maxMem=1000, verbose=0):
     cell.pseudo = pseudo
     cell.precision = 1e-10
     cell.verbose = verbose
-    # cell.output = 'h2_2D_CASCI.log'
     cell.build()
     return cell
 
@@ -171,7 +170,7 @@ class KnownValues(unittest.TestCase):
         h2 = mf.with_df.ao2mo(mf.mo_coeff)
         h2 = ao2mo.restore(1, h2, mf.mo_coeff.shape[1])
         h2 = h2.reshape(ncas*nkpts, ncas*nkpts, ncas*nkpts, ncas*nkpts)
-        
+
         cisolver_gamma = fci.direct_spin1.FCI()
         eciref, civec = cisolver_gamma.kernel(h1, h2, ncas*nkpts, (nelecas[0]*nkpts, nelecas[1]*nkpts), ecore=h0)
         eciref_energy_func = cisolver_gamma.energy(h1, h2, civec, ncas*nkpts, (nelecas[0]*nkpts, nelecas[1]*nkpts))
