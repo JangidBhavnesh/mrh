@@ -374,8 +374,11 @@ def canonicalize (las, mo_coeff=None, ci=None, casdm1fs=None, natorb_casdm1=None
     if ci is None: ci = las.ci
 
     # In-place safety
+    log = lib.logger.new_logger (las, las.verbose)
+    t = (lib.logger.process_clock(), lib.logger.perf_counter())
     mo_coeff = mo_coeff.copy ()
     ci = copy.deepcopy (ci)
+    t = log.timer_debug1 ('Canonicalize mo and ci copy', *t)
 
     # Temporary lroots safety
     # The desired behavior is that the inactive and external orbitals should
@@ -394,6 +397,7 @@ def canonicalize (las, mo_coeff=None, ci=None, casdm1fs=None, natorb_casdm1=None
             ci_dm.append (ci_i)
         casdm1fs = las.make_casdm1s_sub (ci=ci_dm)
 
+    t = log.timer_debug1 ('Canonicalize make casdm1fs', *t)
     nao, nmo = mo_coeff.shape
     ncore = las.ncore
     nocc = ncore + las.ncas
@@ -409,6 +413,7 @@ def canonicalize (las, mo_coeff=None, ci=None, casdm1fs=None, natorb_casdm1=None
     if natorb_casdm1 is None: # State-average natural orbitals by default
         natorb_casdm1 = casdm1s.sum (0)
 
+    t = log.timer_debug1 ('Canonicalize active orbitals', *t)
     # Inactive-inactive and virtual-virtual
     ene, umat = _eig_inactive_virtual (las, fock, orbsym=orbsym)
     idx = np.arange (nmo, dtype=int)
@@ -416,6 +421,7 @@ def canonicalize (las, mo_coeff=None, ci=None, casdm1fs=None, natorb_casdm1=None
     if nmo-nocc: idx[nocc:] = idx[nocc:][np.argsort (ene[nocc:])]
     umat = umat[:,idx]
     if orbsym is not None: orbsym = orbsym[idx]
+    t = log.timer_debug1 ('Canonicalize inactive-inactive and virtual-virtual', *t)
     # Active-active
     check_diag = natorb_casdm1.copy ()
     for ix, ncas in enumerate (ncas_sub):
@@ -423,6 +429,7 @@ def canonicalize (las, mo_coeff=None, ci=None, casdm1fs=None, natorb_casdm1=None
         j = i + ncas
         check_diag[i:j,i:j] = 0.0
     is_block_diag = np.amax (np.abs (check_diag)) < 1e-8
+    t = log.timer_debug1 ('Canonicalize check block diag', *t)
     if is_block_diag:
         # No off-diagonal RDM elements -> extra effort to prevent diagonalizer from breaking frags
         for isub, (ncas, nelecas) in enumerate (zip (ncas_sub, nelecas_sub)):
@@ -436,10 +443,14 @@ def canonicalize (las, mo_coeff=None, ci=None, casdm1fs=None, natorb_casdm1=None
             idx = np.argsort (occ)[::-1]
             umat[i:j,i:j] = umat[i:j,i:j][:,idx]
             if orbsym_i is not None: orbsym[i:j] = orbsym[i:j][idx]
+            t = log.timer_debug1 ('Canonicalize diag setup for fci box', *t)
             if ci is not None:
+                t = log.timer_debug1 ('Canonicalize ci not none?', *t)
                 fcibox = las.fciboxes[isub]
+                t = log.timer_debug1 ('Canonicalize call fcibox', *t)
                 ci[isub] = fcibox.states_transform_ci_for_orbital_rotation (
                     ci[isub], ncas, nelecas, umat[i:j,i:j])
+            t = log.timer_debug1 ('Canonicalize diag setup for fci', *t)
     else: # You can't get proper LAS-type CI vectors w/out active space fragmentation
         ci = None 
         orbsym_cas = None if orbsym is None else orbsym[ncore:nocc]
@@ -447,7 +458,9 @@ def canonicalize (las, mo_coeff=None, ci=None, casdm1fs=None, natorb_casdm1=None
         idx = np.argsort (occ)[::-1]
         umat[ncore:nocc,ncore:nocc] = umat[ncore:nocc,ncore:nocc][:,idx]
         if orbsym_cas is not None: orbsym[ncore:nocc] = orbsym[ncore:nocc][idx]
+        t = log.timer_debug1 ('Canonicalize non diag RDM', *t)
 
+    t = log.timer_debug1 ('Canonicalize active-active', *t)
     # Final
     mo_occ = np.zeros (nmo, dtype=natorb_casdm1.dtype)
     if ncore: mo_occ[:ncore] = 2
@@ -465,6 +478,7 @@ def canonicalize (las, mo_coeff=None, ci=None, casdm1fs=None, natorb_casdm1=None
         #mo_coeff = las.label_symmetry_(mo_coeff)
         '''
         mo_coeff = lib.tag_array (mo_coeff, orbsym=orbsym)
+    t = log.timer_debug1 ('Canonicalize final mo_coeff', *t)
     if h2eff_sub is not None:
         h2eff_sub = lib.numpy_helper.unpack_tril (h2eff_sub.reshape (nmo*las.ncas, -1))
         h2eff_sub = h2eff_sub.reshape (nmo, las.ncas, las.ncas, las.ncas)
@@ -475,6 +489,7 @@ def canonicalize (las, mo_coeff=None, ci=None, casdm1fs=None, natorb_casdm1=None
         h2eff_sub = h2eff_sub.reshape (nmo*las.ncas, las.ncas, las.ncas)
         h2eff_sub = lib.numpy_helper.pack_tril (h2eff_sub).reshape (nmo, -1)
 
+    t = log.timer_debug1 ('Canonicalize final h2eff_update', *t)
     # I/O
     log = lib.logger.new_logger (las, las.verbose)
     label = las.mol.ao_labels()
@@ -495,6 +510,7 @@ def canonicalize (las, mo_coeff=None, ci=None, casdm1fs=None, natorb_casdm1=None
             mo_las = mo_coeff[:,ncore:nocc]
             dump_mat.dump_rec(log.stdout, mo_las, label, start=1)
 
+    t = log.timer_debug1 ('Canonicalize I/O', *t)
     return mo_coeff, mo_ene, mo_occ, ci, h2eff_sub
 
 def get_init_guess_ci (las, mo_coeff=None, h2eff_sub=None, ci0=None, eri_cas=None, gtype=None):
@@ -2456,8 +2472,10 @@ class LASPSCFNoSymm (casci.CASCI):
         if mo_occ is None: mo_occ = np.ones (mo_rspace.shape[1], dtype=int)
         if rngs is None: rngs = [None,None,None]
         mo_occ1 = []
+        mo_occ2 = []
         svals = []
         mo_rvecs = []
+        mo_rnull = []
         for m in np.unique (mo_occ):
             idx = (mo_occ==m)
             l, sv, r = self._svd1 (mo_lspace, mo_rspace[:,idx], s=s, rng=rngs[int(round(m))],
@@ -2467,15 +2485,19 @@ class LASPSCFNoSymm (casci.CASCI):
             svals.append (sv[:k])
             mo_rvecs.append (r[:,:k])
             mo_occ1.append (np.asarray ([m,]*k))
-        mo_rvecs = np.concatenate (mo_rvecs, axis=1)
+            if k < np.count_nonzero (idx):
+                assert (r.shape[1] == np.count_nonzero (idx))
+                mo_rnull.append (r[:,k:])
+                mo_occ2.append (np.asarray ([m,]*(np.count_nonzero (idx) - k)))
+        mo_rvecs = np.concatenate (mo_rvecs + mo_rnull, axis=1)
         svals = np.concatenate (svals)
-        mo_occ1 = np.concatenate (mo_occ1)
+        mo_occ1 = np.concatenate (mo_occ1 + mo_occ2)
         idx = np.argsort (-svals)
         svals = svals[idx]
-        mo_occ1 = mo_occ1[idx]
         k = len (idx)
+        mo_occ1[:k] = mo_occ1[:k][idx]
         mo_lvecs[:,:k] = mo_lvecs[:,:k][:,idx]
-        mo_rvecs = mo_rvecs[:,idx]
+        mo_rvecs[:,:k] = mo_rvecs[:,:k][:,idx]
         return mo_lvecs, svals, mo_rvecs, mo_occ1
 
     def _svd1 (self, mo_lspace, mo_rspace, s=None, rng=None, **kwargs):
@@ -2659,12 +2681,14 @@ class LASPSCFSymm (casci_symm.CASCI, LASPSCFNoSymm):
         ncore = self.ncore
         ncas_sub = self.ncas_sub
         nocc = ncore + sum (ncas_sub)
-        mo_coeff[:,:ncore] = symm.symmetrize_space (self.mol, mo_coeff[:,:ncore])
+        if ncore > 0:
+            mo_coeff[:,:ncore] = symm.symmetrize_space (self.mol, mo_coeff[:,:ncore])
         for isub, ncas in enumerate (ncas_sub):
             i = ncore + sum (ncas_sub[:isub])
             j = i + ncas
             mo_coeff[:,i:j] = symm.symmetrize_space (self.mol, mo_coeff[:,i:j])
-        mo_coeff[:,nocc:] = symm.symmetrize_space (self.mol, mo_coeff[:,nocc:])
+        if mo_coeff.shape[1] > nocc:
+            mo_coeff[:,nocc:] = symm.symmetrize_space (self.mol, mo_coeff[:,nocc:])
         orbsym = symm.label_orb_symm (self.mol, self.mol.irrep_id,
                                       self.mol.symm_orb, mo_coeff,
                                       s=self._scf.get_ovlp ())
@@ -2696,9 +2720,12 @@ class LASPSCFSymm (casci_symm.CASCI, LASPSCFNoSymm):
             rsymm = symm.label_orb_symm(self.mol, self.mol.irrep_id,
                 self.mol.symm_orb, mo_rspace, s=s)
         mo_occ1 = []
+        mo_occ2 = []
         svals = []
         mo_rvecs = []
+        mo_rnull = []
         rsymm1 = []
+        rsymm2 = []
         for m in np.unique (mo_occ):
             idx = (mo_occ==m)
             l, sv, r = self._svd1 (mo_lspace, mo_rspace[:,idx], lsymm, rsymm[idx], s=s, 
@@ -2708,19 +2735,24 @@ class LASPSCFSymm (casci_symm.CASCI, LASPSCFNoSymm):
             svals.append (sv[:k])
             mo_rvecs.append (r[:,:k])
             mo_occ1.append (np.asarray ([m,]*k))
-            rsymm1.append (r.orbsym)
-        mo_rvecs = np.concatenate (mo_rvecs, axis=1)
+            rsymm1.append (r.orbsym[:k].copy ())
+            if k < np.count_nonzero (idx):
+                assert (r.shape[1] == np.count_nonzero (idx))
+                mo_rnull.append (r[:,k:])
+                mo_occ2.append (np.asarray ([m,]*(np.count_nonzero (idx) - k)))
+                rsymm2.append (r.orbsym[k:].copy ())
+        mo_rvecs = np.concatenate (mo_rvecs + mo_rnull, axis=1)
         svals = np.concatenate (svals)
-        mo_occ1 = np.concatenate (mo_occ1)
+        mo_occ1 = np.concatenate (mo_occ1 + mo_occ2)
         idx = np.argsort (-svals)
-        svals = svals[idx]
-        mo_occ1 = mo_occ1[idx]
-        mo_rvecs = mo_rvecs[:,idx]
-        lsymm = mo_lvecs.orbsym
         k = len (idx)
+        svals = svals[idx]
+        mo_occ1[:k] = mo_occ1[:k][idx]
+        mo_rvecs[:,:k] = mo_rvecs[:,:k][:,idx]
+        lsymm = mo_lvecs.orbsym
         lsymm[:k] = lsymm[:k][idx]
         mo_lvecs[:,:k] = mo_lvecs[:,:k][:,idx]
-        mo_rvecs = lib.tag_array (mo_rvecs, orbsym=np.concatenate (rsymm1))
+        mo_rvecs = lib.tag_array (mo_rvecs, orbsym=np.concatenate (rsymm1 + rsymm2))
         mo_lvecs = lib.tag_array (mo_lvecs, orbsym=lsymm)
         return mo_lvecs, svals, mo_rvecs, mo_occ1
 
