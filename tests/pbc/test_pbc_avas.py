@@ -4,7 +4,7 @@ import numpy as np
 from pyscf.pbc import gto as pgto
 from pyscf.pbc import scf
 
-from my_pyscf.pbc.mcscf import avas
+from mrh.my_pyscf.pbc.mcscf import avas
 
 # Unit test for the p-AVAS. This is generalization of AVAS at k-points with appropriate care
 # of complex numbers and cell object. Instead of testing the AVAS code in-depth (which should 
