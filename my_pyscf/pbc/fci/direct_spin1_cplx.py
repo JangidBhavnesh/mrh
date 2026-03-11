@@ -25,11 +25,11 @@ import warnings
 import ctypes
 import numpy as np
 import scipy.linalg
-from pyscf import lib
-from pyscf import ao2mo
-from pyscf.fci import cistring
-from pyscf.fci import direct_spin1
+
+from pyscf import lib, ao2mo
+from pyscf.fci import cistring, direct_spin1
 from pyscf.fci.addons import _unpack_nelec
+
 from mrh.my_pyscf.pbc.fci import rdm_helper
 
 libfci = direct_spin1.libfci
@@ -289,11 +289,8 @@ def make_hdiag(h1e, eri, norb, nelec, compress=False):
 
 def make_rdm1s(fcivec, norb, nelec, link_index=None):
     make_rdm1s.__doc__ = direct_spin1.make_rdm1s.__doc__
-    if link_index is None:
-        neleca, nelecb = _unpack_nelec(nelec)
-        link_indexa = cistring.gen_linkstr_index(range(norb), neleca)
-        link_indexb = cistring.gen_linkstr_index(range(norb), nelecb)
-        link_index = (link_indexa, link_indexb)
+    neleca, nelecb = _unpack_nelec(nelec)
+    link_index = _unpack(norb, nelec, link_index)
     rdm1a = rdm_helper.make_rdm1_spin1('FCImake_rdm1a_cplx', fcivec, fcivec,
                                 norb, nelec, link_index)
     rdm1b = rdm_helper.make_rdm1_spin1('FCImake_rdm1b_cplx', fcivec, fcivec,
@@ -337,7 +334,8 @@ def make_rdm1s_py(fcivec, norb, nelec, link_index=None):
     return rdm1a, rdm1b
 
 def make_rdm12s_py(fcivec, norb, nelec, link_index=None, reorder=True):
-    (dm1a, dm1b), (dm2aa, dm2ab, dm2bb) = rdm_helper.make_rdm12s_cplx(fcivec, norb, nelec, link_index, reorder)
+    (dm1a, dm1b), (dm2aa, dm2ab, dm2bb) = \
+        rdm_helper.make_rdm12s_cplx(fcivec, norb, nelec, link_index, reorder)
     return (dm1a, dm1b), (dm2aa, dm2ab, dm2bb)
 
 def make_rdm12_py(fcivec, norb, nelec, link_index=None, reorder=True):
@@ -347,6 +345,8 @@ def make_rdm12_py(fcivec, norb, nelec, link_index=None, reorder=True):
 def _make_diag_precond(hdiag, level_shift=1e-3):
     '''
     Diagonal preconditioner for the Davidson solver.
+    This is main function to generate the diagonal preconditioner but I need
+    to write the wrapper around this to match the pyscf.
     '''
     hdiag = np.asarray(hdiag)
     if np.max(np.abs(hdiag.imag)) > HDIAG_IMAG_TOL:
@@ -359,7 +359,6 @@ def _make_diag_precond(hdiag, level_shift=1e-3):
         diagd[np.abs(diagd) < 1e-8] = 1e-8
         return dx / diagd
     return precond
-
 
 def make_diag_precond(hdiag, pspaceig, pspaceci, addr, level_shift=0):
     # To make it compatible with direct_spin1
