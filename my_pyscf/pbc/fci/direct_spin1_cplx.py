@@ -34,6 +34,9 @@ from mrh.my_pyscf.pbc.fci import rdm_helper
 
 libfci = direct_spin1.libfci
 
+# Some global variables
+HDIAG_IMAG_TOL = 1e-3
+
 def _get_init_guess_cplx(na, nb, nroots, hdiag, nelec):
     """
     Complex-CI initial guesses: pick the nroots lowest diagonal determinants
@@ -311,7 +314,11 @@ def make_hdiag(h1e, eri, norb, nelec, compress=False):
         h1e = h1e.real.copy()
     if eri.dtype == np.complex128:
         eri = eri.real.copy()
-    return direct_spin1.make_hdiag(h1e, eri, norb, nelec, compress)
+    hdiag_real = direct_spin1.make_hdiag(h1e, eri, norb, nelec, compress)
+    hdiag = hdiag_real.astype(h1e.dtype)
+    hdiag.real = hdiag_real
+    hdiag_real = None
+    return hdiag
 
 def make_rdm1s(fcivec, norb, nelec, link_index=None):
     make_rdm1s.__doc__ = direct_spin1.make_rdm1s.__doc__
@@ -370,6 +377,89 @@ def make_rdm12_py(fcivec, norb, nelec, link_index=None, reorder=True):
     dm1, dm2 = rdm_helper.make_rdm12_cplx(fcivec, norb, nelec, link_index, reorder)
     return dm1, dm2
 
+def _make_diag_precond(hdiag, level_shift=1e-3):
+    '''
+    Diagonal preconditioner for the Davidson solver.
+    '''
+    hdiag = np.asarray(hdiag)
+    if np.max(np.abs(hdiag.imag)) > HDIAG_IMAG_TOL:
+        msg = ("The diagonal elements of the Hamiltonian have non-negligible "
+            f"imaginary parts: max |Im(hdiag)| = {np.max(np.abs(hdiag.imag))}.")
+        warnings.warn(msg)
+    def precond(dx, e, *args):
+        diagd = hdiag - (np.real(e) - level_shift)
+        diagd = diagd.copy()
+        diagd[np.abs(diagd) < 1e-8] = 1e-8
+        return dx / diagd
+    return precond
+
+
+def make_diag_precond(hdiag, pspaceig, pspaceci, addr, level_shift=0):
+    # To make it compatible with direct_spin1
+    return _make_diag_precond(hdiag, level_shift)
+
+def make_pspace_precond(hdiag, pspaceig, pspaceci, addr, level_shift=0):
+    '''
+    Code adapated from the pyscf/fci/direct_spin1.py, but with some modification 
+    to handle the complex Hamiltonian.
+    args:
+        hdiag: np.ndarray of shape (ndet,)
+            diagonal of the Hamiltonian in the determinant basis.
+        pspaceig: np.ndarray of shape (npsp,)
+            eigenvalues of the Hamiltonian in the pspace.
+        pspaceci: np.ndarray of shape (npsp, npsp)
+            eigenvectors of the Hamiltonian in the pspace.
+        addr: np.ndarray of shape (npsp,)
+            the addresses of the determinants in the pspace.
+        level_shift: float
+            level shift for the preconditioner, default is 0.
+    returns:
+        precond: function
+            the preconditioner function that can be used in the Davidson solver.
+    '''
+    hdiag = np.asarray(hdiag)
+    pspaceig = np.asarray(pspaceig)
+    pspaceci = np.asarray(pspaceci)
+    addr = np.asarray(addr)
+
+    def precond(r, e0, x0, *args):
+        r = np.asarray(r)
+        x0 = np.asarray(x0)
+        e0r = np.real(e0)
+
+        # Full-space diagonal inverse
+        denom = hdiag - (e0r - level_shift)
+        denom = denom.astype(hdiag.dtype, copy=True)
+        
+        # For very small denominators, lets set them to a small number to 
+        # avoid numerical instability. 
+        denom[np.abs(denom) < 1e-8] = 1e-8 + 0j
+
+        hdiaginv = 1.0 / denom
+        hdiaginv[np.abs(hdiaginv) > 1e8] = 1e8
+
+        # P-space inverse in eigenbasis:
+        pdenom = pspaceig - (e0r - level_shift)
+        pdenom = np.asarray(pdenom, dtype=pspaceig.dtype).copy()
+        pdenom[np.abs(pdenom) < 1e-8] = 1e-8
+        h0e0inv = np.dot(pspaceci / pdenom, pspaceci.conj().T)
+
+        # Apply preconditioner to x0 and residual
+        h0x0 = x0 * hdiaginv
+        h0x0[addr] = np.dot(h0e0inv, x0[addr])
+
+        h0r = r * hdiaginv
+        h0r[addr] = np.dot(h0e0inv, r[addr])
+
+        # For complex number innder product, using vdot instead of dot.
+        denom_e1 = np.vdot(x0, h0x0)
+        if abs(denom_e1) < 1e-14: e1 = 0.0
+        else: e1 = np.vdot(x0, h0r) / denom_e1
+        x1 = r - e1 * x0
+        x1 *= hdiaginv
+        return x1
+    return precond
+
 class FCISolver(direct_spin1.FCISolver):
     def __init__(self, *args, **kwargs):
         direct_spin1.FCISolver.__init__(self, *args, **kwargs)
@@ -397,6 +487,14 @@ class FCISolver(direct_spin1.FCISolver):
         nelec = _unpack_nelec(nelec, self.spin)
         return pspace(h1e, eri, norb, nelec, hdiag, pspace_size)
     
+    def make_precond(self, hdiag, pspaceig=None, pspaceci=None, addr=None):
+        if pspaceig is None:
+            return make_diag_precond(hdiag, pspaceig, pspaceci, addr,
+                                     self.level_shift)
+        else:
+            return make_pspace_precond(hdiag, pspaceig, pspaceci, addr,
+                                       self.level_shift)
+        
     def kernel(self, h1e, eri, norb, nelec, ci0=None,
                tol=None, lindep=None, max_cycle=None, max_space=None,
                nroots=None, davidson_only=None, pspace_size=None,
@@ -409,7 +507,7 @@ class FCISolver(direct_spin1.FCISolver):
 
         link_indexa = cistring.gen_linkstr_index(range(norb), neleca)
         link_indexb = cistring.gen_linkstr_index(range(norb), nelecb)
-
+        
         e, c = direct_spin1.kernel_ms1(self, h1e, eri, norb, nelec, ci0,
                                        (link_indexa,link_indexb),
                                        tol, lindep, max_cycle, max_space, nroots,
@@ -430,7 +528,7 @@ class FCISolver(direct_spin1.FCISolver):
                         'non-Hermitian Hamiltonian. If h1e and h2e is not '
                         'hermtian, calling symmetric diagonalization in eig '
                         'can lead to wrong results.')
-            
+        
         self.converged, e, ci = \
                 lib.davidson1(lambda xs: [op(x) for x in xs],
                               x0, precond, lessio=self.lessio, **kwargs)

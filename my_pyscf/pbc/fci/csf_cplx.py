@@ -1,5 +1,3 @@
-import inspect
-
 import numpy as np
 import ctypes
 import scipy
@@ -7,13 +5,12 @@ import warnings
 
 from pyscf import lib
 from pyscf import __config__
-from pyscf.fci import direct_uhf, direct_spin1, cistring
+from pyscf.fci import direct_uhf, cistring
 from pyscf.csf_fci.csf import CSFFCISolver as realCSFFCISolver, FCISolver as realFCISolver
 from pyscf.csf_fci.csf import unpack_h1e_cs, unpack_h1e_ab, get_init_guess, make_hdiag_csf as make_hdiag_csf_real
-from pyscf.csf_fci.csf import _debug_g2e as _debug_g2e_real, pspace as pspace_real, get_init_guess as get_init_guess_real
+from pyscf.csf_fci.csf import _debug_g2e as _debug_g2e_real, get_init_guess as get_init_guess_real
 from pyscf.lib.numpy_helper import tag_array
 from pyscf.csf_fci.csfstring import count_all_csfs
-from pyscf.csf_fci.csfstring import CSFTransformer
 
 from mrh.my_pyscf.pbc.fci import direct_spin1_cplx
 
@@ -23,7 +20,6 @@ libfci = lib.load_library('libfci')
 # _unpack from direct_spin1 will store the link_idx in the tril format.
 _unpack = direct_spin1_cplx._unpack
 _unpack_nelec = direct_spin1_cplx._unpack_nelec
-_get_init_guess = direct_spin1_cplx._get_init_guess_cplx
 
 # Global variables:
 HDIAG_IMAG_TOL = 1e-3
@@ -157,6 +153,7 @@ def make_hdiag_csf (h1e, eri, norb, nelec, transformer, hdiag_det=None, max_memo
     assert np.iscomplexobj(h1e) and np.iscomplexobj(hdiag_det), \
         "You are using wrong function for real Hamiltonian"
     dtype = h1e.dtype
+
     hdiag_csf_real = make_hdiag_csf_real(
         h1e.real, eri.real, norb, nelec, transformer, 
         hdiag_det=hdiag_det.real, max_memory=max_memory)
@@ -724,8 +721,8 @@ class cplxCSFFCISolver:
     pspace_size = getattr(__config__, 'fci_csf_FCI_pspace_size', 200)
     make_hdiag = make_hdiag_det
 
-    def __init__ (self, mol, smult, **args):
-        self.mol = mol
+    def __init__ (self, cell, smult, **args):
+        self.cell = cell
         self.smult = smult
         self.transformer = None
         super().__init__ (**args)
@@ -737,6 +734,7 @@ class cplxCSFFCISolver:
             self.smult = smult
         self.check_transformer_cache ()
         max_memory = max_memory if max_memory is not None else self.max_memory
+        print(max_memory)
         return make_hdiag_csf(h1e, eri, norb, nelec, self.transformer, hdiag_det=hdiag_det, 
                                    max_memory=max_memory)
 
@@ -804,7 +802,6 @@ class FCISolver(cplxCSFFCISolver, direct_spin1_cplx.FCISolver):
 
         e, c = kernel (self, h1e, eri, norb, nelec, smult=self.smult,
                        idx_sym=None, ci0=ci0, transformer=self.transformer,
-                       verbose=lib.logger.DEBUG,
                        **kwargs)
 
         self.eci, self.ci = e, c
@@ -812,82 +809,4 @@ class FCISolver(cplxCSFFCISolver, direct_spin1_cplx.FCISolver):
 
     check_transformer_cache = realFCISolver.check_transformer_cache
 
-    
-if __name__ == "__main__":
-    from pyscf import gto, fci, scf, lib, ao2mo
-    from pyscf.csf_fci import csf_solver
-    from mrh.my_pyscf.pbc.fci import direct_spin1_cplx
-    mol = gto.Mole(atom='H 0 0 0; F 0 0 1.1', basis='STO-6G',
-                verbose=lib.logger.DEBUG)
-    mol.build ()
-    mf = scf.RHF (mol).run ()
-    h0 = mf.energy_nuc ()
-    h1 = mf.mo_coeff.conj ().T @ mf.get_hcore () @ mf.mo_coeff
-    h2 = ao2mo.restore (1, ao2mo.full (mf._eri, mf.mo_coeff), mol.nao_nr ())
-    cisolver = csf_solver (mol, smult=1)
-
-    norb = mol.nao_nr ()
-    nelec = (5, 5)
-    
-    def real_CSFSolver(h0, h1, h2, norb, nelec, davidson_only=False, pspace_size=400):
-        real_cisolver = csf_solver (mol, smult=1)
-        real_cisolver.pspace_size = pspace_size
-        real_cisolver.davidson_only = davidson_only
-        real_cisolver.max_cycle = 50
-        e, c = real_cisolver.kernel (h1, h2, norb, nelec, ecore=h0)
-        e_tot = real_cisolver.energy(h1, h2, c, norb, nelec)
-        assert abs(e_tot+h0-e) < 1e-6, "Energy doesn't match the expected value; "
-        print("CSF FCI Converged?", real_cisolver.converged, 
-              "Norm of wave function: ", np.linalg.norm(c), 
-              "Total energy: ", e)
-        return e
-    
-    # Generate complex Hermitian Hamiltonian
-    noise = 1e-4
-    h0cplx = h0 + noise * 1j   
-    h1cplx = h1 + noise * 1j
-    h1cplx = 0.5*(h1cplx + h1cplx.T.conj())
-
-    h2cplx = h2 + noise * 1j
-    h2cplx = 0.5*(h2cplx + h2cplx.transpose(2, 3, 0, 1))
-    h2cplx = 0.5*(h2cplx + h2cplx.transpose(1, 0, 3, 2).conj())
-    h2cplx = 0.5*(h2cplx + h2cplx.transpose(3, 2, 1, 0).conj())
-
-    def cplx_CSFSolver(h0, h1cplx, h2cplx, norb, nelec, davidson_only=False, pspace_size=400):
-        cplx_cisolver = FCISolver (mol, smult=1)
-        cplx_cisolver.davidson_only = davidson_only
-        cplx_cisolver.pspace_size = pspace_size
-        cplx_cisolver.max_cycle = 50
-        cplx_cisolver.nroots = 1
-        e_cplx, c_cplx = cplx_cisolver.kernel (h1cplx, h2cplx, norb, nelec, ecore=h0)
-        e_tot = cplx_cisolver.energy(h1cplx, h2cplx, c_cplx, norb, nelec)
-        assert abs(e_tot+h0-e_cplx) < 1e-6, "Energy doesn't match the expected value; "
-        print("Complex CSF FCI Converged?", cplx_cisolver.converged, 
-            "Norm of wave function: ", np.linalg.norm(c_cplx), 
-            "Total energy: ", e_cplx)
-        return e_cplx
-    
-    def cplx_detSolver(h0, h1cplx, h2cplx, norb, nelec, davidson_only=False, pspace_size=400):
-        cplx_cisolver_det = direct_spin1_cplx.FCISolver ()
-        cplx_cisolver_det.davidson_only = davidson_only
-        cplx_cisolver_det.pspace_size = pspace_size
-
-        e_cplx_det, c_cplx_det = cplx_cisolver_det.kernel (h1cplx, h2cplx, norb, nelec, ecore=h0)
-        e_tot = cplx_cisolver_det.energy(h1cplx, h2cplx, c_cplx_det, norb, nelec)
-        assert abs(e_tot+h0-e_cplx_det) < 1e-6, "Energy doesn't match the expected value; "
-        print("Complex Determinant FCI Converged?", cplx_cisolver_det.converged, 
-              "Norm of wave function: ", np.linalg.norm(c_cplx_det), 
-              "Total energy: ", e_cplx_det)
-        return e_cplx_det
-    
-    print("Running real CSF FCI solver...")
-    e_real_csf = real_CSFSolver(h0, h1, h2, norb, nelec, davidson_only=True, pspace_size=400)
-    print("\nRunning complex CSF FCI solver...")
-    e_cplx_csf = cplx_CSFSolver(h0cplx, h1cplx, h2cplx, norb, nelec, davidson_only=True, pspace_size=400)
-    print("\nRunning complex Determinant FCI solver...")
-    e_cplx_det = cplx_detSolver(h0cplx, h1cplx, h2cplx, norb, nelec, davidson_only=True, pspace_size=400)
-    print("\nSummary of results:")
-    print(f"Real CSF FCI Energy   : {e_real_csf:.12f}")
-    print(f"Complex CSF FCI Energy: {e_cplx_csf.real:.12f}")
-    print(f"Complex Det FCI Energy: {e_cplx_det.real:.12f}")
-    
+ 

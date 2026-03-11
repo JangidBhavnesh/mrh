@@ -1,5 +1,5 @@
 from mrh.my_pyscf.pbc.fci import direct_spin1_cplx
-
+from mrh.my_pyscf.pbc.fci import csf_cplx
 try:
     from pyscf import dmrgscf
     from mrh.my_pyscf.pbc.fci import dmrgci_cplx_helper
@@ -10,3 +10,7 @@ except ImportError:
 def solver(cell, singlet, symm=None):
     # Will add the singlet and symm options later.
     return direct_spin1_cplx.FCISolver(cell)
+
+
+def csf_solver(cell, smult, symm=None):
+    return csf_cplx.FCISolver(cell, smult)
