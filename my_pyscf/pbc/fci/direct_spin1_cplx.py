@@ -33,6 +33,7 @@ from pyscf.fci.addons import _unpack_nelec
 from mrh.my_pyscf.pbc.fci import rdm_helper
 from mrh.my_pyscf.pbc.fci import spin_op
 
+logger = lib.logger
 libfci = direct_spin1.libfci
 
 # Some global variables
@@ -428,6 +429,112 @@ def make_pspace_precond(hdiag, pspaceig, pspaceci, addr, level_shift=0):
         return x1
     return precond
 
+def kernel_ms1(fci, h1e, eri, norb, nelec, ci0=None, link_index=None,
+               tol=None, lindep=None, max_cycle=None, max_space=None,
+               nroots=None, davidson_only=None, pspace_size=None, hop=None,
+               max_memory=None, verbose=None, ecore=0, **kwargs):
+    direct_spin1.kernel_ms1.__doc__ + '''
+    Note: I can not directly use the direct_spin1.kernel_ms1 as that is not compatiable with the complex 
+    Hamiltonian. I am adding this function here most of the code is same as that of direct_spin1.kernel_ms1, 
+    but with some modification to handle the complex Hamiltonian.
+    '''
+    assert np.iscomplexobj(h1e) and np.iscomplexobj(eri)
+
+    if nroots is None: nroots = fci.nroots
+    if davidson_only is None: davidson_only = fci.davidson_only
+    if pspace_size is None: pspace_size = fci.pspace_size
+    if max_memory is None: max_memory = fci.max_memory - lib.current_memory()[0]
+    
+    log = logger.new_logger(fci, verbose)
+    nelec = _unpack_nelec(nelec, fci.spin)
+    
+    assert (0 <= nelec[0] <= norb and 0 <= nelec[1] <= norb)
+
+    hdiag = fci.make_hdiag(h1e, eri, norb, nelec, compress=False).ravel()
+    num_dets = hdiag.size
+    pspace_size = min(num_dets, pspace_size)
+    addr = [0]
+    pw = pv = None
+    if pspace_size > 0 and norb < 64:
+        addr, h0 = fci.pspace(h1e, eri, norb, nelec, hdiag, pspace_size)
+        pw, pv = fci.eig(h0)
+        pspace_size = len(addr)
+
+    if getattr(fci, 'sym_allowed_idx', None):
+        sym_idx = np.hstack(fci.sym_allowed_idx)
+        civec_size = sym_idx.size
+    else:
+        sym_idx = None
+        civec_size = num_dets
+
+    if max_memory < civec_size*6*16e-6:
+        log.warn('Not enough memory for FCI solver. '
+                 'The minimal requirement is %.0f MB', civec_size*120e-6)
+
+    if pspace_size >= civec_size and ci0 is None and not davidson_only:
+        if nroots > 1:
+            nroots = min(civec_size, nroots)
+            civec = np.empty((nroots,civec_size), dtype=h1e.dtype)
+            civec[:,addr] = pv[:,:nroots].T
+            return pw[:nroots]+ecore, civec
+        
+        elif pspace_size == 1 or abs(pw[0]-pw[1]) > 1e-12:
+            civec = np.empty(civec_size, dtype = h1e.dtype)
+            civec[addr] = pv[:,0]
+            return pw[0]+ecore, civec
+        
+    pw = pv = h0 = None
+
+    if sym_idx is None:
+        precond = fci.make_precond(hdiag)
+    else:
+        precond = fci.make_precond(hdiag[sym_idx])
+
+    h2e = fci.absorb_h1e(h1e, eri, norb, nelec, 0.5)
+
+    if hop is None:
+        cpu0 = [logger.process_clock(), logger.perf_counter()]
+        def hop(c):
+            hc = fci.contract_2e(h2e, c, norb, nelec, link_index)
+            cpu0[:] = log.timer_debug1('contract_2e', *cpu0)
+            return hc.ravel()
+
+    def init_guess():
+        if callable(getattr(fci, 'get_init_guess', None)):
+            return fci.get_init_guess(norb, nelec, nroots, hdiag)
+        else:
+            x0 = []
+            for i in range(min(len(addr), nroots)):
+                x = np.zeros(civec_size)
+                x[addr[i]] = 1
+                x0.append(x)
+            return x0
+
+    if ci0 is None:
+        ci0 = init_guess  # lazy initialization to reduce memory footprint
+    elif not callable(ci0):
+        if isinstance(ci0, np.ndarray):
+            ci0 = [ci0.ravel()]
+        else:
+            ci0 = [x.ravel() for x in ci0]
+        if sym_idx is not None and ci0[0].size != civec_size:
+            ci0 = [x[sym_idx] for x in ci0]
+        if len(ci0) < nroots:
+            ci0.extend(init_guess()[len(ci0):])
+
+    if tol is None: tol = fci.conv_tol
+    if lindep is None: lindep = fci.lindep
+    if max_cycle is None: max_cycle = fci.max_cycle
+    if max_space is None: max_space = fci.max_space
+    tol_residual = getattr(fci, 'conv_tol_residual', None)
+
+    with lib.with_omp_threads(fci.threads):
+        e, c = fci.eig(hop, ci0, precond, tol=tol, lindep=lindep,
+                       max_cycle=max_cycle, max_space=max_space, nroots=nroots,
+                       max_memory=max_memory, verbose=log, follow_state=True,
+                       tol_residual=tol_residual, **kwargs)
+    return e+ecore, c
+
 class FCISolver(direct_spin1.FCISolver):
     def __init__(self, *args, **kwargs):
         direct_spin1.FCISolver.__init__(self, *args, **kwargs)
@@ -448,8 +555,7 @@ class FCISolver(direct_spin1.FCISolver):
     def make_hdiag(self, h1e, eri, norb, nelec, compress=False):
         nelec = direct_spin1._unpack_nelec(nelec, self.spin)
         return make_hdiag(h1e, eri, norb, nelec, compress)
-
-    @lib.with_doc(pspace.__doc__)
+    
     def pspace(self, h1e, eri, norb, nelec, hdiag=None, pspace_size=400):
         nelec = _unpack_nelec(nelec, self.spin)
         return pspace(h1e, eri, norb, nelec, hdiag, pspace_size)
@@ -469,11 +575,11 @@ class FCISolver(direct_spin1.FCISolver):
         link_indexa, link_indexb = _unpack(norb, nelec, None)
 
         # TODO: write the kernel_ms1 to avoid any warnings.
-        e, c = direct_spin1.kernel_ms1(self, h1e, eri, norb, nelec, ci0,
-                                       (link_indexa,link_indexb),
-                                       tol=tol, lindep=lindep, max_cycle=max_cycle, max_space=max_space,
-                                        nroots=nroots, davidson_only=davidson_only, pspace_size=pspace_size, 
-                                        ecore=ecore, **kwargs)
+        e, c = kernel_ms1(self, h1e, eri, norb, nelec, ci0,
+                          (link_indexa,link_indexb), tol=tol, 
+                          lindep=lindep, max_cycle=max_cycle, max_space=max_space,
+                          nroots=nroots, davidson_only=davidson_only, pspace_size=pspace_size, 
+                            ecore=ecore, **kwargs)
         self.eci, self.ci = e, c
         return e, c
 
