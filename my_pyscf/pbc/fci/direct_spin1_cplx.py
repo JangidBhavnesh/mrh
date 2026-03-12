@@ -363,6 +363,15 @@ def _make_diag_precond(hdiag, level_shift=1e-3):
         return dx / diagd
     return precond
 
+# The Davidson solver is used for iterative solving the eigen vectos for the a large sparse matrix.
+# Initially, a few guess vectors are provided, then in each iteration, the matrix-vector product is 
+# computed and then the subspace Hamiltonian is constructed and diagonalized to get the Ritz values 
+# and Ritz vectors, then the residual is computed and preconditioned to get the new guess vector for 
+# the next iteration. Till the convergence is reached.
+# Alternatively, in QC, there is pspace Davidson solver, where the Hamiltonian is constructed in a smaller 
+# subspace exactly and then those eigenvectors are projected to entire subspace and been used for the 
+# Davidson solver. Below I am defining the preconditioners for the Davidson solvers.
+
 def make_diag_precond(hdiag, pspaceig, pspaceci, addr, level_shift=0):
     # To make it compatible with direct_spin1
     return _make_diag_precond(hdiag, level_shift)

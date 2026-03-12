@@ -21,6 +21,8 @@ Unit tests for the complex FCI implementation in the PBC context.
 #         CASCI energy computed using the real FCI code.
 # Test-3: Compare different components of cplx FCI code, like energy function, contract2e, exact vs davidson solver 
 #         spin-op etc.
+# Test-4: Compare the FCI energies for different spin states, like singlet, triplet, quintet etc.
+#         Also, compared the -ms and +ms states for the triplet. I am expecting them to be degenerate.
 '''
 
 
@@ -199,6 +201,53 @@ class KnownValues(unittest.TestCase):
 
         msg = "FCI energies from exact diagonalization and Davidson diagonalization do not match."
         self.assertAlmostEqual(eci1, eci2, places=7, msg=msg)
+
+    def test_cfci_solver_with_diff_spins(self):
+        norb = 4
+        nelecas = (2, 2)
+        h1, h2 = gen_hermi_ham(norb)
+
+        # Run the exact diagonalization vs Davidson diagonalization
+        cisolver = direct_spin1_cplx.FCI()
+        cisolver.davidson_only = False
+        eci1 = cisolver.kernel(h1, h2, norb, nelecas)[0]
+
+        # Run the Davidson diagonalization
+        cisolver2 = direct_spin1_cplx.FCI()
+        cisolver2.davidson_only = True
+        eci2 = cisolver2.kernel(h1, h2, norb, nelecas)[0]
+
+        msg = "FCI energies from exact diagonalization and Davidson diagonalization do not match."
+        self.assertAlmostEqual(eci1, eci2, places=7, msg=msg)
+
+    def test_cfci_solver_with_diff_spins(self):
+        norb = 4
+        h1, h2 = gen_hermi_ham(norb)
+
+        def run_solver(h1, h2, norb, nelecas, davidson_only=False):
+            cisolver = direct_spin1_cplx.FCI()
+            cisolver.davidson_only = davidson_only
+            return cisolver.kernel(h1, h2, norb, nelecas)[0]
+        
+        eci0_sing = run_solver(h1, h2, norb, (2, 2), davidson_only=False)
+        eci1_sing = run_solver(h1, h2, norb, (2, 2), davidson_only=True)
+        
+        eci0_trip = run_solver(h1, h2, norb, (3, 1), davidson_only=False)
+        eci1_trip = run_solver(h1, h2, norb, (3, 1), davidson_only=True)
+
+        eci0_quint = run_solver(h1, h2, norb, (4, 0), davidson_only=False)
+        eci1_quint = run_solver(h1, h2, norb, (4, 0), davidson_only=True)
+
+        # Let me also compare ms=-1 vs ms=1
+        eci00_trip = run_solver(h1, h2, norb, (1, 3), davidson_only=False)
+        eci01_trip = run_solver(h1, h2, norb, (1, 3), davidson_only=True)
+        
+        msg = "FCI energies from exact diagonalization and Davidson diagonalization do not match."
+        self.assertAlmostEqual(eci0_sing, eci1_sing, places=7, msg=msg)
+        self.assertAlmostEqual(eci0_trip, eci1_trip, places=7, msg=msg)
+        self.assertAlmostEqual(eci0_quint, eci1_quint, places=7, msg=msg)
+        self.assertAlmostEqual(eci0_trip, eci00_trip, places=7, msg=msg)
+        self.assertAlmostEqual(eci1_trip, eci01_trip, places=7, msg=msg)
 
 if __name__ == "__main__":
     unittest.main()
