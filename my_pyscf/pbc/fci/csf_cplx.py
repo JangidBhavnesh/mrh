@@ -734,7 +734,6 @@ class cplxCSFFCISolver:
             self.smult = smult
         self.check_transformer_cache ()
         max_memory = max_memory if max_memory is not None else self.max_memory
-        print(max_memory)
         return make_hdiag_csf(h1e, eri, norb, nelec, self.transformer, hdiag_det=hdiag_det, 
                                    max_memory=max_memory)
 
