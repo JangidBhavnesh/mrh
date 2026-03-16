@@ -638,6 +638,10 @@ class FCISolver(direct_spin1.FCISolver):
     def make_rdm12_py(self, fcivec, norb, nelec, link_index=None, reorder=True):
         return make_rdm12_py(fcivec, norb, nelec, link_index, reorder)
     
+    def contract_ss(self, fcivec, norb, nelec):
+        nelec = _unpack_nelec(nelec, self.spin)
+        return spin_op.contract_ss0(fcivec, norb, nelec)
+    
     def spin_square(self, fcivec, norb, nelec):
         return spin_op.spin_square0(fcivec, norb, nelec)
 
