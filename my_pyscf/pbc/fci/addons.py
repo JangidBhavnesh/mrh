@@ -4,6 +4,8 @@ from pyscf.fci import addons
 # I have added the contract_ss, so I hope I don't need to write the code for these
 # function, rather these should work.
 
+# Should I rename the class calling !? Probably no!.
+
 fix_spin = addons.fix_spin
 fix_spin_ = addons.fix_spin_
 SpinPenaltyFCISolver = addons.SpinPenaltyFCISolver
