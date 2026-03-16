@@ -120,13 +120,23 @@ def _do_ao2mo_disk(kcasscf, mo_kpts, nkpts, ncore, ncas, nmo, level=1):
         kptij = np.vstack((kpts[k1], kpts[k2]))
         naux = nauxlist[(k1, k2)]
         zij = None
+        
+        # Looping over blockdim.
+        dset = grp.create_dataset(f"{k1}_{k2}", shape=(naux, nmo, nmo), dtype=np.complex128)
+        p0 = 0
+        last_sign = None
         for LpqR, LpqI, sign in mydf.sr_loop(kptij, mem_now, compact):
+            nblk = LpqR.shape[0]
+            assert nblk == LpqI.shape[0]
             tao = []
             ao_loc = None
-            zij = _ao2mo.r_e2(LpqR + 1j * LpqI, moij, ijslice, tao, ao_loc, out=zij)
+            zij_blk = _ao2mo.r_e2(LpqR + 1j * LpqI, moij, ijslice, tao, ao_loc, out=zij)
+            dset[p0:p0+nblk] = zij_blk.reshape(nblk, nmo, nmo)
+            p0 += nblk
+            last_sign = sign
             # TODO: Learn whether I should store the 2D or 3D array for better I/O performance.
-            grp.create_dataset(f"{k1}_{k2}", data=zij.reshape(naux, nmo, nmo))
-            grp2.create_dataset(f"{k1}_{k2}", data=sign)
+            #grp.create_dataset(f"{k1}_{k2}", data=zij.reshape(naux, nmo, nmo))
+        grp2.create_dataset(f"{k1}_{k2}", data=last_sign)
 
     t1 = log.timer('density fitting ao2mo Lpq', *t0)
     # TODO: use the blksize to loop over the nmo to reduce the memory footprint.           
@@ -286,25 +296,37 @@ class _ERIS:
 
 if __name__ == "__main__":
     from pyscf.pbc import gto, scf
+    from pyscf import lib
     # Timer level prints:
     lib.logger.TIMER_LEVEL = lib.logger.INFO
 
     cell = gto.Cell()
+    cell.atom = '''C     0.      0.      0.    
+              C     0.8917  0.8917  0.8917
+              C     1.7834  1.7834  0.    
+              C     2.6751  2.6751  0.8917
+              C     1.7834  0.      1.7834
+              C     2.6751  0.8917  2.6751
+              C     0.      1.7834  1.7834
+              C     0.8917  2.6751  2.6751'''
+    cell.basis = 'gth-szv'
+    cell.pseudo = 'gth-pade'
     cell.a = np.eye(3)*3.5668
-    cell.atom = 'C 0 0 0'
-    cell.basis = 'CC-PVDZ'
+    # cell.atom = 'C 0 0 0'
+    # cell.basis = 'CC-PVDZ'
     cell.verbose = lib.logger.TIMER_LEVEL
     cell.build()
 
+    t0 = (lib.logger.process_clock(), lib.logger.perf_counter())
     kmesh = [2, 2, 2]
     kpts = cell.make_kpts(kmesh)
     
     kmf = scf.KRHF(cell, kpts).density_fit()
     kmf.exxdiv = None
-    kmf.max_cycle = 100
-    kmf.conv_tol = 1e-12
+    kmf.max_cycle = 1
     kmf.kernel()
-    
+    log = lib.logger.Logger(kmf.stdout, kmf.verbose)
+    log.timer("SCF calculation completed.", *t0)
     class _kCASSCF:
         # Dummy class to check the _ERIS class.
         def __init__(self, kmf, ncas, nelecas):
@@ -326,7 +348,10 @@ if __name__ == "__main__":
     nkpts = kmc.nkpts
 
     eris = _ERIS(kmc, mo_kpts, method='disk', level=1)
+    log.timer("Disk ERI transformation completed. ", *t0)
+
     eris2 = _ERIS(kmc, mo_kpts, method='direct', level=1)
+    log.timer("Direct ERI transformation completed. ", *t0)
 
     def compare_integrals(arr1, arr2, name, shape):
         assert arr1.dtype == arr2.dtype
