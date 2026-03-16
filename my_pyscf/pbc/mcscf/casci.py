@@ -621,10 +621,10 @@ class PBCCASBASE(mcscf.casci.CASBase):
 
     @lib.with_doc(mcscf.casci.CASBase.fix_spin.__doc__)
     def fix_spin_(self, shift=PENALTY, ss=None):
-        # fci.addons.fix_spin_(self.fcisolver, shift, ss)
-        # return self
-        raise NotImplementedError('fix_spin is not implemented for PBC CASCI yet.')
-
+        from mrh.my_pyscf.pbc import fci
+        fci.addons.fix_spin_(self.fcisolver, shift, ss)
+        return self
+    
     fix_spin = fix_spin_
 
     def sfx2c1e(self):
