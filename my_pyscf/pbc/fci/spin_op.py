@@ -2,6 +2,23 @@
 import numpy as np
 from pyscf.fci.spin_op import contract_ss
 
+
+def contract_ss0(fcivec, norb, nelec, **kwargs):
+    '''
+    To implement the spin_penalty method, I will need this function.
+    Basically, it applies the S^2 operator to a complex CI vector.
+    For fcivec = a + i b,
+        S^2(fcivec) = S^2(a) + i S^2(b)
+    '''
+    assert fcivec.dtype == np.complex128
+    ci1_real = contract_ss(fcivec.real, norb, nelec)
+    ci1_imag = contract_ss(fcivec.imag, norb, nelec)
+    ci1 = ci1_real.astype(fcivec.dtype)
+    ci1.real = ci1_real
+    ci1.imag = ci1_imag
+    ci1_real = ci1_imag = None
+    return ci1
+
 def spin_square0(fcivec, norb, nelec, **kwargs):
     '''
     Spin square for complex RHF-FCI CI wfn only.
