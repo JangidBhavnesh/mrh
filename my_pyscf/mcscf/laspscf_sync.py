@@ -1,6 +1,6 @@
 from pyscf import lib, symm
 from mrh.my_pyscf.fci.csfstring import ImpossibleCIvecError
-from mrh.my_pyscf.mcscf import _DFLASPSCF
+from mrh.my_pyscf.mcscf import _DFLASCI
 from scipy.sparse import linalg as sparse_linalg
 from scipy import linalg 
 import numpy as np
@@ -13,7 +13,7 @@ class MicroIterInstabilityException (Exception):
 
 def kernel (las, mo_coeff=None, ci0=None, casdm0_fr=None, conv_tol_grad=1e-4, 
         assert_no_dupes=False, verbose=lib.logger.NOTE):
-    from mrh.my_pyscf.mcscf.laspscf import _eig_inactive_virtual
+    from mrh.my_pyscf.mcscf.lasci import _eig_inactive_virtual
     if mo_coeff is None: mo_coeff = las.mo_coeff
     if assert_no_dupes: las.assert_no_duplicates ()
     log = lib.logger.new_logger(las, verbose)
@@ -78,11 +78,11 @@ def kernel (las, mo_coeff=None, ci0=None, casdm0_fr=None, conv_tol_grad=1e-4,
         h2eff_sub[:,:] = umat.conj ().T @ h2eff_sub
 
         casdm1s_new = las.make_casdm1s_sub (ci=ci1)
-        if not isinstance (las, _DFLASPSCF) or las.verbose > lib.logger.DEBUG:
+        if not isinstance (las, _DFLASCI) or las.verbose > lib.logger.DEBUG:
             #veff = las.get_veff (mo_coeff=mo_coeff, ci=ci1)
             veff_new = las.get_veff (dm = las.make_rdm1 (mo_coeff=mo_coeff, ci=ci1))
-            if not isinstance (las, _DFLASPSCF): veff = veff_new
-        if isinstance (las, _DFLASPSCF):
+            if not isinstance (las, _DFLASCI): veff = veff_new
+        if isinstance (las, _DFLASCI):
             dcasdm1s = [dm_new - dm_old for dm_new, dm_old in zip (casdm1s_new, casdm1s_sub)]
             veff += las.fast_veffa (dcasdm1s, h2eff_sub, mo_coeff=mo_coeff, ci=ci1) 
             if las.verbose > lib.logger.DEBUG:
@@ -533,8 +533,8 @@ class LASPSCFSymm_UnitaryGroupGenerators (LASPSCF_UnitaryGroupGenerators):
             self.ci_transformers.append (tf_list)
 
 def _init_df_(h_op):
-    from mrh.my_pyscf.mcscf.laspscf import _DFLASPSCF
-    if isinstance (h_op.las, _DFLASPSCF):
+    from mrh.my_pyscf.mcscf.lasci import _DFLASCI
+    if isinstance (h_op.las, _DFLASCI):
         h_op.with_df = h_op.las.with_df
         if h_op.las.use_gpu:
            pass
@@ -714,8 +714,8 @@ class LASPSCF_HessianOperator (sparse_linalg.LinearOperator):
         casdm1 = casdm1a + casdm1b
         moH_coeff = mo_coeff.conjugate ().T
         if veff is None:
-            from mrh.my_pyscf.mcscf.laspscf import _DFLASPSCF 
-            if isinstance (las, _DFLASPSCF):
+            from mrh.my_pyscf.mcscf.lasci import _DFLASCI 
+            if isinstance (las, _DFLASCI):
                 _init_df_(self)
                 # Can't use this module's get_veff because here I need to have f_aa and f_ii
                 # On the other hand, I know that dm1s spans only the occupied orbitals

@@ -5,7 +5,7 @@ from pyscf import gto, scf, mcscf, ao2mo, lib, df
 from pyscf.lib import logger
 from pyscf.fci.direct_spin1 import _unpack_nelec
 from pyscf.mcscf.addons import _state_average_mcscf_solver
-from mrh.my_pyscf.mcscf import _DFLASPSCF, laspscf_sync, laspscf
+from mrh.my_pyscf.mcscf import _DFLASCI, laspscf_sync, laspscf, lasci
 import copy, json
 
 class ImpurityMole (gto.Mole):
@@ -1094,10 +1094,10 @@ def get_impurity_casscf (las, ifrag, imporb_builder=None):
     if not ((output is None) or (output=='/dev/null')): output += '.{}'.format (ifrag)
     imol = ImpurityMole (las, output=output)
     imf = ImpurityHF (imol)
-    if isinstance (las, _DFLASPSCF):
+    if isinstance (las, _DFLASCI):
         imf = imf.density_fit ()
     imc = ImpurityCASSCF (imf, las.ncas_sub[ifrag], las.nelecas_sub[ifrag])
-    if isinstance (las, _DFLASPSCF):
+    if isinstance (las, _DFLASCI):
         imc = df.density_fit (imc)
     imc = _state_average_mcscf_solver (imc, las.fciboxes[ifrag])
     imc._ifrags = [ifrag,]
@@ -1121,14 +1121,14 @@ def get_pair_laspscf (las, frags, inherit_df=False):
     if stdout is None and output is not None and stdout_dict is not None:
         stdout_dict[frags] = imol.stdout
     imf = ImpurityHF (imol)
-    if inherit_df and isinstance (las, _DFLASPSCF):
+    if inherit_df and isinstance (las, _DFLASCI):
         imf = imf.density_fit ()
     ncas_sub = [las.ncas_sub[i] for i in frags]
     nelecas_sub = [las.nelecas_sub[i] for i in frags]
     ilas = ImpurityLASPSCF (imf, ncas_sub, nelecas_sub, use_gpu=las.use_gpu)
-    if inherit_df and isinstance (las, _DFLASPSCF):
+    if inherit_df and isinstance (las, _DFLASCI):
         ilas = laspscf.density_fit (ilas, with_df=imf.with_df)
-    charges, spins, smults, wfnsyms = laspscf.get_space_info (las)
+    charges, spins, smults, wfnsyms = lasci.get_space_info (las)
     ilas.state_average_(weights=las.weights, charges=charges[:,frags], spins=spins[:,frags],
                         smults=smults[:,frags], wfnsyms=wfnsyms[:,frags],
                         assert_no_dupes=False)

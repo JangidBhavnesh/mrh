@@ -1,7 +1,7 @@
 import numpy as np
 from scipy import linalg
 from mrh.util.la import matrix_svd_control_options
-from mrh.my_pyscf.mcscf import laspscf, laspscf_sync, _DFLASPSCF
+from mrh.my_pyscf.mcscf import laspscf, laspscf_sync, _DFLASCI
 from mrh.my_pyscf.mcscf import lasscf_guess
 from pyscf import gto, scf, symm
 from pyscf.mcscf import mc_ao2mo, casci_symm, mc1step
@@ -48,7 +48,7 @@ class LASSCF_HessianOperator (laspscf_sync.LASPSCF_HessianOperator):
 
     def _init_eri_(self):
         laspscf_sync._init_df_(self)
-        if isinstance (self.las, _DFLASPSCF):
+        if isinstance (self.las, _DFLASCI):
             self.cas_type_eris = mc_df._ERIS (self.las, self.mo_coeff, self.with_df)
         else:
             self.cas_type_eris = mc_ao2mo._ERIS (self.las, self.mo_coeff,
@@ -153,11 +153,11 @@ class LASSCFNoSymm (laspscf.LASPSCFNoSymm):
         if mo_coeff is None: mo_coeff = self.mo_coeff
         if ci is None: ci = self.ci
         if casdm1s_sub is None: casdm1s_sub = self.make_casdm1s_sub (ci = ci)
-        if isinstance (self, _DFLASPSCF):
+        if isinstance (self, _DFLASCI):
             get_jk = self.with_df.get_jk
         else:
             get_jk = partial (self._scf.get_jk, self.mol)
-        ints = self.with_df if isinstance (self, _DFLASPSCF) else self._scf
+        ints = self.with_df if isinstance (self, _DFLASCI) else self._scf
         mo_cas = mo_coeff[:,self.ncore:][:,:self.ncas]
         dm1s_cas = linalg.block_diag (*[dm[0] - dm[1] for dm in casdm1s_sub])
         dm1s = mo_cas @ dm1s_cas @ mo_cas.conj ().T

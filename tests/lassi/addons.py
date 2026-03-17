@@ -2,7 +2,7 @@ import numpy as np
 from scipy import linalg
 import itertools
 from pyscf import lib
-from mrh.my_pyscf.mcscf.laspscf import get_space_info
+from mrh.my_pyscf.mcscf.lasci import get_space_info
 from mrh.my_pyscf.lassi.citools import get_lroots
 from mrh.my_pyscf.lassi.spaces import SingleLASRootspace
 from mrh.my_pyscf.lassi.op_o1.utilities import lst_hopping_index
