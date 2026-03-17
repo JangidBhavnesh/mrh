@@ -1,10 +1,9 @@
-import os
 import ctypes
 import numpy as np
-from pyscf import lib
 from pyscf.fci import cistring
-from pyscf.fci.addons import _unpack_nelec
+
 from mrh.lib.helper import load_library
+from mrh.my_pyscf.pbc.fci.addons import _unpack, _unpack_nelec
 
 libpbcrdm = load_library('libpbc_fci_rdms')
 
@@ -24,18 +23,11 @@ def make_rdm1_spin1(fname, cibra, ciket, norb, nelec, link_index=None):
     cibra = np.asarray(cibra, order='C')
     ciket = np.asarray(ciket, order='C')
     dtype = ciket.dtype
-    if link_index is None:
-        neleca, nelecb = _unpack_nelec(nelec)
-        link_indexa = link_indexb = cistring.gen_linkstr_index(range(norb), neleca)
-        if neleca != nelecb:
-            link_indexb = cistring.gen_linkstr_index(range(norb), nelecb)
-    else:
-        link_indexa, link_indexb = link_index
+    link_indexa, link_indexb = _unpack(norb, nelec, link_index)
     na,nlinka = link_indexa.shape[:2]
     nb,nlinkb = link_indexb.shape[:2]
     assert (cibra.size == na*nb), '{} {} {}'.format (cibra.size, na, nb)
     assert (ciket.size == na*nb), '{} {} {}'.format (ciket.size, na, nb)
-
     rdm1 = np.empty((norb,norb), dtype=dtype, order='C')
     fn = getattr(libpbcrdm, fname)
     fn(rdm1.ctypes.data_as(ctypes.c_void_p),
@@ -52,14 +44,7 @@ def make_rdm12_spin1(fname, cibra, ciket, norb, nelec, link_index=None, symm=0):
     assert (cibra is not None and ciket is not None)
     cibra = np.asarray(cibra, order='C')
     ciket = np.asarray(ciket, order='C')
-    if link_index is None:
-        neleca, nelecb = _unpack_nelec(nelec)
-        link_indexa = link_indexb = cistring.gen_linkstr_index(range(norb), neleca)
-        if neleca != nelecb:
-            link_indexb = cistring.gen_linkstr_index(range(norb), nelecb)
-    else:
-        link_indexa, link_indexb = link_index
-
+    link_indexa, link_indexb = _unpack(norb, nelec, link_index)
     na,nlinka = link_indexa.shape[:2]
     nb,nlinkb = link_indexb.shape[:2]
 
@@ -89,22 +74,18 @@ def make_rdm1s_cplx(fcivec, norb, nelec, link_index=None):
     nb = cistring.num_strings(norb, nelecb)
     C = np.asarray(fcivec).reshape(na, nb)
 
-    if link_index is None:
-        linka = cistring.gen_linkstr_index(range(norb), neleca)
-        linkb = cistring.gen_linkstr_index(range(norb), nelecb)
-    else:
-        linka, linkb = link_index
+    link_indexa, link_indexb = _unpack(norb, nelec, link_index)
 
     rdm1a = np.zeros((norb, norb), dtype=dtype)
     rdm1b = np.zeros((norb, norb), dtype=dtype)
 
-    for a0, tab in enumerate(linka):
+    for a0, tab in enumerate(link_indexa):
         for p, i, a1, sign in tab:
             if sign == 0:
                 break
             rdm1a[p, i] += sign * np.vdot(C[a0, :], C[a1, :])
 
-    for b0, tab in enumerate(linkb):
+    for b0, tab in enumerate(link_indexb):
         for p, i, b1, sign in tab:
             if sign == 0:
                 break
@@ -119,10 +100,7 @@ def make_rdm12s_cplx(fcivec, norb, nelec, link_index=None, reorder=True):
     na_str = cistring.num_strings(norb, na)
     nb_str = cistring.num_strings(norb, nb)
     fcivec = np.asarray(fcivec).reshape(na_str, nb_str)
-    if link_index is None:
-        link_indexa = cistring.gen_linkstr_index(range(norb), na)
-        link_indexb = cistring.gen_linkstr_index(range(norb), nb)
-
+    link_indexa, link_indexb = _unpack(norb, nelec, link_index)
     # Initializing the arrays:
     dtype = fcivec.dtype
     dm1a = np.zeros((norb, norb), dtype=dtype)
