@@ -322,10 +322,12 @@ def make_rdm12s(fcivec, norb, nelec, link_index=None, reorder=True):
 
 def make_rdm12(fcivec, norb, nelec, link_index=None, reorder=True):
     make_rdm12.__doc__ = direct_spin1.make_rdm12.__doc__
-    dm1, dm2 = rdm_helper.make_rdm12_spin1('FCIrdm12kern_sf_cplx', fcivec, fcivec,
-                                    norb, nelec, link_index, 1)
-    if reorder:
-        dm1, dm2 = rdm_helper.reorder_rdm(dm1, dm2, inplace=True)
+    # TODO: Need to implement this in backend C code.
+    # dm1, dm2 = rdm_helper.make_rdm12_spin1('FCIrdm12kern_sf_cplx', fcivec, fcivec,
+    #                                 norb, nelec, link_index, 1)
+    # if reorder:
+    #    dm1, dm2 = rdm_helper.reorder_rdm(dm1, dm2, inplace=True)
+    dm1, dm2 = rdm_helper.make_rdm12_cplx(fcivec, norb, nelec, link_index, 1,)
     return dm1, dm2
 
 def make_rdm1_py(fcivec, norb, nelec, link_index=None):
