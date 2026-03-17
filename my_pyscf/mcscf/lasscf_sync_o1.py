@@ -2,7 +2,7 @@ import time
 import numpy as np
 from scipy import linalg
 from pyscf import gto, lib, ao2mo
-from mrh.my_pyscf.mcscf import laspscf, laspscf_sync, lasscf_sync_o0, _DFLASPSCF
+from mrh.my_pyscf.mcscf import laspscf, laspscf_sync, lasscf_sync_o0, _DFLASCI
 from functools import partial
 
 # Let's finally implement, in the more pure LASSCF rewrite, the ERI-
@@ -137,7 +137,7 @@ class LASSCF_HessianOperator (lasscf_sync_o0.LASSCF_HessianOperator):
         t0 = (lib.logger.process_clock (), lib.logger.perf_counter ())
         self.uschmidt = uschmidt = self.make_schmidt_spaces ()
         t1 = lib.logger.timer (self.las, 'build schmidt spaces', *t0)
-        if isinstance (self.las, _DFLASPSCF):
+        if isinstance (self.las, _DFLASCI):
             eri = self.las.with_df.ao2mo
         elif getattr (self.las._scf, '_eri', None) is not None:
             eri = partial (ao2mo.full, self.las._scf._eri)
@@ -188,7 +188,7 @@ class LASSCF_HessianOperator (lasscf_sync_o0.LASSCF_HessianOperator):
         # Neither dm1_vv nor veff_vv elements are needed here
         # Nothing in this function should distinguish between core and active orbitals!
         t0 = (lib.logger.process_clock (), lib.logger.perf_counter ())
-        if not isinstance (self.las, _DFLASPSCF):
+        if not isinstance (self.las, _DFLASCI):
             return lasscf_sync_o0.LASSCF_HessianOperator.get_veff (self, dm1s_mo=dm1s_mo)
         nocc, mo, bPpj = self.nocc, self.mo_coeff, self.bPpj
         moH = mo.conj ().T

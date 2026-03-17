@@ -4,7 +4,7 @@ from scipy import linalg
 from pyscf import lib
 from pyscf.lo import orth
 from pyscf.scf.rohf import get_roothaan_fock
-from mrh.my_pyscf.mcscf import laspscf, _DFLASPSCF
+from mrh.my_pyscf.mcscf import laspscf, _DFLASCI
 from mrh.my_pyscf.mcscf.lasscf_async import keyframe, crunch
 
 # TODO: symmetry
