@@ -67,7 +67,7 @@ class FragTDMInt (object):
         model state indices.
 
         Args:
-            las : instance of :class:`LASPSCFNoSymm` //VA: 8/18/25: seems las object is a excitationPFSCI solver?
+            las : instance of :class:`LASCINoSymm` //VA: 8/18/25: seems las object is a excitationPFSCI solver?
                 Only las.stdout and las.verbose (sometimes) are used to direct the logger output
             ci : list of ndarray of length nroots
                 Contains CI vectors for the current fragment
@@ -1290,7 +1290,7 @@ def make_ints (las, ci, nelec_frs, smult_fr=None, screen_linequiv=DO_SCREEN_LINE
     ''' Build fragment-local intermediates (`FragTDMInt`) for LASSI o1
 
     Args:
-        las : instance of :class:`LASPSCFNoSymm`
+        las : instance of :class:`LASCINoSymm`
         ci : list of list of ndarrays
             Contains all CI vectors
         nelec_frs : ndarray of shape (nfrags,nroots,2)

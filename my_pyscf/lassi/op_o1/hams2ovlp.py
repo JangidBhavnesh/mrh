@@ -525,7 +525,7 @@ def ham (las, h1, h2, ci, nelec_frs, smult_fr=None, disc_fr=None, soc=0, nlas=No
     ''' Build Hamiltonian, spin-squared, and overlap matrices in LAS product state basis
 
     Args:
-        las : instance of :class:`LASPSCFNoSymm`
+        las : instance of :class:`LASCINoSymm`
         h1 : ndarray of size ncas**2
             Contains effective 1-electron Hamiltonian amplitudes in second quantization
         h2 : ndarray of size ncas**4
