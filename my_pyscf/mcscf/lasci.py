@@ -1971,7 +1971,6 @@ class LASCINoSymm (casci.CASCI):
         
         return casdm3s
 
-    # TODO: does this go here or in laspscf?
     def get_veff (self, mol=None, dm=None, hermi=1, spin_sep=False, dm1s=None, **kwargs):
         ''' Returns a spin-summed veff! If dm isn't provided, builds from self.mo_coeff, self.ci
             etc. '''
@@ -1996,7 +1995,6 @@ class LASCINoSymm (casci.CASCI):
             veff = np.stack ([j - k/2 for j, k in zip (vj, vk)], axis=0)
             return np.squeeze (veff)
 
-    # TODO: does this go here or in laspscf?
     def split_veff (self, veff, h2eff_sub, mo_coeff=None, ci=None, casdm1s_sub=None):
         ''' Split a spin-summed veff into alpha and beta terms using the h2eff eri array.
         Note that this will omit v(up_active - down_active)^virtual_inactive by necessity; 
