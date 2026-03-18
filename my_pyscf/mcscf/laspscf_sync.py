@@ -84,10 +84,8 @@ def kernel (las, mo_coeff=None, ci0=None, casdm0_fr=None, conv_tol_grad=1e-4,
             if not isinstance (las, _DFLASCI): veff = veff_new
         if isinstance (las, _DFLASCI):
             dcasdm1s = [dm_new - dm_old for dm_new, dm_old in zip (casdm1s_new, casdm1s_sub)]
-            veff += las.fast_veffa (dcasdm1s, h2eff_sub, mo_coeff=mo_coeff, ci=ci1) 
-            if las.verbose > lib.logger.DEBUG:
-                errmat = veff - veff_new
-                lib.logger.debug (las, 'fast_veffa error: {}'.format (linalg.norm (errmat)))
+            bmPu = getattr (h2eff_sub, 'bmPu', None)
+            veff += las.fast_veffa (dcasdm1s, bmPu, mo_coeff=mo_coeff, ci=ci1) 
         veff = las.split_veff (veff, h2eff_sub, mo_coeff=mo_coeff, ci=ci1)
         casdm1s_sub = casdm1s_new
 
@@ -223,7 +221,8 @@ def kernel (las, mo_coeff=None, ci0=None, casdm0_fr=None, conv_tol_grad=1e-4,
         e_tot_test = las.get_hop (ugg=ugg, mo_coeff=mo_coeff, ci=ci1, h2eff_sub=h2eff_sub,
                                   veff=veff, do_init_eri=False).e_tot
     dm_core = 2 * mo_coeff[:,:las.ncore] @ mo_coeff[:,:las.ncore].conj ().T
-    veff_a = np.stack ([las.fast_veffa ([d[state] for d in casdm1frs], h2eff_sub,
+    bmPu = getattr (h2eff_sub, 'bmPu', None)
+    veff_a = np.stack ([las.fast_veffa ([d[state] for d in casdm1frs], bmPu,
                                         mo_coeff=mo_coeff, ci=ci1, _full=True)
                         for state in range (las.nroots)], axis=0)
     veff_c = las.get_veff (dm=dm_core)

@@ -259,16 +259,15 @@ class LASPSCFNoSymm (lasci.LASCINoSymm):
         if ci is None: ci = self.ci
         return self._ugg (self, mo_coeff, ci)
 
-    def fast_veffa (self, casdm1s_sub, h2eff_sub, mo_coeff=None, ci=None, _full=False):
+    def fast_veffa (self, casdm1s_sub, bmPu, mo_coeff=None, ci=None, _full=False):
         '''Compute the effective potential exerted by active electrons on the whole orbital space
         using integrals and density matrices stored in the MO basis. This only makes sense to
         do if density fitting is used and is not implemented with GPUs at present.
 
         Args:
             casdm1s_sub : list of ndarray of shape (2,nlas,nlas)
-            h2eff_sub : ndarray of shape (nmo,ncas**2*(ncas+1)/2)
-                Needs attribute 'bmPu', which is Cholesky vectors with one AO index transformed
-                into active orbitals.
+            bmPu : ndarray of shape (nao,naux,ncas) or None
+                Cholesky vectors with one AO index transformed into active orbitals
 
         Kwargs:
             mo_coeff : ndarray of shape (nao,nmo)
@@ -294,7 +293,7 @@ class LASPSCFNoSymm (lasci.LASCINoSymm):
         dma = linalg.block_diag (*[dm[0] for dm in casdm1s_sub])
         dmb = linalg.block_diag (*[dm[1] for dm in casdm1s_sub])
         casdm1s = np.stack ([dma, dmb], axis=0)
-        if gpu or not (isinstance (self, _DFLASCI)):
+        if (bmPu is None) or gpu or not (isinstance (self, _DFLASCI)):
             dm1s = np.dot (mo_cas, np.dot (casdm1s, moH_cas)).transpose (1,0,2)
             if not _full: dm1s = dm1s[0]+dm1s[1]
             return self.get_veff (dm = dm1s, spin_sep=_full)
@@ -308,7 +307,6 @@ class LASPSCFNoSymm (lasci.LASCINoSymm):
         vj = lib.unpack_tril (np.dot (rho, bPmn))
 
         # vk
-        bmPu = h2eff_sub.bmPu
         if _full:
             vmPsu = np.dot (bmPu, casdm1s)
             vk = np.tensordot (vmPsu, bmPu, axes=((1,3),(1,2))).transpose (1,0,2)
