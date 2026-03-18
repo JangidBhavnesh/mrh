@@ -2153,47 +2153,6 @@ class LASCINoSymm (casci.CASCI):
             b0 = b1
         return bPij
 
-    # TODO: does this go here or in laspscf?
-    def fast_veffa (self, casdm1s_sub, h2eff_sub, mo_coeff=None, ci=None, _full=False):
-        if mo_coeff is None: mo_coeff = self.mo_coeff
-        if ci is None: ci = self.ci
-        assert (isinstance (self, _DFLASCI) or _full)
-        ncore = self.ncore
-        ncas_sub = self.ncas_sub
-        ncas = sum (ncas_sub)
-        nocc = ncore + ncas
-        nao, nmo = mo_coeff.shape
-        gpu=self.use_gpu
-        mo_cas = mo_coeff[:,ncore:nocc]
-        moH_cas = mo_cas.conjugate ().T
-        moH_coeff = mo_coeff.conjugate ().T
-        dma = linalg.block_diag (*[dm[0] for dm in casdm1s_sub])
-        dmb = linalg.block_diag (*[dm[1] for dm in casdm1s_sub])
-        casdm1s = np.stack ([dma, dmb], axis=0)
-        if gpu or not (isinstance (self, _DFLASCI)):
-            dm1s = np.dot (mo_cas, np.dot (casdm1s, moH_cas)).transpose (1,0,2)
-            if not _full: dm1s = dm1s[0]+dm1s[1]
-            return self.get_veff (dm = dm1s, spin_sep=_full)
-        casdm1 = casdm1s.sum (0)
-        dm1 = np.dot (mo_cas, np.dot (casdm1, moH_cas))
-        bPmn = sparsedf_array (self.with_df._cderi)
-
-        # vj
-        dm_tril = dm1 + dm1.T - np.diag (np.diag (dm1.T))
-        rho = np.dot (bPmn, lib.pack_tril (dm_tril))
-        vj = lib.unpack_tril (np.dot (rho, bPmn))
-
-        # vk
-        bmPu = h2eff_sub.bmPu
-        if _full:
-            vmPsu = np.dot (bmPu, casdm1s)
-            vk = np.tensordot (vmPsu, bmPu, axes=((1,3),(1,2))).transpose (1,0,2)
-            return vj[None,:,:] - vk
-        else:
-            vmPu = np.dot (bmPu, casdm1)
-            vk = np.tensordot (vmPu, bmPu, axes=((1,2),(1,2)))
-            return vj - vk/2
-
     @lib.with_doc(kernel.__doc__)
     def kernel (self, mo_coeff=None, ci0=None, lroots=None, lweights=None, verbose=None,
                assert_no_dupes=False, _dry_run=False):
