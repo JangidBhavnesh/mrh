@@ -1971,9 +1971,26 @@ class LASCINoSymm (casci.CASCI):
         
         return casdm3s
 
-    def get_veff (self, mol=None, dm=None, hermi=1, spin_sep=False, dm1s=None, **kwargs):
-        ''' Returns a spin-summed veff! If dm isn't provided, builds from self.mo_coeff, self.ci
-            etc. '''
+    def get_veff (self, mol=None, dm=None, hermi=1, dm1s=None, **kwargs):
+        '''Effective potential matrix from a density matrix 
+
+        Kwargs:
+            mol : instance of :class:`Mole`
+            dm : one or two ndarrays of shape (nao,nao)
+                If two, they are interpreted as spin-up and spin-down and a spin-separated
+                potential is returned. If one, it is interpreted as spin-summed and a spinless
+                potential is returned.
+            hermi : int
+                Whether J, K matrix is hermitian
+
+                | 0 : no hermitian or symmetric
+                | 1 : hermitian
+                | 2 : anti-hermitian
+
+        Returns:
+            veff : ndarray of shape (nao,nao) or (2,nao,nao)
+                Depending on shape of np.asarray (dm)
+        '''
         if dm is None and dm1s is not None:
             import warnings
             kwarg_warn = "The kwarg on get_veff has been renamed from dm1s to dm"
@@ -1983,17 +2000,18 @@ class LASCINoSymm (casci.CASCI):
         nao = mol.nao_nr ()
         if dm is None: dm = self.make_rdm1 (include_core=True, **kwargs).reshape (nao, nao)
         dm = np.asarray (dm)
-        if dm.ndim == 2: dm = dm[None,:,:]
         if isinstance (self, _DFLASCI):
             vj, vk = self.with_df.get_jk(dm, hermi=hermi)
         else:
             vj, vk = self._scf.get_jk(mol, dm, hermi=hermi)
-        if spin_sep:
+        if dm.ndim==3:
             assert (dm.shape[0] == 2)
             return vj.sum (0)[None,:,:] - vk
-        else:
+        elif dm.ndim==2:
             veff = np.stack ([j - k/2 for j, k in zip (vj, vk)], axis=0)
-            return np.squeeze (veff)
+            return veff
+        else:
+            raise RuntimeError ("dm must have 2 or 3 dimensions")
 
     def split_veff (self, veff, h2eff_sub, mo_coeff=None, ci=None, casdm1s_sub=None):
         ''' Split a spin-summed veff into alpha and beta terms using the h2eff eri array.
