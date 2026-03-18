@@ -259,8 +259,26 @@ class LASPSCFNoSymm (lasci.LASCINoSymm):
         if ci is None: ci = self.ci
         return self._ugg (self, mo_coeff, ci)
 
-    # TODO: does this go here or in lasci?
     def fast_veffa (self, casdm1s_sub, h2eff_sub, mo_coeff=None, ci=None, _full=False):
+        '''Compute the effective potential exerted by active electrons on the whole orbital space
+        using integrals and density matrices stored in the MO basis. This only makes sense to
+        do if density fitting is used and is not implemented with GPUs at present.
+
+        Args:
+            casdm1s_sub : list of ndarray of shape (2,nlas,nlas)
+            h2eff_sub : ndarray of shape (nmo,ncas**2*(ncas+1)/2)
+                Needs attribute 'bmPu', which is Cholesky vectors with one AO index transformed
+                into active orbitals.
+
+        Kwargs:
+            mo_coeff : ndarray of shape (nao,nmo)
+            ci : nested list of ndarrays
+            _full : logical
+                If True, veff is returned in spin-separated form
+
+        Returns:
+            veff : ndarray of shape (nao,nao) or (2,nao,nao)
+        '''
         if mo_coeff is None: mo_coeff = self.mo_coeff
         if ci is None: ci = self.ci
         assert (isinstance (self, _DFLASCI) or _full)
