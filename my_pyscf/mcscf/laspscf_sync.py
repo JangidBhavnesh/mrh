@@ -712,32 +712,8 @@ class LASPSCF_HessianOperator (sparse_linalg.LinearOperator):
         casdm1 = casdm1a + casdm1b
         moH_coeff = mo_coeff.conjugate ().T
         if veff is None:
-            from mrh.my_pyscf.mcscf.lasci import _DFLASCI 
-            if isinstance (las, _DFLASCI):
-                _init_df_(self)
-                # Can't use this module's get_veff because here I need to have f_aa and f_ii
-                # On the other hand, I know that dm1s spans only the occupied orbitals
-                rho = np.tensordot (self.bPpj[:,:nocc,:], self.dm1s[:,:nocc,:nocc].sum (0))
-                vj_ao = np.zeros (nao*(nao+1)//2, dtype=rho.dtype)
-                b0 = 0
-                for eri1 in self.with_df.loop ():
-                    b1 = b0 + eri1.shape[0]
-                    vj_ao += np.dot (rho[b0:b1], eri1)
-                    b0 = b1
-                vj_mo = moH_coeff @ lib.unpack_tril (vj_ao) @ mo_coeff
-                vPpi = self.bPpj[:,:,:ncore] * np.sqrt (2.0)
-                no_occ, no_coeff = linalg.eigh (casdm1)
-                no_occ[no_occ<0] = 0.0
-                no_coeff *= np.sqrt (no_occ)[None,:]
-                vPpu = np.dot (self.bPpj[:,:,ncore:nocc], no_coeff)
-                vPpj = np.append (vPpi, vPpu, axis=2)
-                vk_mo = np.tensordot (vPpj, vPpj, axes=((0,2),(0,2)))
-                smo = las._scf.get_ovlp () @ mo_coeff
-                smoH = smo.conjugate ().T
-                veff = smo @ (vj_mo - vk_mo/2) @ smoH
-            else:
-                veff = las.get_veff (dm = np.dot (mo_coeff, 
-                                                  np.dot (self.dm1s.sum (0), moH_coeff)))
+            veff = las.get_veff (dm = np.dot (mo_coeff, 
+                                              np.dot (self.dm1s.sum (0), moH_coeff)))
             veff = las.split_veff (veff, h2eff_sub, mo_coeff=mo_coeff, casdm1s_sub=self.casdm1fs)
         self.eri_paaa = eri_paaa = lib.numpy_helper.unpack_tril (
             h2eff_sub.reshape (nmo*ncas, ncas*(ncas+1)//2)).reshape (nmo, ncas,
