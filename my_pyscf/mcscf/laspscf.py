@@ -296,7 +296,7 @@ class LASPSCFNoSymm (lasci.LASCINoSymm):
         if (bmPu is None) or gpu or not (isinstance (self, _DFLASCI)):
             dm1s = np.dot (mo_cas, np.dot (casdm1s, moH_cas)).transpose (1,0,2)
             if not _full: dm1s = dm1s[0]+dm1s[1]
-            return self.get_veff (dm = dm1s, spin_sep=_full)
+            return self.get_veff (dm = dm1s)
         casdm1 = casdm1s.sum (0)
         dm1 = np.dot (mo_cas, np.dot (casdm1, moH_cas))
         bPmn = sparsedf_array (self.with_df._cderi)
