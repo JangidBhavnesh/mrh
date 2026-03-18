@@ -48,9 +48,10 @@ def kernel (las, mo_coeff=None, ci0=None, casdm0_fr=None, conv_tol_grad=1e-4,
         if (ci0 is None or any ([c is None for c in ci0]) or
           any ([any ([c2 is None for c2 in c1]) for c1 in ci0])):
             raise RuntimeError ("failed to populate get_init_guess")
-        veff = las.get_veff (dm = las.make_rdm1 (mo_coeff=mo_coeff, ci=ci0))
-        casdm1s_sub = las.make_casdm1s_sub (ci=ci0)
         casdm1frs = las.states_make_casdm1s_sub (ci=ci0)
+        casdm1s_sub = las.make_casdm1s_sub (ci=ci0, casdm1frs=casdm1frs)
+        dm = las.make_rdm1 (mo_coeff=mo_coeff, ci=ci0, casdm1s_sub=casdm1s_sub)
+        veff = las.get_veff (dm = dm)
         veff = las.split_veff (veff, h2eff_sub, mo_coeff=mo_coeff, ci=ci0, casdm1s_sub=casdm1s_sub)
     t1 = log.timer('LASPSCF initial get_veff', *t1)
 
