@@ -70,8 +70,7 @@ def get_grad (las, mo_coeff=None, ci=None, ugg=None, h1eff_sub=None, h2eff_sub=N
     if dm1s is None: dm1s = las.make_rdm1s (mo_coeff=mo_coeff, ci=ci)
     if h2eff_sub is None: h2eff_sub = las.get_h2eff (mo_coeff)
     if veff is None:
-        veff = las.get_veff (dm = dm1s.sum (0))
-        veff = las.split_veff (veff, h2eff_sub, mo_coeff=mo_coeff, ci=ci)
+        veff = las.get_veff (dm = dm1s)
     if h1eff_sub is None: h1eff_sub = las.get_h1eff (mo_coeff, ci=ci, veff=veff,
                                                      h2eff_sub=h2eff_sub)
 
@@ -126,8 +125,7 @@ def get_grad_orb (las, mo_coeff=None, ci=None, h2eff_sub=None, veff=None, dm1s=N
     if dm1s is None: dm1s = las.make_rdm1s (mo_coeff=mo_coeff, ci=ci)
     if h2eff_sub is None: h2eff_sub = las.get_h2eff (mo_coeff)
     if veff is None:
-        veff = las.get_veff (dm = dm1s.sum (0))
-        veff = las.split_veff (veff, h2eff_sub, mo_coeff=mo_coeff, ci=ci)
+        veff = las.get_veff (dm = dm1s)
     nao, nmo = mo_coeff.shape
     ncore = las.ncore
     ncas = las.ncas

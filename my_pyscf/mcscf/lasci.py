@@ -101,8 +101,7 @@ def h1e_for_las (las, mo_coeff=None, ncas=None, ncore=None, nelecas=None, ci=Non
     if casdm1s_sub is None: casdm1s_sub = [np.einsum ('rsij,r->sij',dm,las.weights)
                                            for dm in casdm1frs]
     if veff is None:
-        veff = las.get_veff (dm = las.make_rdm1 (mo_coeff=mo_coeff, casdm1s_sub=casdm1s_sub))
-        veff = las.split_veff (veff, h2eff_sub, mo_coeff=mo_coeff, casdm1s_sub=casdm1s_sub)
+        veff = las.get_veff (dm = las.make_rdm1s (mo_coeff=mo_coeff, casdm1s_sub=casdm1s_sub))
 
     # First pass: split by root  
     nocc = ncore + ncas
@@ -2013,46 +2012,6 @@ class LASCINoSymm (casci.CASCI):
         else:
             raise RuntimeError ("dm must have 2 or 3 dimensions")
 
-    def split_veff (self, veff, h2eff_sub, mo_coeff=None, ci=None, casdm1s_sub=None):
-        ''' Split a spin-summed veff into alpha and beta terms using the h2eff eri array.
-        Note that this will omit v(up_active - down_active)^virtual_inactive by necessity; 
-        this won't affect anything because the inactive density matrix has no spin component.
-        On the other hand, it ~is~ necessary to correctly do 
-
-        v(up_active - down_active)^unactive_active
-
-        in order to calculate the external orbital gradient at the end of the calculation.
-        This means that I need h2eff_sub spanning both at least two active subspaces
-        ~and~ the full orbital range. '''
-        veff_c = veff.copy ()
-        if mo_coeff is None: mo_coeff = self.mo_coeff
-        if ci is None: ci = self.ci
-        if casdm1s_sub is None: casdm1s_sub = self.make_casdm1s_sub (ci = ci)
-        ncore = self.ncore
-        ncas = self.ncas
-        nocc = ncore + ncas
-        nao, nmo = mo_coeff.shape
-        moH_coeff = mo_coeff.conjugate ().T
-        smo_coeff = self._scf.get_ovlp () @ mo_coeff
-        smoH_coeff = smo_coeff.conjugate ().T
-        veff_s = np.zeros_like (veff_c)
-        for ix, (ncas_i, casdm1s) in enumerate (zip (self.ncas_sub, casdm1s_sub)):
-            i = sum (self.ncas_sub[:ix])
-            j = i + ncas_i
-            eri_k = h2eff_sub.reshape (nmo, ncas, -1)[:,i:j,...].reshape (nmo*ncas_i, -1)
-            eri_k = lib.numpy_helper.unpack_tril (eri_k)[:,i:j,:]
-            eri_k = eri_k.reshape (nmo, ncas_i, ncas_i, ncas)
-            sdm = casdm1s[0] - casdm1s[1]
-            vk_pa = -np.tensordot (eri_k, sdm, axes=((1,2),(0,1))) / 2
-            veff_s[:,ncore:nocc] += vk_pa
-            veff_s[ncore:nocc,:] += vk_pa.T
-            veff_s[ncore:nocc,ncore:nocc] -= vk_pa[ncore:nocc,:] / 2
-            veff_s[ncore:nocc,ncore:nocc] -= vk_pa[ncore:nocc,:].T / 2
-        veff_s = smo_coeff @ veff_s @ smoH_coeff
-        veffa = veff_c + veff_s
-        veffb = veff_c - veff_s
-        return np.stack ([veffa, veffb], axis=0)
-         
     def states_energy_elec (self, mo_coeff=None, ncore=None, ncas=None,
             ncas_sub=None, nelecas_sub=None, ci=None, h2eff=None, veff=None, 
             casdm1frs=None, casdm2fr=None, veff_core=None, **kwargs):
@@ -2126,8 +2085,7 @@ class LASCINoSymm (casci.CASCI):
         casdm1s_sub = self.make_casdm1s_sub (ci=ci, ncas_sub=ncas_sub, nelecas_sub=nelecas_sub,
                                              casdm1frs=casdm1frs)
         if veff is None:
-            veff = self.get_veff (dm = self.make_rdm1(mo_coeff=mo_coeff,casdm1s_sub=casdm1s_sub))
-            veff = self.split_veff (veff, h2eff, mo_coeff=mo_coeff, casdm1s_sub=casdm1s_sub)
+            veff = self.get_veff (dm = self.make_rdm1s (mo_coeff=mo_coeff,casdm1s_sub=casdm1s_sub))
 
         # 1-body veff terms
         h1e = self.get_hcore ()[None,:,:] + veff/2
