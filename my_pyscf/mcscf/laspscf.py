@@ -259,7 +259,7 @@ class LASPSCFNoSymm (lasci.LASCINoSymm):
         if ci is None: ci = self.ci
         return self._ugg (self, mo_coeff, ci)
 
-    def fast_veffa (self, casdm1s_sub, bmPu, mo_coeff=None, ci=None, _full=False):
+    def fast_veffa (self, casdm1s_sub, bmPu, mo_coeff=None, ci=None):
         '''Compute the effective potential exerted by active electrons on the whole orbital space
         using integrals and density matrices stored in the MO basis. This only makes sense to
         do if density fitting is used and is not implemented with GPUs at present.
@@ -272,15 +272,12 @@ class LASPSCFNoSymm (lasci.LASCINoSymm):
         Kwargs:
             mo_coeff : ndarray of shape (nao,nmo)
             ci : nested list of ndarrays
-            _full : logical
-                If True, veff is returned in spin-separated form
 
         Returns:
-            veff : ndarray of shape (nao,nao) or (2,nao,nao)
+            veff : ndarray of shape (2,nao,nao)
         '''
         if mo_coeff is None: mo_coeff = self.mo_coeff
         if ci is None: ci = self.ci
-        assert (isinstance (self, _DFLASCI) or _full)
         ncore = self.ncore
         ncas_sub = self.ncas_sub
         ncas = sum (ncas_sub)
@@ -295,7 +292,6 @@ class LASPSCFNoSymm (lasci.LASCINoSymm):
         casdm1s = np.stack ([dma, dmb], axis=0)
         if (bmPu is None) or gpu or not (isinstance (self, _DFLASCI)):
             dm1s = np.dot (mo_cas, np.dot (casdm1s, moH_cas)).transpose (1,0,2)
-            if not _full: dm1s = dm1s[0]+dm1s[1]
             return self.get_veff (dm = dm1s)
         casdm1 = casdm1s.sum (0)
         dm1 = np.dot (mo_cas, np.dot (casdm1, moH_cas))
@@ -307,14 +303,9 @@ class LASPSCFNoSymm (lasci.LASCINoSymm):
         vj = lib.unpack_tril (np.dot (rho, bPmn))
 
         # vk
-        if _full:
-            vmPsu = np.dot (bmPu, casdm1s)
-            vk = np.tensordot (vmPsu, bmPu, axes=((1,3),(1,2))).transpose (1,0,2)
-            return vj[None,:,:] - vk
-        else:
-            vmPu = np.dot (bmPu, casdm1)
-            vk = np.tensordot (vmPu, bmPu, axes=((1,2),(1,2)))
-            return vj - vk/2
+        vmPsu = np.dot (bmPu, casdm1s)
+        vk = np.tensordot (vmPsu, bmPu, axes=((1,3),(1,2))).transpose (1,0,2)
+        return vj[None,:,:] - vk
 
     lasci = lasci_ = lasci.LASCINoSymm.kernel
 

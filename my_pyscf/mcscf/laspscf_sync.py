@@ -65,10 +65,9 @@ def kernel (las, mo_coeff=None, ci0=None, casdm0_fr=None, conv_tol_grad=1e-4,
         log.info ('LASPSCF subspace CI energies: {}'.format (e_cas))
         t1 = log.timer ('LASPSCF ci_cycle', *t1)
 
-        veff = veff.sum (0)/2
         # Canonicalize inactive and virtual spaces to set many off-diagonal elements of the
         # orbital-rotation Hessian to zero, which should improve the microiteration below
-        fock = las.get_hcore () + veff
+        fock = las.get_hcore () + veff.sum (0)/2
         fock = mo_coeff.conj ().T @ fock @ mo_coeff
         orbsym = getattr (mo_coeff, 'orbsym', None)
         ene, umat = _eig_inactive_virtual (las, fock, orbsym=orbsym)
@@ -78,15 +77,14 @@ def kernel (las, mo_coeff=None, ci0=None, casdm0_fr=None, conv_tol_grad=1e-4,
         h2eff_sub[:,:] = umat.conj ().T @ h2eff_sub
 
         casdm1s_new = las.make_casdm1s_sub (ci=ci1)
-        if not isinstance (las, _DFLASCI) or las.verbose > lib.logger.DEBUG:
+        if not isinstance (las, _DFLASCI):
             #veff = las.get_veff (mo_coeff=mo_coeff, ci=ci1)
-            veff_new = las.get_veff (dm = las.make_rdm1 (mo_coeff=mo_coeff, ci=ci1))
-            if not isinstance (las, _DFLASCI): veff = veff_new
+            veff = las.get_veff (dm = las.make_rdm1 (mo_coeff=mo_coeff, ci=ci1))
+            veff = las.split_veff (veff, h2eff_sub, mo_coeff=mo_coeff, ci=ci1)
         if isinstance (las, _DFLASCI):
             dcasdm1s = [dm_new - dm_old for dm_new, dm_old in zip (casdm1s_new, casdm1s_sub)]
             bmPu = getattr (h2eff_sub, 'bmPu', None)
             veff += las.fast_veffa (dcasdm1s, bmPu, mo_coeff=mo_coeff, ci=ci1) 
-        veff = las.split_veff (veff, h2eff_sub, mo_coeff=mo_coeff, ci=ci1)
         casdm1s_sub = casdm1s_new
 
         t1 = log.timer ('LASPSCF get_veff after ci', *t1)
@@ -223,7 +221,7 @@ def kernel (las, mo_coeff=None, ci0=None, casdm0_fr=None, conv_tol_grad=1e-4,
     dm_core = 2 * mo_coeff[:,:las.ncore] @ mo_coeff[:,:las.ncore].conj ().T
     bmPu = getattr (h2eff_sub, 'bmPu', None)
     veff_a = np.stack ([las.fast_veffa ([d[state] for d in casdm1frs], bmPu,
-                                        mo_coeff=mo_coeff, ci=ci1, _full=True)
+                                        mo_coeff=mo_coeff, ci=ci1)
                         for state in range (las.nroots)], axis=0)
     veff_c = las.get_veff (dm=dm_core)
     # veff's spin-summed component should be correct because I called get_veff with spin-summed rdm
