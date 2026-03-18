@@ -37,8 +37,7 @@ def kernel (las, mo_coeff=None, ci0=None, casdm0_fr=None, conv_tol_grad=1e-4,
                                            axes=((1),(1))).transpose (1,0,2))
         dm1s_sub = np.stack (dm1s_sub, axis=0)
         dm1s = dm1s_sub.sum (0)
-        veff = las.get_veff (dm=dm1s.sum (0))
-        veff = las.split_veff (veff, h2eff_sub, mo_coeff=mo_coeff, casdm1s_sub=casdm0_sub)
+        veff = las.get_veff (dm=dm1s)
         casdm1s_sub = casdm0_sub
         casdm1frs = casdm0_fr
     else:
@@ -50,9 +49,8 @@ def kernel (las, mo_coeff=None, ci0=None, casdm0_fr=None, conv_tol_grad=1e-4,
             raise RuntimeError ("failed to populate get_init_guess")
         casdm1frs = las.states_make_casdm1s_sub (ci=ci0)
         casdm1s_sub = las.make_casdm1s_sub (ci=ci0, casdm1frs=casdm1frs)
-        dm = las.make_rdm1 (mo_coeff=mo_coeff, ci=ci0, casdm1s_sub=casdm1s_sub)
-        veff = las.get_veff (dm = dm)
-        veff = las.split_veff (veff, h2eff_sub, mo_coeff=mo_coeff, ci=ci0, casdm1s_sub=casdm1s_sub)
+        dm1s = las.make_rdm1s (mo_coeff=mo_coeff, ci=ci0, casdm1s_sub=casdm1s_sub)
+        veff = las.get_veff (dm = dm1s)
     t1 = log.timer('LASPSCF initial get_veff', *t1)
 
     ugg = None
@@ -80,8 +78,7 @@ def kernel (las, mo_coeff=None, ci0=None, casdm0_fr=None, conv_tol_grad=1e-4,
         casdm1s_new = las.make_casdm1s_sub (ci=ci1)
         if not isinstance (las, _DFLASCI):
             #veff = las.get_veff (mo_coeff=mo_coeff, ci=ci1)
-            veff = las.get_veff (dm = las.make_rdm1 (mo_coeff=mo_coeff, ci=ci1))
-            veff = las.split_veff (veff, h2eff_sub, mo_coeff=mo_coeff, ci=ci1)
+            veff = las.get_veff (dm = las.make_rdm1s (mo_coeff=mo_coeff, ci=ci1))
         if isinstance (las, _DFLASCI):
             dcasdm1s = [dm_new - dm_old for dm_new, dm_old in zip (casdm1s_new, casdm1s_sub)]
             bmPu = getattr (h2eff_sub, 'bmPu', None)
@@ -185,8 +182,7 @@ def kernel (las, mo_coeff=None, ci0=None, casdm0_fr=None, conv_tol_grad=1e-4,
             t1 = log.timer ('LASPSCF Hessian update', *t1)
 
             #veff = las.get_veff (mo_coeff=mo_coeff, ci=ci1)
-            veff = las.get_veff (dm = las.make_rdm1 (mo_coeff=mo_coeff, ci=ci1))
-            veff = las.split_veff (veff, h2eff_sub, mo_coeff=mo_coeff, ci=ci1)
+            veff = las.get_veff (dm = las.make_rdm1s (mo_coeff=mo_coeff, ci=ci1))
             t1 = log.timer ('LASPSCF get_veff after secondorder', *t1)
         except MicroIterInstabilityException as e:
             log.info ('Unstable microiteration aborted: %s', str (e))
@@ -195,8 +191,7 @@ def kernel (las, mo_coeff=None, ci0=None, casdm0_fr=None, conv_tol_grad=1e-4,
             for i in range (3): # Make up to 3 attempts to scale-down x if necessary
                 mo2, ci2, h2eff_sub2 = H_op.update_mo_ci_eri (x, h2eff_sub)
                 t1 = log.timer ('LASPSCF Hessian update', *t1)
-                veff2 = las.get_veff (dm = las.make_rdm1 (mo_coeff=mo2, ci=ci2))
-                veff2 = las.split_veff (veff2, h2eff_sub2, mo_coeff=mo2, ci=ci2)
+                veff2 = las.get_veff (dm = las.make_rdm1s (mo_coeff=mo2, ci=ci2))
                 t1 = log.timer ('LASPSCF get_veff after secondorder', *t1)
                 e2 = las.energy_nuc () + las.energy_elec (mo_coeff=mo2, ci=ci2, h2eff=h2eff_sub2,
                                                           veff=veff2)
@@ -712,9 +707,9 @@ class LASPSCF_HessianOperator (sparse_linalg.LinearOperator):
         casdm1 = casdm1a + casdm1b
         moH_coeff = mo_coeff.conjugate ().T
         if veff is None:
-            veff = las.get_veff (dm = np.dot (mo_coeff, 
-                                              np.dot (self.dm1s.sum (0), moH_coeff)))
-            veff = las.split_veff (veff, h2eff_sub, mo_coeff=mo_coeff, casdm1s_sub=self.casdm1fs)
+            veff = las.get_veff (dm = np.dot (
+                mo_coeff, np.dot (self.dm1s, moH_coeff)
+            ).transpose (1,0,2))
         self.eri_paaa = eri_paaa = lib.numpy_helper.unpack_tril (
             h2eff_sub.reshape (nmo*ncas, ncas*(ncas+1)//2)).reshape (nmo, ncas,
             ncas, ncas)
