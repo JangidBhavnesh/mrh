@@ -454,7 +454,7 @@ def rotate_orb_cc(casscf, mo_coeff, mo_phase, fcivec, fcasdm1, fcasdm2,
     yield u, g_kf, ihop+jkcount, dxi
 
 
-def kernel(casscf, mo_coeff, tol=1e-7, conv_tol_grad=None,
+def kernel(casscf, mo_coeff, mo_phase, tol=1e-7, conv_tol_grad=None,
            ci0=None, callback=None, verbose=logger.NOTE, dump_chk=True):
     '''
     Quasi-newton CASSCF optimization driver.
@@ -478,7 +478,7 @@ def kernel(casscf, mo_coeff, tol=1e-7, conv_tol_grad=None,
     nelecas = casscf.nelecas
 
     eris = casscf.ao2mo(mo) # Have to rewrite this.
-    e_tot, e_cas, fcivec = casscf.casci(mo, ci0, eris, log, locals())
+    e_tot, e_cas, fcivec = casscf.casci(mo, mo_phase, ci0, eris, log, locals())
 
     if conv_tol_grad is None:
         conv_tol_grad = np.sqrt(tol)
@@ -503,7 +503,7 @@ def kernel(casscf, mo_coeff, tol=1e-7, conv_tol_grad=None,
         max_cycle_micro = casscf.micro_cycle_scheduler(locals())
         max_stepsize = casscf.max_stepsize_scheduler(locals())
         imicro = 0
-        rota = casscf.rotate_orb_cc(mo, lambda:fcivec, lambda:casdm1, lambda:casdm2,
+        rota = casscf.rotate_orb_cc(mo, mo_phase, lambda:fcivec, lambda:casdm1, lambda:casdm2,
                                     eris, r0, conv_tol_grad*.3, max_stepsize, log)
         
         for u, g_orb, njk, r0 in rota:
@@ -625,7 +625,7 @@ def kernel(casscf, mo_coeff, tol=1e-7, conv_tol_grad=None,
 # I needed to make a decision here, I could have inherited from bothe pbccasci and mc1step.CASSCF from
 # molecular code. But for safety reasons and my inexperience of OOP, I will just inherit from pbccasci.CASBase.
 # Look at the description of the attr and other functions.
-class PBCCASSCF(casci.CASBase):
+class PBCCASSCF(casci.PBCCASBASE):
 
     __doc__ = molCASSCF.__doc__
 
@@ -675,7 +675,7 @@ class PBCCASSCF(casci.CASBase):
     }
 
     def __init__(self, kmf, ncas=0, nelecas=0, ncore=None, frozen=None):
-        casci.CASBase.__init__(self, kmf, ncas, nelecas, ncore)
+        casci.PBCCASBASE.__init__(self, kmf, ncas, nelecas, ncore)
         self.frozen = frozen
         self.chkfile = self._scf.chkfile
         self.fcisolver.max_cycle = getattr(__config__,
@@ -695,16 +695,23 @@ class PBCCASSCF(casci.CASBase):
         
     
     def dump_flags(self, verbose=None):
+        mo_coeff_backup = self.mo_coeff.copy()
+        self.mo_coeff = self.mo_coeff[0] # Because the dump_flags in molecular code only works for one set of mo_coeff
         molCASSCF.dump_flags(self, verbose)
+        self.mo_coeff = mo_coeff_backup
+        del mo_coeff_backup
         log = logger.new_logger(self, verbose)
-        log.info(' nkpts = %d', self.nkpts)
+        log.info('')
+        log.info('nkpts = %d', self.nkpts)
         return self
     
-    def kernel(self, mo_coeff=None, ci0=None, callback=None, _kern=kernel):
+    def kernel(self, mo_coeff=None, mo_phase=None, ci0=None, callback=None, _kern=kernel):
         '''
         args:
             mo_coeff: list or np.ndarray (nkpts, nao, nmo) dtype=np.complex128
                 Initial guess of the MCSCF problem.
+            mo_phase: list or np.ndarray (nkpts, nmo) dtype=np.complex128
+                Initial guess of the phase factors for the molecular orbitals.
             ci0: list of np.ndarray, dtype=np.complex128
                 Initial guess of the active space CI wavefunction coefficients.
                 Note: this should be equal to supercell ci0. which is equals
@@ -729,15 +736,17 @@ class PBCCASSCF(casci.CASBase):
         '''
         if mo_coeff is None: mo_coeff = self.mo_coeff
         else: self.mo_coeff = mo_coeff
+        if mo_phase is None: mo_phase = self.mo_phase
         if callback is None: callback = self.callback
         if ci0 is None: ci0 = self.ci
 
         self.check_sanity()
         self.dump_flags()
 
+        print('Start 1-step CASSCF optimization')
         self.converged, self.e_tot, self.e_cas, self.ci, \
                 self.mo_coeff, self.mo_energy = \
-                _kern(self, mo_coeff,
+                _kern(self, mo_coeff, mo_phase,
                       tol=self.conv_tol, conv_tol_grad=self.conv_tol_grad,
                       ci0=ci0, callback=callback, verbose=self.verbose)
         # This would be for the total energy/nkpts
@@ -751,7 +760,58 @@ class PBCCASSCF(casci.CASBase):
     def mc2step(self, mo_coeff=None, ci0=None, callback=None):
         raise NotImplementedError('MC2step is not implemented for PBC-CASSCF yet')
     
-    casci = molCASSCF.casci
+    def casci(self, mo_coeff, mo_phase, ci0=None, eris=None, verbose=None, envs=None):
+        log = logger.new_logger(self, verbose)
+        fcasci = _fake_h_for_fast_casci(self, mo_coeff, eris)
+        e_tot, e_cas, fcivec = casci.kernel(fcasci, mo_coeff, ci0, log,
+                                            envs=envs)
+        if not isinstance(e_cas, (float, numpy.number)):
+            raise RuntimeError('Multiple roots are detected in fcisolver.  '
+                               'CASSCF does not know which state to optimize.\n'
+                               'See also  mcscf.state_average  or  mcscf.state_specific  for excited states.')
+        elif numpy.ndim(e_cas) != 0:
+            # This is a workaround for external CI solver compatibility.
+            e_cas = e_cas[0]
+
+        if envs is not None and log.verbose >= logger.INFO:
+            log.debug('CAS space CI energy = %#.15g', e_cas)
+
+            if getattr(self.fcisolver, 'spin_square', None):
+                try:
+                    ss = self.fcisolver.spin_square(fcivec, self.ncas, self.nelecas)
+                except NotImplementedError:
+                    ss = None
+            else:
+                ss = None
+
+            if 'imicro' in envs:  # Within CASSCF iteration
+                if ss is None:
+                    log.info('macro iter %3d (%3d JK  %3d micro), '
+                             'CASSCF E = %#.15g  dE = % .8e',
+                             envs['imacro'], envs['njk'], envs['imicro'],
+                             e_tot, e_tot-envs['elast'])
+                else:
+                    log.info('macro iter %3d (%3d JK  %3d micro), '
+                             'CASSCF E = %#.15g  dE = % .8e  S^2 = %.7f',
+                             envs['imacro'], envs['njk'], envs['imicro'],
+                             e_tot, e_tot-envs['elast'], ss[0])
+                if 'norm_gci' in envs and envs['norm_gci'] is not None:
+                    log.info('               |grad[o]|=%5.3g  '
+                             '|grad[c]|=%5.3g  |ddm|=%5.3g  |maxRot[o]|=%5.3g',
+                             envs['norm_gorb0'],
+                             envs['norm_gci'], envs['norm_ddm'], envs['max_offdiag_u'])
+                else:
+                    log.info('               |grad[o]|=%5.3g  |ddm|=%5.3g  |maxRot[o]|=%5.3g',
+                             envs['norm_gorb0'], envs['norm_ddm'], envs['max_offdiag_u'])
+            else:  # Initialization step
+                if ss is None:
+                    log.info('CASCI E = %#.15g', e_tot)
+                else:
+                    log.info('CASCI E = %#.15g  S^2 = %.7f', e_tot, ss[0])
+        return e_tot, e_cas, fcivec
+
+
+    # casci = molCASSCF.casci
     uniq_var_indices = molCASSCF.uniq_var_indices
 
     def pack_uniq_var(self, mat):
@@ -772,7 +832,8 @@ class PBCCASSCF(casci.CASBase):
     
     gen_g_hop = gen_g_hop
     rotate_orb_cc = rotate_orb_cc
-    get_h2eff = casci.CASCI.get_h2eff
+    from mrh.my_pyscf.pbc.mcscf import casci as casciModule
+    get_h2eff = casciModule.PBCCASCI.get_h2eff
 
     def ao2mo(self, mo_coeff):
         '''
@@ -902,7 +963,55 @@ class PBCCASSCF(casci.CASBase):
         casci.CASBase.reset(self, cell=cell)
         self._max_stepsize = None
 
+CASSCF = PBCCASSCF
 
+from mrh.my_pyscf.pbc.mcscf.casci import PBCCASCI
+def _fake_h_for_fast_casci(casscf, mo, mo_phase, eris):
+    mc = casscf.view(PBCCASCI)
+    mc.mo_coeff = mo
+    mc.mo_phase = mo_phase
+    if eris is None:
+        return mc
+
+    cell = casscf._scf.cell
+    kpts = casscf.kpts
+    nkpts = casscf.nkpts
+    ncore = casscf.ncore
+    nocc = ncore + casscf.ncas
+    ncas = casscf.ncas
+    dtype = mo[0].dtype
+
+    # Core energy contribution
+    mo_core = [mo[k][:,:ncore] for k in range(nkpts)]
+    mo_cas = [mo[k][:,ncore:nocc] for k in range(nkpts)]
+    core_dm = [np.dot(mo_core[k], mo_core[k].conj().T) * 2 
+               for k in range(nkpts)]
+    hcore = casscf.get_hcore()
+    energy_core = casscf.energy_nuc()
+    energy_core += sum([np.einsum('ij,ji', core_dm[k], hcore[k]) 
+                        for k in range(nkpts)])
+    energy_core += sum([eris.vhf_c[k][:ncore,:ncore].trace() 
+                        for k in range(nkpts)])
+    
+    # h1, and h2 in mo basis
+    h1eff = np.asarray([reduce(np.dot, (mo_cas[k].conj().T, hcore[k], mo_cas[k])) 
+                        for k in range(nkpts)])
+    h1eff += np.asarray([eris.vhf_c[k][ncore:nocc,ncore:nocc] 
+                         for k in range(nkpts)])
+    mc.get_h1eff = lambda *args: (h1eff, energy_core)
+
+    kconserv = kpts_helper.get_kconserv(cell, kpts)
+    mo_ks = mo_phase[kconserv]
+    eri_k = np.empty((nkpts,nkpts,nkpts, ncas, ncas, ncas, ncas), dtype=dtype)
+
+    for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
+        eri_k[k1,k2,k3] = eris.ppaa[k1,k2,k3][ncore:nocc,ncore:nocc,ncore:nocc,ncore:nocc]
+    
+    eri_cas = np.einsum('auR,bvS,abcuvwt,cwT,abctU->RSTU',
+                         mo_phase.conj(), mo_phase, eri_k, mo_phase.conj(), mo_ks, optimize=True)
+    eri_cas *= 1.0/nkpts
+    mc.get_h2eff = lambda *args: eri_cas
+    return mc
 
 if __name__ == '__main__':
     pass
