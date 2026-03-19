@@ -53,15 +53,20 @@ def _do_ao2mo_direct(kcasscf, mo_kpts, nkpts, ncore, ncas, nmo, level=1):
     
     # This is very naive implementation, would require a lot of optimization.
     if level == 1:
-        j_pc = np.empty((nkpts, nmo, ncore), dtype=dtype)
-        k_pc = np.empty((nkpts, nmo, ncore), dtype=dtype)
-        for k in range(nkpts):
-            mo_ppaa = [mo_kpts[k], mo_kpts[k], mo_kpts[k][:, :ncore], mo_kpts[k][:, :ncore]]
-            temp = mydf.ao2mo(mo_ppaa, [kpts[k]]*4, compact=False).reshape(nmo, nmo, ncore, ncore)
-            j_pc[k] = np.einsum('ppjj->pj', temp)
-            mo_papa = [mo_kpts[k], mo_kpts[k][:, :ncore], mo_kpts[k], mo_kpts[k][:, :ncore]]
-            temp = mydf.ao2mo(mo_papa, [kpts[k]]*4, compact=False).reshape(nmo, ncore, nmo, ncore)
-            k_pc[k] = np.einsum('pjpj->pj', temp)
+        if ncore == 0:
+            j_pc = np.zeros((nkpts, nmo, ncore), dtype=dtype)
+            k_pc = np.zeros((nkpts, nmo, ncore), dtype=dtype)
+        else:
+            j_pc = np.empty((nkpts, nmo, ncore), dtype=dtype)
+            k_pc = np.empty((nkpts, nmo, ncore), dtype=dtype)
+            for k in range(nkpts):
+                mo_ppaa = [mo_kpts[k], mo_kpts[k], mo_kpts[k][:, :ncore], mo_kpts[k][:, :ncore]]
+                temp = mydf.ao2mo(mo_ppaa, [kpts[k]]*4, compact=False).reshape(nmo, nmo, ncore, ncore)
+                j_pc[k] = np.einsum('ppjj->pj', temp)
+                print(j_pc[k].shape)
+                mo_papa = [mo_kpts[k], mo_kpts[k][:, :ncore], mo_kpts[k], mo_kpts[k][:, :ncore]]
+                temp = mydf.ao2mo(mo_papa, [kpts[k]]*4, compact=False).reshape(nmo, ncore, nmo, ncore)
+                k_pc[k] = np.einsum('pjpj->pj', temp)
     else:
         j_pc = k_pc = None
     log.timer('density fitting ao2mo j_pc, k_pc', *t2)
