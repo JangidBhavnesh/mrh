@@ -8,6 +8,7 @@ from pyscf.soscf import ciah # Recently they have added the CIAH solver for PBC.
 from pyscf.mcscf.addons import StateAverageMCSCFSolver
 from pyscf.mcscf.mc1step import CASSCF as molCASSCF
 from pyscf.pbc.lib import kpts_helper
+import scipy
 
 from mrh.my_pyscf.pbc.mcscf import casci
 from mrh.my_pyscf.pbc.mcscf.mc_ao2mo import _ERIS
@@ -297,6 +298,10 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
                         for k in range(nkpts)])
     # Hessian operator
     def h_op(x):
+        # Since the orbital optimization is done for one giant matrix, so
+        # I need to unpack this.
+        nmopack = mc.pack_uniq_var(np.zeros((nmo, nmo))).shape[0]
+        x = x.reshape(nkpts, nmopack)
         x2 = np.empty((nkpts, nmo, nmo), dtype=dtype)
         for k in range(nkpts):
             x1 = mc.unpack_uniq_var(x[k])
@@ -325,22 +330,24 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
     return g_orb, gorb_update, h_op, h_diag
 
 #TODO: make mo_coeff as tagged array then mo_phase can be added to it.
+# Currently, plugging all the orbitals together, like done for the kHF.
+# More optimum would be do the CIAH separately for each k-point.
 def rotate_orb_cc(casscf, mo_coeff, mo_phase, fcivec, fcasdm1, fcasdm2,
                   eris, x0_guess=None, conv_tol_grad=1e-4, max_stepsize=None,
                   verbose=None):
     log = logger.new_logger(casscf, verbose)
     if max_stepsize is None: max_stepsize = casscf.max_stepsize
     t3m = (logger.process_clock(), logger.perf_counter())
-    u = [1,]*casscf.nkpts
+    u = 1 #[1,]*casscf.nkpts
     g_orb, gorb_update, h_op, h_diag = \
         gen_g_hop(casscf, mo_coeff, mo_phase, u, fcasdm1(), fcasdm2(), eris)
     g_kf = g_orb
-    norm_gkf = norm_gorb = np.array([np.linalg.norm(g_orb_) for g_orb_ in g_orb], dtype=g_orb.dtype)
+    norm_gkf = norm_gorb = np.linalg.norm(g_orb) #np.array([np.linalg.norm(g_orb_) for g_orb_ in g_orb], dtype=g_orb.dtype)
     log.debug('    |g|=%5.3g', np.mean(norm_gorb)) # Mean norm of the orbital gradient
-    log.debug('    max|g|=%5.3g', np.max(norm_gorb)) # Max norm of the orbital gradient (Should print the k-pt as well)
+    # log.debug('    max|g|=%5.3g', np.max(norm_gorb)) # Max norm of the orbital gradient (Should print the k-pt as well)
     t3m = log.timer('gen h_op', *t3m)
     
-    if all(norm_gorb < conv_tol_grad * 0.3):
+    if norm_gorb < conv_tol_grad * 0.3:
         u = casscf.update_rotate_matrix(g_orb*0)
         yield u, g_orb, 1, x0_guess
         return
@@ -386,8 +393,6 @@ def rotate_orb_cc(casscf, mo_coeff, mo_phase, fcivec, fcasdm1, fcasdm2,
     assert problem_size.sum() == problem_size[0] * len(g_orb)
     problem_size = problem_size.sum()
 
-    print('CIAH problem size: %d' % problem_size)
-    print(g_op().shape, x0_guess.shape)
     for ah_end, ihop, w, dxi, hdxi, residual, seig \
         in ciah.davidson_cc(h_op, g_op, precond, x0_guess,
                             tol=casscf.ah_conv_tol, max_cycle=casscf.ah_max_cycle,
@@ -410,9 +415,9 @@ def rotate_orb_cc(casscf, mo_coeff, mo_phase, fcivec, fcasdm1, fcasdm2,
             
             g_orb = g_orb + hdxi
             dr = dr + dxi
-            norm_gorb = np.mean([np.linalg.norm(g_orb_) for g_orb_ in g_orb])
-            norm_dxi = np.mean([np.linalg.norm(dxi_) for dxi_ in dxi])
-            norm_dr = np.mean([np.linalg.norm(dr_) for dr_ in dr])
+            norm_gorb = np.linalg.norm(g_orb) #np.mean([np.linalg.norm(g_orb_) for g_orb_ in g_orb])
+            norm_dxi = np.linalg.norm(dxi)  # np.mean([np.linalg.norm(dxi_) for dxi_ in dxi])
+            norm_dr = np.linalg.norm(dr) # np.mean([np.linalg.norm(dr_) for dr_ in dr])
 
             # These errors are mean-values across the k-points.
             log.debug('    imic %2d(%2d)  |g[o]|=%5.3g  |dxi|=%5.3g  '
@@ -422,7 +427,7 @@ def rotate_orb_cc(casscf, mo_coeff, mo_phase, fcivec, fcasdm1, fcasdm2,
 
             ikf += 1
             if (ikf > 1) and (norm_gorb > norm_gkf * casscf.ah_grad_trust_region):
-                g_orb = np.array([g_orb_ - hdxi_ for g_orb_, hdxi_ in zip(g_orb, hdxi)])
+                g_orb = g_orb - hdxi # np.array([g_orb_ - hdxi_ for g_orb_, hdxi_ in zip(g_orb, hdxi)])
                 dr -= dxi
                 log.debug('|g| >> keyframe, Restore previouse step')
                 break
@@ -443,9 +448,8 @@ def rotate_orb_cc(casscf, mo_coeff, mo_phase, fcivec, fcasdm1, fcasdm2,
                 g_kf1 = gorb_update(u, fcivec())
                 jkcount += 1
 
-                norm_gkf1 = np.mean([np.linalg.norm(g_kf1_) for g_kf1_ in g_kf1])
-                norm_dg = np.mean([np.linalg.norm(g_kf1_ - g_orb_) 
-                                   for g_kf1_, g_orb_ in zip(g_kf1, g_orb)])
+                norm_gkf1 = np.linalg.norm(g_kf1)
+                norm_dg = np.linalg.norm(g_kf1 - g_orb)
                 log.debug('    |g|=%5.3g (keyframe), |g-correction|=%5.3g',
                           norm_gkf1, norm_dg)
                 
@@ -536,10 +540,10 @@ def kernel(casscf, mo_coeff, mo_phase, tol=1e-7, conv_tol_grad=None,
         
         for u, g_orb, njk, r0 in rota:
             imicro += 1
-            norm_gorb = np.mean([np.linalg.norm(g_orb_) for g_orb_ in g_orb])
+            norm_gorb = np.linalg.norm(g_orb)
             if imicro == 1:
                 norm_gorb0 = norm_gorb
-            norm_t = np.mean([np.linalg.norm(u_-np.eye(nmo)) for u_ in u])
+            norm_t = np.linalg.norm(u - np.eye(nkpts*nmo))
             t3m = log.timer('orbital rotation', *t3m)
             if imicro >= max_cycle_micro:
                 log.debug('micro %2d  |u-1|=%5.3g  |g[o]|=%5.3g',
@@ -856,21 +860,42 @@ class PBCCASSCF(casci.PBCCASBASE):
         return mat[idx]
     
     def unpack_uniq_var(self, v):
+        v = np.asarray(v)
         nmo = self.mo_coeff[0].shape[1]
+        nkpts = self.nkpts
+        dtype = self.mo_coeff[0].dtype
         idx = self.uniq_var_indices(nmo, self.ncore, self.ncas, self.frozen)
-        mat = np.zeros((nmo,nmo), dtype=self.mo_coeff[0].dtype)
-        mat[idx] = v
-        return mat - mat.conj().T
+        uniq_idx = int(np.count_nonzero(idx))
+
+        # Decide whether the input is for a single k-point or for all k-points.
+        assert v.size == uniq_idx or v.size == self.nkpts * uniq_idx
+
+        def _unpack_uniq_var(v):
+            # For a single k-point.
+            mat = np.zeros((nmo,nmo), dtype=dtype)
+            mat[idx] = v
+            return mat - mat.conj().T
     
+        if v.size == uniq_idx:
+            return _unpack_uniq_var(v)
+
+        elif v.size == nkpts * uniq_idx:
+            mats = np.zeros((nkpts, nmo, nmo), dtype=dtype)
+            for k in range(nkpts):
+                p0 = k * uniq_idx
+                p1 = (k + 1) * uniq_idx
+                mats[k] = _unpack_uniq_var(v[p0:p1])
+            return scipy.linalg.block_diag(*mats)
+
     def update_rotate_matrix(self, dx, u0=1):
         dr = self.unpack_uniq_var(dx)
-        return np.dot(u0, expm(dr))
+        return np.dot(u0, expmat(dr))
     
     gen_g_hop = gen_g_hop
     rotate_orb_cc = rotate_orb_cc
     from mrh.my_pyscf.pbc.mcscf import casci as casciModule
     get_h2eff = casciModule.PBCCASCI.get_h2eff
-
+    
     def ao2mo(self, mo_coeff):
         '''
         In pbc_casscf, I don't have worry about two options (DF vs non DF) as in the molecular code. 
@@ -1000,6 +1025,10 @@ class PBCCASSCF(casci.PBCCASBASE):
         self._max_stepsize = None
 
 CASSCF = PBCCASSCF
+
+def expmat(a):
+    # Should import this.
+    return scipy.linalg.expm(a)
 
 from mrh.my_pyscf.pbc.mcscf.casci import PBCCASCI
 def _fake_h_for_fast_casci(casscf, mo, mo_phase, eris):
