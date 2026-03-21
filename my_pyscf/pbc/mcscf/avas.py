@@ -56,40 +56,44 @@ def _kernel(avas_obj, mf, mo_coeff, mo_occ, mo_energy, ovlp, log, baslst, pcell,
     '''
     if isinstance(mf, scf.uhf.UHF):
         log.note('UHF/UKS object is found.  AVAS takes alpha orbitals only')
-        mo_coeff = mo_coeff[0]
-        mo_occ = mo_occ[0]
-        mo_energy = mo_energy[0]
+        mo_coeff = np.asarray(mo_coeff[0])
+        mo_occ = np.asarray(mo_occ[0])
+        mo_energy = np.asarray(mo_energy[0])
     else:
-        mo_coeff = mo_coeff
-        mo_occ = mo_occ
-        mo_energy = mo_energy
+        mo_coeff = np.asarray(mo_coeff)
+        mo_occ = np.asarray(mo_occ)
+        mo_energy = np.asarray(mo_energy)
 
     ncore = avas_obj.ncore
     nocc = np.count_nonzero(mo_occ != 0)
 
-    if isinstance(mo_coeff, list):
-        assert len(mo_coeff) == 1
+    if mo_coeff.ndim > 2:
+        assert mo_coeff.ndim == 3 and mo_coeff.shape[0] == 1, \
+        'The shape of mo_coeff is not expected'
         mo_coeff = mo_coeff[0]
-    if isinstance(mo_occ, list):
-        assert len(mo_occ) == 1
+    if mo_occ.ndim > 1:
+        assert mo_occ.ndim == 2 and mo_occ.shape[0] == 1, \
+        'The shape of mo_occ is not expected'
         mo_occ = mo_occ[0]
-    if isinstance(mo_energy, list):
-        assert len(mo_energy) == 1
+    if mo_energy.ndim > 1:
+        assert mo_energy.ndim == 2 and mo_energy.shape[0] == 1, \
+        'The shape of mo_energy is not expected'
         mo_energy = mo_energy[0]
 
     log.info('  Total number of HF MOs  is equal to    %d' ,mo_coeff.shape[1])
     log.info('  Number of occupied HF MOs is equal to  %d', nocc)
 
     if avas_obj.with_iao:
-        raise NotImplemented ('IAO is not implemented for p-AVAS yet')
+        raise NotImplementedError('IAO is not implemented for p-AVAS yet')
     else:
         s2 = ovlp[baslst][:,baslst]
         if kpts is not None:
             s21 = intor_cross('int1e_ovlp', pcell, cell, kpts=kpts)[k][baslst]
         else:
             s21 = intor_cross('int1e_ovlp', pcell, cell)[baslst]
+        
         s21 = np.dot(s21, mo_coeff[:, ncore:])
-    
+
     sa = s21.conj().T.dot(scipy.linalg.solve(s2, s21, assume_a='pos'))
     
     threshold = avas_obj.threshold
@@ -154,7 +158,7 @@ def _kernel(avas_obj, mf, mo_coeff, mo_occ, mo_energy, ovlp, log, baslst, pcell,
                 return c
             else:
                 csc = reduce(np.dot, (c.conj().T, ovlp, mo_coeff))
-                fock = np.dot(csc*mo_energy, csc.conj().T)
+                fock = np.dot(csc, np.dot(np.diag(mo_energy.astype(c.dtype)), csc.conj().T))
                 e, u = scipy.linalg.eigh(fock)
                 return np.dot(c, u) # No symm
         if ncore > 0:
@@ -182,10 +186,14 @@ def _kernelGamma(avas_obj):
 
     assert avas_obj.openshell_option != 1
 
+    # Note that after the cell construction atom coordinates and the lattice vectors are
+    # stored in the 'Bohr' unit. That's why I used bohr here.
     pcell = cell.copy()
     pcell.atom = cell._atom
-    pcell.a = cell.a
+    pcell.a = cell.lattice_vectors()
     pcell.unit = 'B'
+    pcell.pseudo = cell.pseudo
+    pcell.ecp = cell.ecp
     pcell.symmetry = False
     pcell.basis = avas_obj.minao
     pcell.build(False, False)
@@ -217,10 +225,14 @@ def _kernelKpoints(avas_obj):
     occ_weights_list = []
     vir_weights_list = []
 
+    # Note that after the cell construction atom coordinates and the lattice vectors are
+    # stored in the 'Bohr' unit. That's why I used bohr here.
     pcell = cell.copy()
     pcell.atom = cell._atom
-    pcell.a = cell.a
+    pcell.a = cell.lattice_vectors()
     pcell.unit = 'B'
+    pcell.pseudo = cell.pseudo
+    pcell.ecp = cell.ecp
     pcell.symmetry = False
     pcell.basis = avas_obj.minao
     pcell.build(False, False)
@@ -229,12 +241,13 @@ def _kernelKpoints(avas_obj):
     log.info('reference AO indices for %s %s:\n %s',
             avas_obj.minao, avas_obj.aolabels, baslst)
 
-    ovlp = mf.get_ovlp()
-
+    def _get_ovlp_k(k):
+        return mf.get_ovlp(cell, kpts[k])
+    
     for k in range(nkpts):
         ncas, nelecas, mo, occ_weights, vir_weights = \
             _kernel(avas_obj, mf, mf.mo_coeff[k], mf.mo_occ[k], 
-                    mf.mo_energy[k], ovlp[k], log, baslst, pcell, cell, kpts=kpts, k=k)
+                    mf.mo_energy[k], _get_ovlp_k(k), log, baslst, pcell, cell, kpts=kpts, k=k)
         ncas_list.append(ncas)
         nelecas_list.append(nelecas)
         mo_list.append(mo)
