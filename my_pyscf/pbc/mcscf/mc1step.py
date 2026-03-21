@@ -549,7 +549,9 @@ def kernel(casscf, mo_coeff, mo_phase, tol=1e-7, conv_tol_grad=None,
                 log.debug('micro %2d  |u-1|=%5.3g  |g[o]|=%5.3g',
                           imicro, norm_t, norm_gorb)
                 break
-
+            
+            # At this stage, U is packed matrix for all k-points, while the mo_coeff are still
+            # stored as k-point wise.
             casdm1, casdm2, gci, fcivec = \
                     casscf.update_casdm(mo, u, fcivec, e_cas, eris, locals())
             norm_ddm = np.linalg.norm(casdm1 - casdm1_last)
@@ -928,6 +930,81 @@ class PBCCASSCF(casci.PBCCASBASE):
 
         return va, vc
     
+    def update_casdm(self, mo, u, fcivec, e_cas, eris, envs={}):
+        # raise NotImplementedError('update_casdm is not implemented for PBC-CASSCF yet')
+        nkpts = self.nkpts
+        ncas = self.ncas
+        nelecas = self.nelecas
+        ncore = self.ncore
+        nmo = mo[0].shape[1]
+        nocc = ncore + ncas
+        dtype = mo[0].dtype
+
+        u = block_diag_to_kblocks(u, nkpts, nmo) # (nkpts, nmo, nmo)
+        rmat = np.array([umat - np.eye(nmo) for umat in u], dtype=dtype) # (nkpts, nmo, nmo)
+
+        #g = hessian_co(self, mo, rmat, fcivec, e_cas, eris)
+        ### hessian_co part start ###
+
+        uc = u[:,:ncore]
+        ua = u[:,ncore:nocc].copy()
+        ra = rmat[:,ncore:nocc].copy()
+        h1e_mo = reduce(numpy.dot, (mo.T, self.get_hcore(), mo))
+        ddm = numpy.dot(uc, uc.T) * 2
+        ddm[numpy.diag_indices(ncore)] -= 2
+        
+        if self.with_dep4:
+            mo1 = numpy.dot(mo, u)
+            mo1_cas = mo1[:,ncore:nocc]
+            dm_core = numpy.dot(mo1[:,:ncore], mo1[:,:ncore].T) * 2
+            vj, vk = self._scf.get_jk(self.mol, dm_core)
+            h1 =(reduce(numpy.dot, (ua.T, h1e_mo, ua)) +
+                 reduce(numpy.dot, (mo1_cas.T, vj-vk*.5, mo1_cas)))
+            eris._paaa = self._exact_paaa(mo, u)
+            h2 = eris._paaa[ncore:nocc]
+            vj = vk = None
+        else:
+            p1aa = numpy.empty((nmo,ncas,ncas**2))
+            paa1 = numpy.empty((nmo,ncas**2,ncas))
+            jk = reduce(numpy.dot, (ua.T, eris.vhf_c, ua))
+            for i in range(nmo):
+                jbuf = eris.ppaa[i]
+                kbuf = eris.papa[i]
+                jk += (numpy.einsum('quv,q->uv', jbuf, ddm[i]) -
+                       numpy.einsum('uqv,q->uv', kbuf, ddm[i]) * .5)
+                p1aa[i] = lib.dot(ua.T, jbuf.reshape(nmo,-1))
+                paa1[i] = lib.dot(kbuf.transpose(0,2,1).reshape(-1,nmo), ra)
+            h1 = reduce(numpy.dot, (ua.T, h1e_mo, ua)) + jk
+            aa11 = lib.dot(ua.T, p1aa.reshape(nmo,-1)).reshape((ncas,)*4)
+            aaaa = eris.ppaa[ncore:nocc,ncore:nocc,:,:]
+            aa11 = aa11 + aa11.transpose(2,3,0,1) - aaaa
+
+            a11a = numpy.dot(ra.T, paa1.reshape(nmo,-1)).reshape((ncas,)*4)
+            a11a = a11a + a11a.transpose(1,0,2,3)
+            a11a = a11a + a11a.transpose(0,1,3,2)
+            h2 = aa11 + a11a
+            jbuf = kbuf = p1aa = paa1 = aaaa = aa11 = a11a = None
+
+        # pure core response
+        # response of (1/2 dm * vhf * dm) ~ ddm*vhf
+# Should I consider core response as a part of CI gradients?
+        ecore =(numpy.einsum('pq,pq->', h1e_mo, ddm) +
+                numpy.einsum('pq,pq->', eris.vhf_c, ddm))
+        ### hessian_co part end ###
+
+        ci1, g = self.solve_approx_ci(h1, h2, fcivec, ecore, e_cas, envs)
+        if g is not None:  # So state average CI, DMRG etc will not be applied
+            ovlp = numpy.dot(fcivec.ravel(), ci1.ravel())
+            norm_g = numpy.linalg.norm(g)
+            if 1-abs(ovlp) > norm_g * self.ci_grad_trust_region:
+                logger.debug(self, '<ci1|ci0>=%5.3g |g|=%5.3g, ci1 out of trust region',
+                             ovlp, norm_g)
+                ci1 = fcivec.ravel() + g
+                ci1 *= 1/numpy.linalg.norm(ci1)
+        casdm1, casdm2 = self.fcisolver.make_rdm12(ci1, ncas, nelecas)
+
+        return casdm1, casdm2, g, ci1
+    
     def solve_approx_ci(self, **args):
         # TODO: Implement this.
         pass
@@ -966,9 +1043,6 @@ class PBCCASSCF(casci.PBCCASBASE):
                 log.debug('Active space overlap to last step, SVD = %s',
                         np.linalg.svd(u[k][ncore:nocc,ncore:nocc])[1])
         return mo_coeff
-    
-    def update_casdm(self, *args, **kwargs):
-        raise NotImplementedError('update_casdm is not implemented for PBC-CASSCF yet')
     
     micro_cycle_scheduler = molCASSCF.micro_cycle_scheduler
     max_stepsize_scheduler = molCASSCF.max_stepsize_scheduler
@@ -1029,6 +1103,13 @@ CASSCF = PBCCASSCF
 def expmat(a):
     # Should import this.
     return scipy.linalg.expm(a)
+
+def block_diag_to_kblocks(mat, nkpts, nmo):
+    # This is helper function convert the block diagonal matrix to a list of k-blocks. 
+    # Example U matrix packed as (8,8) in two blocks for two k-points, and 
+    # I want to convert it to two (4,4) matrices for each k-point.
+    return np.array([mat[k*nmo:(k+1)*nmo, k*nmo:(k+1)*nmo]
+                     for k in range(nkpts)])
 
 from mrh.my_pyscf.pbc.mcscf.casci import PBCCASCI
 def _fake_h_for_fast_casci(casscf, mo, mo_phase, eris):
