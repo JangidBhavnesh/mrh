@@ -258,8 +258,10 @@ def canonicalize(mc, mo_coeff=None, ci=None, eris=None, sort=False,
 
     return mo_coeff1, ci, mo_energy
 
-def kernel(mc, mo_coeff=None, ci0=None, verbose=logger.NOTE):
+def kernel(mc, mo_coeff=None, ci0=None, verbose=logger.NOTE, envs=None):
     '''
+    # Passing env to be consistent with molecular CASCI, but currently this is
+    # not used.
     '''
     if mo_coeff is None: mo_coeff = mc.mo_coeff
     if ci0 is None: ci0 = mc.ci
