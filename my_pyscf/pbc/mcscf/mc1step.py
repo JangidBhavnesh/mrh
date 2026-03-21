@@ -11,6 +11,7 @@ from pyscf.pbc.lib import kpts_helper
 
 from mrh.my_pyscf.pbc.mcscf import casci
 from mrh.my_pyscf.pbc.mcscf.mc_ao2mo import _ERIS
+from mrh.my_pyscf.pbc.mcscf.k2R import  get_mo_coeff_k2R
 
 logger = lib.logger
 
@@ -616,7 +617,9 @@ def kernel(casscf, mo_coeff, mo_phase, tol=1e-7, conv_tol_grad=None,
             raise NotImplementedError('Natural orbital is not implemented for PBC-CASSCF')
 
     if dump_chk and casscf.chkfile:
-        casscf.dump_chk(locals())
+        pass
+        # TODO: Implement this later.
+        #casscf.dump_chk(locals())
 
     log.timer('1-step CASSCF', *cput0)
     return conv, e_tot, e_cas, fcivec, mo, mo_energy
@@ -705,7 +708,7 @@ class PBCCASSCF(casci.PBCCASBASE):
         log.info('nkpts = %d', self.nkpts)
         return self
     
-    def kernel(self, mo_coeff=None, mo_phase=None, ci0=None, callback=None, _kern=kernel):
+    def kernel(self, mo_coeff=None, ci0=None, callback=None, _kern=kernel):
         '''
         args:
             mo_coeff: list or np.ndarray (nkpts, nao, nmo) dtype=np.complex128
@@ -736,12 +739,13 @@ class PBCCASSCF(casci.PBCCASBASE):
         '''
         if mo_coeff is None: mo_coeff = self.mo_coeff
         else: self.mo_coeff = mo_coeff
-        if mo_phase is None: mo_phase = self.mo_phase
         if callback is None: callback = self.callback
         if ci0 is None: ci0 = self.ci
 
         self.check_sanity()
         self.dump_flags()
+
+        mo_phase = get_mo_coeff_k2R(self._scf, mo_coeff, self.ncore, self.ncas)[-1]
 
         print('Start 1-step CASSCF optimization')
         self.converged, self.e_tot, self.e_cas, self.ci, \
@@ -762,14 +766,16 @@ class PBCCASSCF(casci.PBCCASBASE):
     
     def casci(self, mo_coeff, mo_phase, ci0=None, eris=None, verbose=None, envs=None):
         log = logger.new_logger(self, verbose)
-        fcasci = _fake_h_for_fast_casci(self, mo_coeff, eris)
+        fcasci = _fake_h_for_fast_casci(self, mo_coeff, mo_phase=mo_phase, eris=eris)
+        # The variable/function name calling is weired. Basically, we are calling the kernel from
+        # casci module.
         e_tot, e_cas, fcivec = casci.kernel(fcasci, mo_coeff, ci0, log,
                                             envs=envs)
-        if not isinstance(e_cas, (float, numpy.number)):
+        if not isinstance(e_cas, (float, np.number)):
             raise RuntimeError('Multiple roots are detected in fcisolver.  '
                                'CASSCF does not know which state to optimize.\n'
                                'See also  mcscf.state_average  or  mcscf.state_specific  for excited states.')
-        elif numpy.ndim(e_cas) != 0:
+        elif np.ndim(e_cas) != 0:
             # This is a workaround for external CI solver compatibility.
             e_cas = e_cas[0]
 
@@ -778,7 +784,10 @@ class PBCCASSCF(casci.PBCCASBASE):
 
             if getattr(self.fcisolver, 'spin_square', None):
                 try:
-                    ss = self.fcisolver.spin_square(fcivec, self.ncas, self.nelecas)
+                    norb = self.nkpts * self.ncas
+                    neleca = self.nkpts * self.nelecas[0]
+                    nelecb = self.nkpts * self.nelecas[1]
+                    ss = self.fcisolver.spin_square(fcivec, norb, (neleca, nelecb))
                 except NotImplementedError:
                     ss = None
             else:
@@ -805,9 +814,9 @@ class PBCCASSCF(casci.PBCCASBASE):
                              envs['norm_gorb0'], envs['norm_ddm'], envs['max_offdiag_u'])
             else:  # Initialization step
                 if ss is None:
-                    log.info('CASCI E = %#.15g', e_tot)
+                    log.info('CASCI E = %#.15g', e_tot.real)
                 else:
-                    log.info('CASCI E = %#.15g  S^2 = %.7f', e_tot, ss[0])
+                    log.info('CASCI E = %#.15g  S^2 = %.7f', e_tot.real, ss[0])
         return e_tot, e_cas, fcivec
 
 
@@ -837,8 +846,8 @@ class PBCCASSCF(casci.PBCCASBASE):
 
     def ao2mo(self, mo_coeff):
         '''
-        In pbc_casscf, I don't have worry about two options as in the molecular code. The integrals
-        will always be transformed to the MO basis using DF only.
+        In pbc_casscf, I don't have worry about two options (DF vs non DF) as in the molecular code. 
+        The integrals will always be transformed to the MO basis using DF only.
         '''
         eris = _ERIS(self, mo_coeff)
         return eris
@@ -974,8 +983,9 @@ def _fake_h_for_fast_casci(casscf, mo, mo_phase, eris):
         return mc
 
     cell = casscf._scf.cell
-    kpts = casscf.kpts
+    kpts = casscf._scf.kpts
     nkpts = casscf.nkpts
+    assert len(kpts) == nkpts
     ncore = casscf.ncore
     nocc = ncore + casscf.ncas
     ncas = casscf.ncas
@@ -987,7 +997,7 @@ def _fake_h_for_fast_casci(casscf, mo, mo_phase, eris):
     core_dm = [np.dot(mo_core[k], mo_core[k].conj().T) * 2 
                for k in range(nkpts)]
     hcore = casscf.get_hcore()
-    energy_core = casscf.energy_nuc()
+    energy_core = nkpts * casscf.energy_nuc() # Remember energy would be divided by nkpts in the end.
     energy_core += sum([np.einsum('ij,ji', core_dm[k], hcore[k]) 
                         for k in range(nkpts)])
     energy_core += sum([eris.vhf_c[k][:ncore,:ncore].trace() 
@@ -998,6 +1008,8 @@ def _fake_h_for_fast_casci(casscf, mo, mo_phase, eris):
                         for k in range(nkpts)])
     h1eff += np.asarray([eris.vhf_c[k][ncore:nocc,ncore:nocc] 
                          for k in range(nkpts)])
+    h1eff = lib.einsum('xui,xuv,xvj->ij', mo_phase.conj(), h1eff, mo_phase)
+
     mc.get_h1eff = lambda *args: (h1eff, energy_core)
 
     kconserv = kpts_helper.get_kconserv(cell, kpts)
@@ -1005,7 +1017,7 @@ def _fake_h_for_fast_casci(casscf, mo, mo_phase, eris):
     eri_k = np.empty((nkpts,nkpts,nkpts, ncas, ncas, ncas, ncas), dtype=dtype)
 
     for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
-        eri_k[k1,k2,k3] = eris.ppaa[k1,k2,k3][ncore:nocc,ncore:nocc,ncore:nocc,ncore:nocc]
+        eri_k[k1,k2,k3] = eris.ppaa(k1,k2,k3)[ncore:nocc,ncore:nocc,ncore:nocc,ncore:nocc]
     
     eri_cas = np.einsum('auR,bvS,abcuvwt,cwT,abctU->RSTU',
                          mo_phase.conj(), mo_phase, eri_k, mo_phase.conj(), mo_ks, optimize=True)
