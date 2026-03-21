@@ -148,8 +148,8 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
                 # jkcaa  = 6.0 * numpy.einsum('iuiv,uv->iu', papa[:nocc, :, :nocc, :], casdm1)
                 # jkcaa -= 2.0 * numpy.einsum('iiuv,uv->iu',ppaa[:nocc, :nocc, :, :], casdm1)
                 # papa = ppaa = jtmp = ktmp = dm2tmp = None
-                ppaa = eris.ppaa[k1, k2, k3]
-                papa = eris.papa[k1, k2, k3]
+                ppaa = eris.ppaa(k1, k2, k3)
+                papa = eris.papa(k1, k2, k3)
                 dm2 = casdm2_kpts[k1, k2, k3]
                 vhf_a[k4] += np.einsum('pquv,uv->pq', ppaa, casdm1_kpts[k4])
                 vhf_a[k4] -= 0.5*np.einsum('puqv,uv->pq', papa, casdm1_kpts[k4])
@@ -238,8 +238,8 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
                 else:
                     dm2_k = 1.0/nkpts * np.einsum('iP, jQ, PQRS, kR, lS->ijkl', 
                                       mo_phase[k1].conj(), mo_phase[k2], casdm2, mo_phase[k3].conj(), mo_phase[k4])
-                    ppaa = eris.ppaa[k1, k2, k3]
-                    papa = eris.papa[k1, k2, k3]
+                    ppaa = eris.ppaa(k1, k2, k3)
+                    papa = eris.papa(k1, k2, k3)
                     p1aa = np.einsum('pr, tq, rquv-> ptuv', u[k].conj().T, ua.conj().T, ppaa)
                     paa1 = np.einsum('pr, ruvq, qt -> puvt', u[k].conj().T, papa.conj().transpose(0,1,3,2), ra)
                     p1aa += paa1
@@ -247,7 +247,6 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
                     g[k][:, ncore:nocc] += np.einsum('puwx, wxuv->pv', p1aa, dm2_k)
         
         papa = ppaa = p1aa = paa1 = None
-
         return [mc.pack_uniq_var(grd - grd.conj().T) for grd in g]    
     
     # Hessian diagonal
@@ -335,18 +334,18 @@ def rotate_orb_cc(casscf, mo_coeff, mo_phase, fcivec, fcasdm1, fcasdm2,
     u = [1,]*casscf.nkpts
     g_orb, gorb_update, h_op, h_diag = \
         gen_g_hop(casscf, mo_coeff, mo_phase, u, fcasdm1(), fcasdm2(), eris)
-    
     g_kf = g_orb
-    norm_gkf = norm_gorb = np.array([np.linalg.norm(g_orb_) for g_orb_ in g_orb])
+    norm_gkf = norm_gorb = np.array([np.linalg.norm(g_orb_) for g_orb_ in g_orb], dtype=g_orb.dtype)
     log.debug('    |g|=%5.3g', np.mean(norm_gorb)) # Mean norm of the orbital gradient
-    log.debug('    max|g|=%5.3g', np.max(norm_gorb)) # Max norm of the orbital gradient (Should print the k-pt as well)
+    #log.debug('    max|g|=%5.3g', np.max(norm_gorb)) # Max norm of the orbital gradient (Should print the k-pt as well)
+    exit()
     t3m = log.timer('gen h_op', *t3m)
     
     if all(norm_gorb < conv_tol_grad * 0.3):
         u = casscf.update_rotate_matrix(g_orb*0)
         yield u, g_orb, 1, x0_guess
         return
-    
+
     # This is preconditioner for orbital optimization using iterative solver.
     def precond(x, e):
         hdiagd = np.zeros_like(h_diag)
@@ -480,6 +479,19 @@ def kernel(casscf, mo_coeff, mo_phase, tol=1e-7, conv_tol_grad=None,
 
     eris = casscf.ao2mo(mo) # Have to rewrite this.
     e_tot, e_cas, fcivec = casscf.casci(mo, mo_phase, ci0, eris, log, locals())
+
+    # In molecular code, this chunk is commented because macro iterations are needed 
+    # when added solvent model. In periodic code, for nmo=ncas condition, my code is crashing due to empty
+    # lists of gradients and so on. so I will use this check.
+    if ncas == nmo and not casscf.internal_rotation:
+        if casscf.canonicalization:
+            log.debug('CASSCF canonicalization')
+            mo, fcivec, mo_energy = casscf.canonicalize(mo, fcivec, eris,
+                                                        casscf.sorting_mo_energy,
+                                                        casscf.natorb, verbose=log)
+        else:
+            mo_energy = None
+        return True, e_tot, e_cas, fcivec, mo, mo_energy
 
     if conv_tol_grad is None:
         conv_tol_grad = np.sqrt(tol)
@@ -754,7 +766,7 @@ class PBCCASSCF(casci.PBCCASBASE):
                       tol=self.conv_tol, conv_tol_grad=self.conv_tol_grad,
                       ci0=ci0, callback=callback, verbose=self.verbose)
         # This would be for the total energy/nkpts
-        logger.note(self, 'CASSCF energy = %#.15g', self.e_tot)
+        logger.note(self, 'CASSCF energy = %#.15g', self.e_tot.real)
         self._finalize()
         return self.e_tot, self.e_cas, self.ci, self.mo_coeff, self.mo_energy
     
