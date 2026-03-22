@@ -269,7 +269,6 @@ def kernel(mc, mo_coeff=None, ci0=None, verbose=logger.NOTE, envs=None):
     log = logger.new_logger(mc, verbose)
     t0 = (logger.process_clock(), logger.perf_counter())
     log.debug('Start CASCI')
-
     nkpts = mc.nkpts
     ncas = mc.ncas
     nelecas = mc.nelecas
@@ -277,7 +276,7 @@ def kernel(mc, mo_coeff=None, ci0=None, verbose=logger.NOTE, envs=None):
     eri_cas = mc.get_h2eff(mo_coeff)
     t1 = log.timer('integral transformation to CAS space', *t0)
     h1eff, energy_core = mc.get_h1eff(mo_coeff)
-    log.debug('core energy = %.15g', energy_core)
+    log.debug('core energy = %.15g', energy_core.real)
     max_memory = max(4000, mc.max_memory-lib.current_memory()[0])
     
     assert eri_cas.shape == (nkpts*ncas, nkpts*ncas, nkpts*ncas, nkpts*ncas)
