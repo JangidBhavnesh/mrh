@@ -186,7 +186,8 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
     hcore = None
 
     def gorb_update(u, fcivec):
-        g = np.zeros_like((nkpts, nmo, nmo), dtype=dtype)
+        u = block_diag_to_kblocks(u, nkpts, nmo)
+        g = np.zeros((nkpts, nmo, nmo), dtype=dtype)
         casdm1, casdm2 = mc.fcisolver.make_rdm12(fcivec, nkpts*ncas, (nkpts*nelecas[0], nkpts*nelecas[1]))
         
         for k in range(nkpts):
@@ -213,7 +214,7 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
             # p1aa = np.empty((nkpts, nkpts, nkpts, nmo, ncas, ncasncas), dtype=dtype)
             # paa1 = np.empty((nkpts, nkpts, nkpts, nmo, ncasncas, ncas), dtype=dtype)
             # aaaa = np.empty((nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas), dtype=dtype)
-            # for k1, k2, k3 in kpts_helper.loop(nkpts):
+            # for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
             #     k4 = kconserv[k1, k2, k3]
             #     if not k4 == k:
             #         pass
@@ -233,7 +234,7 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
             # p1aa += paa1.transpose(0,1,3,2)
             # g[:, :ncore:nocc] += np.einsum('puwx, wxuv->pu', p1aa, casdm2)
 
-            for k1, k2, k3 in kpts_helper.loop(nkpts):
+            for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
                 k4 = kconserv[k1, k2, k3]
                 if k4 != k: continue
                 else:
@@ -248,7 +249,7 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
                     g[k][:, ncore:nocc] += np.einsum('puwx, wxuv->pv', p1aa, dm2_k)
         
         papa = ppaa = p1aa = paa1 = None
-        return [mc.pack_uniq_var(grd - grd.conj().T) for grd in g]    
+        return np.hstack([mc.pack_uniq_var(grd - grd.conj().T) for grd in g])    
     
     # Hessian diagonal
     hdiag = np.empty((nkpts, nmo, nmo), dtype=dtype)
@@ -610,7 +611,8 @@ def kernel(casscf, mo_coeff, mo_phase, tol=1e-7, conv_tol_grad=None,
                     newvecs.append(subvec)
             fcivec = newvecs
 
-        e_tot, e_cas, fcivec = casscf.casci(mo, fcivec, eris, log, locals())
+        mo_phase = get_mo_coeff_k2R(casscf._scf, mo, ncore, ncas)[-1]
+        e_tot, e_cas, fcivec = casscf.casci(mo, mo_phase=mo_phase, ci0=fcivec, eris=eris, verbose=log, envs=locals())
 
         casdm1, casdm2 = casscf.fcisolver.make_rdm12(fcivec, nkpts*ncas, (nkpts*nelecas[0], nkpts*nelecas[1]))
         norm_ddm = np.linalg.norm(casdm1 - casdm1_last)
@@ -624,8 +626,8 @@ def kernel(casscf, mo_coeff, mo_phase, tol=1e-7, conv_tol_grad=None,
                 (max_offdiag_u < casscf.small_rot_tol or casscf.small_rot_tol == 0)):
             conv = True
 
-        if dump_chk and casscf.chkfile:
-            casscf.dump_chk(locals())
+        # if dump_chk and casscf.chkfile:
+        #     casscf.dump_chk(locals())
 
         if callable(callback):
             callback(locals())
@@ -831,20 +833,20 @@ class PBCCASSCF(casci.PBCCASBASE):
                     log.info('macro iter %3d (%3d JK  %3d micro), '
                              'CASSCF E = %#.15g  dE = % .8e',
                              envs['imacro'], envs['njk'], envs['imicro'],
-                             e_tot, e_tot-envs['elast'])
+                             e_tot.real, e_tot-envs['elast'].real)
                 else:
                     log.info('macro iter %3d (%3d JK  %3d micro), '
                              'CASSCF E = %#.15g  dE = % .8e  S^2 = %.7f',
                              envs['imacro'], envs['njk'], envs['imicro'],
-                             e_tot, e_tot-envs['elast'], ss[0])
+                             e_tot.real, e_tot-envs['elast'].real, ss[0])
                 if 'norm_gci' in envs and envs['norm_gci'] is not None:
                     log.info('               |grad[o]|=%5.3g  '
                              '|grad[c]|=%5.3g  |ddm|=%5.3g  |maxRot[o]|=%5.3g',
-                             envs['norm_gorb0'],
+                             envs['norm_gorb0'].real,
                              envs['norm_gci'], envs['norm_ddm'], envs['max_offdiag_u'])
                 else:
                     log.info('               |grad[o]|=%5.3g  |ddm|=%5.3g  |maxRot[o]|=%5.3g',
-                             envs['norm_gorb0'], envs['norm_ddm'], envs['max_offdiag_u'])
+                             envs['norm_gorb0'].real, envs['norm_ddm'], envs['max_offdiag_u'])
             else:  # Initialization step
                 if ss is None:
                     log.info('CASCI E = %#.15g', e_tot.real)
@@ -930,9 +932,10 @@ class PBCCASSCF(casci.PBCCASBASE):
 
         return va, vc
     
-    def update_casdm(self, mo, mo_phase, u, fcivec, e_cas, eris, envs={}):
+    def update_casdm(self, mo, u, fcivec, e_cas, eris, envs={}):
         # raise NotImplementedError('update_casdm is not implemented for PBC-CASSCF yet')
         nkpts = self.nkpts
+        kpts = self._scf.kpts
         ncas = self.ncas
         nelecas = self.nelecas
         ncore = self.ncore
@@ -940,6 +943,7 @@ class PBCCASSCF(casci.PBCCASBASE):
         nocc = ncore + ncas
         dtype = mo[0].dtype
 
+        print(u.shape)
         u = block_diag_to_kblocks(u, nkpts, nmo) # (nkpts, nmo, nmo)
         rmat = np.array([umat - np.eye(nmo) for umat in u], dtype=dtype) # (nkpts, nmo, nmo)
 
@@ -950,8 +954,8 @@ class PBCCASSCF(casci.PBCCASBASE):
         for k in range(nkpts):
             uc = u[k][:,:ncore]
             ra = rmat[k][:,ncore:nocc].copy()
-            h1e_mo[k] = reduce(np.dot, (mo[k].conj().T, hcore[k], mo[k]))
-            h1e_mo[k] = lib.einsum('ui,uv,vj->ij', mo_phase[k].conj(), h1e_mo[k], mo_phase[k])
+            h1e_mo[k] = reduce(np.dot, (mo[k].conj().T, hcore[k], mo[k])) #k-space (mo basis)
+            # h1e_mo[k] = lib.einsum('ui,uv,vj->ij', mo_phase[k].conj(), h1e_mo[k], mo_phase[k]) # back to R-space (mo-basis)
             ddm[k] = np.dot(uc, uc.conj().T) * 2.0
             ddm[k][np.diag_indices(ncore)] -= 2
         
@@ -969,69 +973,188 @@ class PBCCASSCF(casci.PBCCASBASE):
             h1 = np.empty((nkpts, ncas, ncas), dtype=dtype)
             for k in range(nkpts):
                 ua = u[k][:,ncore:nocc].copy()
-                mo1_cas = mo1[k][:,ncore:nocc]
-                h1[k] = reduce(np.dot, (ua.conj().T, h1e_mo[k], ua))
-                h1[k] += reduce(np.dot, (mo1_cas.conj().T, vj[k] - vk[k] * 0.5, mo1_cas))
-            
-            h1 = lib.einsum('xui,xuv,xvj->ij', mo_phase1.conj(), h1, mo_phase1)
+                mo1_cas = mo1[k][:,ncore:nocc].copy()
+                h1temp = reduce(np.dot, (ua.conj().T, h1e_mo[k], ua)) # update h1e for active space in k-space (mo basis)
+                h1temp += reduce(np.dot, (mo1_cas.conj().T, vj[k] - vk[k] * 0.5, mo1_cas)) # add the contribution from the vj vk terms
+                # do the transformation to R-space (mo basis)
+                h1[k] = lib.einsum('ui,uv,vj->ij', mo_phase1[k].conj(), h1temp, mo_phase1[k])
             h2 = self._exact_paaa(mo, u)
             vj = vk = None
+        
         else:
-            jk = np.empty((nkpts, nmo, nmo), dtype=dtype)
+            # h1e
+            mo1 = np.array([np.dot(mo[k], u[k]) 
+                            for k in range(nkpts)])
+            
+            mo_phase1 = get_mo_coeff_k2R(self._scf, mo1, ncore, ncas)[-1]
+            
+            h1 = np.empty((nkpts, ncas, ncas), dtype=dtype)
+            kconserv = kpts_helper.get_kconserv(self._scf.cell, kpts)
+            '''
             # I need to loop over the k-points.
+            Let me write without loop first.
+
+            jk = reduce(numpy.dot, (ua.T, eris.vhf_c, ua))
+            jk += np.einsum('pquv,pq->uv', eris.ppaa, ddm)
+            jk -= 0.5 * np.einsum('puqv,pq->uv', eris.papa, ddm)
+            '''
             for k in range(nkpts):
                 ua = u[k][:,ncore:nocc].copy()
-                p1aa = np.empty((nmo,ncas,ncas**2))
-                paa1 = np.empty((nmo,ncas**2,ncas))
-                jk[k] = reduce(np.dot, (ua.T, eris.vhf_c, ua))
+                jk = reduce(np.dot, (ua.conj().T, eris.vhf_c[k], ua))
+                for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
+                    k4 = kconserv[k1, k2, k3]
+                    if k4 != k:
+                        continue
+                    else:
+                        ppaa = eris.ppaa(k1, k2, k3)
+                        jk += np.einsum('pquv,pq->uv', ppaa, ddm[k1])
+                        papa = eris.papa(k1, k2, k3)
+                        jk -= 0.5 * np.einsum('puqv,pq->uv', papa, ddm[k1])
                 
-                '''
-                Let me write without loop first.
-                jk = np.einsum('pquv,pq->uv', eris.ppaa, ddm)
-                jk -= 0.5 * np.einsum('puqv,pq->uv', eris.papa, ddm)
-                p1aa = np.einsum('qt, pquv->ptuv', ua, eris.ppaa)
-                paa1 = np.einsum('puqv,qt->putv', eris.papa, ra)
-                '''
-                for i in range(nmo):
-                    jbuf = eris.ppaa[i]
-                    kbuf = eris.papa[i]
-                    jk += (np.einsum('quv,q->uv', jbuf, ddm[i]) -
-                        np.einsum('uqv,q->uv', kbuf, ddm[i]) * .5)
-                    p1aa[i] = lib.dot(ua.T, jbuf.reshape(nmo,-1))
-                    paa1[i] = lib.dot(kbuf.transpose(0,2,1).reshape(-1,nmo), ra)
+                h1[k] = reduce(np.dot, (ua.conj().T, h1e_mo[k], ua)) # k-space (mo basis)
+                h1[k] += jk # k-space (mo-basis)
                 
-                h1 = reduce(np.dot, (ua.T, h1e_mo, ua)) + jk
-                aa11 = lib.dot(ua.T, p1aa.reshape(nmo,-1)).reshape((ncas,)*4)
-                aaaa = eris.ppaa[ncore:nocc,ncore:nocc,:,:]
-                aa11 = aa11 + aa11.transpose(2,3,0,1) - aaaa
+            h1_R = lib.einsum('xui,xuv,xvj->ij', mo_phase1.conj(), h1, mo_phase1) # transform to R-space basis
+            
+            # h2e term
+            '''
+            ppaa = np.einsum('ps, qt, pquv -> stuv', ua, ua, eris.ppaa)
+            papa = np.einsum('ps, qt, puqv -> sutv', ua, ua, eris.papa)
+            '''
+            mo_ks = mo_phase1[kconserv]
 
-                a11a = np.dot(ra.T, paa1.reshape(nmo,-1)).reshape((ncas,)*4)
-                a11a = a11a + a11a.transpose(1,0,2,3)
-                a11a = a11a + a11a.transpose(0,1,3,2)
-            h2 = aa11 + a11a
-            jbuf = kbuf = p1aa = paa1 = aaaa = aa11 = a11a = None
-
-
-        ecore = (np.einsum('pq,pq->', h1e_mo, ddm) +
-                np.einsum('pq,pq->', eris.vhf_c, ddm))
-
-        ci1, g = self.solve_approx_ci(h1, h2, fcivec, ecore, e_cas, envs)
+            def _convert_to_R_space(eri_k):
+                out = np.einsum('auR,bvS,abcuvwt,cwT,abctU->RSTU',
+                            mo_phase1.conj(), mo_phase1, eri_k, mo_phase1.conj(), mo_ks, optimize=True)
+                out *= 1.0/nkpts
+                return out
+            
+            aa11 = np.zeros((nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas), dtype=np.complex128)
+            aaaa = np.zeros((nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas), dtype=np.complex128)
+            
+            for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
+                ppaa = eris.ppaa(k1, k2, k3)
+                aaaa[k1, k2, k3] = ppaa[ncore:nocc,ncore:nocc,:,:].copy()
+                aa11[k1, k2, k3] = np.einsum('ps, qt, pquv -> stuv', u[k1][:,ncore:nocc], u[k2][:,ncore:nocc], ppaa)
         
-        if g is not None:  # So state average CI, DMRG etc will not be applied
-            ovlp = np.dot(fcivec.ravel(), ci1.ravel())
+            aa11_R = _convert_to_R_space(aa11)
+            aaaa_R = _convert_to_R_space(aaaa)
+            
+            aa11 = aaaa = None
+
+            aa11_R = aa11_R + aa11_R.conj().transpose(2,3,0,1) - aaaa_R
+
+
+            a11a = np.zeros((nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas), dtype=np.complex128)
+            for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
+                papa = eris.papa(k1, k2, k3)
+                a11a[k1, k2, k3] = np.einsum('ps, qt, puqv -> sutv', rmat[k1][:,ncore:nocc], rmat[k3][:,ncore:nocc], papa)
+
+            a11a_R = _convert_to_R_space(a11a)
+
+            a11a = None
+
+            a11a_R = a11a_R + a11a_R.conj().transpose(1, 0, 2, 3)
+            a11a_R = a11a_R + a11a_R.conj().transpose(0, 1, 3, 2)
+            
+            h2_R = aa11_R + a11a_R
+
+            aa11_R = a11a_R = None
+
+        ecore = 0
+        for k in range(nkpts):
+            ecore += np.einsum('pq,pq->', h1e_mo[k], ddm[k])
+            ecore += np.einsum('pq,pq->', eris.vhf_c[k], ddm[k])
+
+        ci1, g = self.solve_approx_ci(h1_R, h2_R, fcivec, ecore, e_cas, envs)
+        
+        # In case of external CI solvers like DMRG, or even for the state-average condition
+        # we won't need this.
+        if g is not None:
+            ovlp = np.vdot(fcivec.ravel(), ci1.ravel())
             norm_g = np.linalg.norm(g)
-            if 1-abs(ovlp) > norm_g * self.ci_grad_trust_region:
+            if (1 - abs(ovlp) > norm_g) * self.ci_grad_trust_region:
                 logger.debug(self, '<ci1|ci0>=%5.3g |g|=%5.3g, ci1 out of trust region',
                              ovlp, norm_g)
                 ci1 = fcivec.ravel() + g
                 ci1 *= 1/np.linalg.norm(ci1)
-        casdm1, casdm2 = self.fcisolver.make_rdm12(ci1, ncas, nelecas)
+        
+        casdm1, casdm2 = self.fcisolver.make_rdm12(ci1, nkpts*ncas, (nelecas[0]*nkpts, nelecas[1]*nkpts))
 
         return casdm1, casdm2, g, ci1
+        
+    def solve_approx_ci(self, h1, h2, ci0, ecore, e_cas, envs):
+        '''
+        Solving the CI eigenvalue or response problem approximately.
+        Code is adapted from the molecular code, expect few datatype and sanity checks.
+        '''
+        ncas = self.ncas
+        nelecas = self.nelecas
+        nkpts = self.nkpts
+        dtype = h1.dtype
+
+        if 'norm_gorb' in envs: tol = max(self.conv_tol, envs['norm_gorb']**2 * 0.1)
+        else: tol = None
+
+        if getattr(self.fcisolver, 'approx_kernel', None):
+            raise NotImplementedError('approx_kernel is not tested/implemented for direct_spin1_cplx')
+        elif not (getattr(self.fcisolver, 'contract_2e', None) and 
+                  getattr(self.fcisolver, 'absorb_h1e', None)):
+            raise NotImplementedError('direct kernel is not tested/implemented for direct_spin1_cplx')
+
+        h2eff = self.fcisolver.absorb_h1e(h1, h2, ncas, nelecas, 0.5)
+
+        def contract_2e(c):
+            hc = self.fcisolver.contract_2e(h2eff, c, ncas*nkpts, (nelecas[0]*nkpts, nelecas[1]*nkpts))
+            return hc.ravel()
+
+        e_ci = e_cas - ecore
+
+        hc = contract_2e(ci0)
+        g = hc - e_ci * ci0.ravel()
+
+        if self.ci_response_space > 7 or ci0.size <= self.fcisolver.pspace_size:
+            logger.debug(self, 'CI step by full response')
+            max_memory = max(400, self.max_memory - lib.current_memory()[0])
+            e, ci1 = self.fcisolver.kernel(h1, h2, nkpts*ncas, (nelecas[0]*nkpts, nelecas[1]*nkpts), ecore=ecore,
+                                           ci0=ci0, tol=tol, max_memory=max_memory)
+        else:
+            nd = min(self.ci_response_space, ci0.size)
+            xs = [ci0.ravel().copy()]
+            ax = [hc.copy()]
+            heff = np.empty((nd, nd), dtype=dtype)
+            seff = np.empty((nd, nd), dtype=dtype)
+
+            heff[0,0] = np.vdot(xs[0], ax[0])
+            seff[0,0] = np.vdot(xs[0], xs[0])
+
+            tol_residual = self.fcisolver.conv_tol ** 0.5
+
+            for i in range(1, nd):
+                dx = ax[i-1] - e_ci * xs[i-1]
+                if np.linalg.norm(dx) < tol_residual:
+                    break
+
+                xs.append(dx)
+                ax.append(contract_2e(xs[i]))
+
+                for j in range(i+1):
+                    hij = np.vdot(xs[i], ax[j])
+                    sij = np.vdot(xs[i], xs[j])
+                    heff[i,j] = hij
+                    heff[j,i] = hij.conj()
+                    seff[i,j] = sij
+                    seff[j,i] = sij.conj()
+
+            nd = len(xs)
+            e, v, seig = lib.safe_eigh(heff[:nd, :nd], seff[:nd, :nd])
+
+            ci1 = np.zeros_like(xs[0], dtype=np.result_type(*xs, v))
+            for i in range(nd):
+                ci1 += xs[i] * v[i, 0]
+            ci1 = ci1.reshape(ci0.shape)
+        return ci1, g
     
-    def solve_approx_ci(self, **args):
-        # TODO: Implement this.
-        pass
 
     def get_grad(self, *args, **kwargs):
         # TODO: Implement this.
@@ -1076,7 +1199,9 @@ class PBCCASSCF(casci.PBCCASBASE):
 
     def rotate_mo(self, mo_coeff, u, log=None):
         '''Rotate orbitals with the given unitary matrix'''
+        nmo = mo_coeff[0].shape[1]
         nkpts = self.nkpts
+        u = block_diag_to_kblocks(u, self.nkpts, nmo)
         for k in range(nkpts):
             mo_coeff[k] = np.dot(mo_coeff[k], u[k])
         if log is not None and log.verbose >= logger.DEBUG:
@@ -1204,6 +1329,7 @@ def _fake_h_for_fast_casci(casscf, mo, mo_phase, eris):
     eri_k = np.empty((nkpts,nkpts,nkpts, ncas, ncas, ncas, ncas), dtype=dtype)
 
     for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
+        print(eris.ppaa(k1,k2,k3)[ncore:nocc,ncore:nocc,ncore:nocc,ncore:nocc].shape, eri_k.shape)
         eri_k[k1,k2,k3] = eris.ppaa(k1,k2,k3)[ncore:nocc,ncore:nocc,ncore:nocc,ncore:nocc]
     
     eri_cas = np.einsum('auR,bvS,abcuvwt,cwT,abctU->RSTU',
