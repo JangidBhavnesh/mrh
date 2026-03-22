@@ -930,7 +930,7 @@ class PBCCASSCF(casci.PBCCASBASE):
 
         return va, vc
     
-    def update_casdm(self, mo, u, fcivec, e_cas, eris, envs={}):
+    def update_casdm(self, mo, mo_phase, u, fcivec, e_cas, eris, envs={}):
         # raise NotImplementedError('update_casdm is not implemented for PBC-CASSCF yet')
         nkpts = self.nkpts
         ncas = self.ncas
@@ -943,64 +943,88 @@ class PBCCASSCF(casci.PBCCASBASE):
         u = block_diag_to_kblocks(u, nkpts, nmo) # (nkpts, nmo, nmo)
         rmat = np.array([umat - np.eye(nmo) for umat in u], dtype=dtype) # (nkpts, nmo, nmo)
 
-        #g = hessian_co(self, mo, rmat, fcivec, e_cas, eris)
-        ### hessian_co part start ###
+        hcore = self.get_hcore()
+        ddm = np.empty((nkpts, nmo, nmo), dtype=dtype)
 
-        uc = u[:,:ncore]
-        ua = u[:,ncore:nocc].copy()
-        ra = rmat[:,ncore:nocc].copy()
-        h1e_mo = reduce(numpy.dot, (mo.T, self.get_hcore(), mo))
-        ddm = numpy.dot(uc, uc.T) * 2
-        ddm[numpy.diag_indices(ncore)] -= 2
+        h1e_mo = np.empty((nkpts, nmo, nmo), dtype=dtype)
+        for k in range(nkpts):
+            uc = u[k][:,:ncore]
+            ra = rmat[k][:,ncore:nocc].copy()
+            h1e_mo[k] = reduce(np.dot, (mo[k].conj().T, hcore[k], mo[k]))
+            h1e_mo[k] = lib.einsum('ui,uv,vj->ij', mo_phase[k].conj(), h1e_mo[k], mo_phase[k])
+            ddm[k] = np.dot(uc, uc.conj().T) * 2.0
+            ddm[k][np.diag_indices(ncore)] -= 2
         
         if self.with_dep4:
-            mo1 = numpy.dot(mo, u)
-            mo1_cas = mo1[:,ncore:nocc]
-            dm_core = numpy.dot(mo1[:,:ncore], mo1[:,:ncore].T) * 2
-            vj, vk = self._scf.get_jk(self.mol, dm_core)
-            h1 =(reduce(numpy.dot, (ua.T, h1e_mo, ua)) +
-                 reduce(numpy.dot, (mo1_cas.T, vj-vk*.5, mo1_cas)))
-            eris._paaa = self._exact_paaa(mo, u)
-            h2 = eris._paaa[ncore:nocc]
+            mo1 = np.array([np.dot(mo[k], u[k]) 
+                            for k in range(nkpts)])
+           
+            dm_core = np.array([np.dot(mo1[k][:,:ncore], mo1[k][:,:ncore].conj().T) * 2.0
+                                 for k in range(nkpts)])
+            vj, vk = self._scf.get_jk(self._scf.cell, dm_core)
+
+            mo_phase1 = get_mo_coeff_k2R(self._scf, mo1, ncore, ncas)[-1]
+
+            # h1e for active space.
+            h1 = np.empty((nkpts, ncas, ncas), dtype=dtype)
+            for k in range(nkpts):
+                ua = u[k][:,ncore:nocc].copy()
+                mo1_cas = mo1[k][:,ncore:nocc]
+                h1[k] = reduce(np.dot, (ua.conj().T, h1e_mo[k], ua))
+                h1[k] += reduce(np.dot, (mo1_cas.conj().T, vj[k] - vk[k] * 0.5, mo1_cas))
+            
+            h1 = lib.einsum('xui,xuv,xvj->ij', mo_phase1.conj(), h1, mo_phase1)
+            h2 = self._exact_paaa(mo, u)
             vj = vk = None
         else:
-            p1aa = numpy.empty((nmo,ncas,ncas**2))
-            paa1 = numpy.empty((nmo,ncas**2,ncas))
-            jk = reduce(numpy.dot, (ua.T, eris.vhf_c, ua))
-            for i in range(nmo):
-                jbuf = eris.ppaa[i]
-                kbuf = eris.papa[i]
-                jk += (numpy.einsum('quv,q->uv', jbuf, ddm[i]) -
-                       numpy.einsum('uqv,q->uv', kbuf, ddm[i]) * .5)
-                p1aa[i] = lib.dot(ua.T, jbuf.reshape(nmo,-1))
-                paa1[i] = lib.dot(kbuf.transpose(0,2,1).reshape(-1,nmo), ra)
-            h1 = reduce(numpy.dot, (ua.T, h1e_mo, ua)) + jk
-            aa11 = lib.dot(ua.T, p1aa.reshape(nmo,-1)).reshape((ncas,)*4)
-            aaaa = eris.ppaa[ncore:nocc,ncore:nocc,:,:]
-            aa11 = aa11 + aa11.transpose(2,3,0,1) - aaaa
+            jk = np.empty((nkpts, nmo, nmo), dtype=dtype)
+            # I need to loop over the k-points.
+            for k in range(nkpts):
+                ua = u[k][:,ncore:nocc].copy()
+                p1aa = np.empty((nmo,ncas,ncas**2))
+                paa1 = np.empty((nmo,ncas**2,ncas))
+                jk[k] = reduce(np.dot, (ua.T, eris.vhf_c, ua))
+                
+                '''
+                Let me write without loop first.
+                jk = np.einsum('pquv,pq->uv', eris.ppaa, ddm)
+                jk -= 0.5 * np.einsum('puqv,pq->uv', eris.papa, ddm)
+                p1aa = np.einsum('qt, pquv->ptuv', ua, eris.ppaa)
+                paa1 = np.einsum('puqv,qt->putv', eris.papa, ra)
+                '''
+                for i in range(nmo):
+                    jbuf = eris.ppaa[i]
+                    kbuf = eris.papa[i]
+                    jk += (np.einsum('quv,q->uv', jbuf, ddm[i]) -
+                        np.einsum('uqv,q->uv', kbuf, ddm[i]) * .5)
+                    p1aa[i] = lib.dot(ua.T, jbuf.reshape(nmo,-1))
+                    paa1[i] = lib.dot(kbuf.transpose(0,2,1).reshape(-1,nmo), ra)
+                
+                h1 = reduce(np.dot, (ua.T, h1e_mo, ua)) + jk
+                aa11 = lib.dot(ua.T, p1aa.reshape(nmo,-1)).reshape((ncas,)*4)
+                aaaa = eris.ppaa[ncore:nocc,ncore:nocc,:,:]
+                aa11 = aa11 + aa11.transpose(2,3,0,1) - aaaa
 
-            a11a = numpy.dot(ra.T, paa1.reshape(nmo,-1)).reshape((ncas,)*4)
-            a11a = a11a + a11a.transpose(1,0,2,3)
-            a11a = a11a + a11a.transpose(0,1,3,2)
+                a11a = np.dot(ra.T, paa1.reshape(nmo,-1)).reshape((ncas,)*4)
+                a11a = a11a + a11a.transpose(1,0,2,3)
+                a11a = a11a + a11a.transpose(0,1,3,2)
             h2 = aa11 + a11a
             jbuf = kbuf = p1aa = paa1 = aaaa = aa11 = a11a = None
 
-        # pure core response
-        # response of (1/2 dm * vhf * dm) ~ ddm*vhf
-# Should I consider core response as a part of CI gradients?
-        ecore =(numpy.einsum('pq,pq->', h1e_mo, ddm) +
-                numpy.einsum('pq,pq->', eris.vhf_c, ddm))
-        ### hessian_co part end ###
+
+        ecore = (np.einsum('pq,pq->', h1e_mo, ddm) +
+                np.einsum('pq,pq->', eris.vhf_c, ddm))
 
         ci1, g = self.solve_approx_ci(h1, h2, fcivec, ecore, e_cas, envs)
+        
         if g is not None:  # So state average CI, DMRG etc will not be applied
-            ovlp = numpy.dot(fcivec.ravel(), ci1.ravel())
-            norm_g = numpy.linalg.norm(g)
+            ovlp = np.dot(fcivec.ravel(), ci1.ravel())
+            norm_g = np.linalg.norm(g)
             if 1-abs(ovlp) > norm_g * self.ci_grad_trust_region:
                 logger.debug(self, '<ci1|ci0>=%5.3g |g|=%5.3g, ci1 out of trust region',
                              ovlp, norm_g)
                 ci1 = fcivec.ravel() + g
-                ci1 *= 1/numpy.linalg.norm(ci1)
+                ci1 *= 1/np.linalg.norm(ci1)
         casdm1, casdm2 = self.fcisolver.make_rdm12(ci1, ncas, nelecas)
 
         return casdm1, casdm2, g, ci1
@@ -1014,8 +1038,34 @@ class PBCCASSCF(casci.PBCCASBASE):
         pass
     
     def _exact_paaa(self, mo_kpts, u_kpts, out=None):
-        # TODO: Implement this.
-        pass
+        '''
+        # In the molecular code, the paaa term is created which is then
+        # sliced to get the aaaa. Instead, I will directly compute the aaaa term here.
+        # Note: I kept the same function name as in the molecular code.
+        '''
+        kmf = self._scf
+        cell = kmf.cell
+        kpts = kmf.kpts
+        nkpts = self.nkpts
+        ncore = self.ncore
+        ncas = self.ncas
+        nocc = ncore + ncas
+        mo1 = [np.dot(mo, u) for mo, u in zip(mo_kpts, u_kpts)]
+        mo_phase1 = get_mo_coeff_k2R(kmf, mo1, ncore, ncas)[-1]
+        mo_cas_kpts = np.array([mo1[k][:, ncore:nocc] for k in range(nkpts)])
+        eri_k = kmf.with_df.ao2mo_7d(mo_cas_kpts, kpts=kpts)
+        kconserv = kpts_helper.get_kconserv(cell, kpts)
+        mo_ks = mo_phase1[kconserv]
+        
+        aaaa = np.einsum('auR,bvS,abcuvwt,cwT,abctU->RSTU',
+                         mo_phase1.conj(), mo_phase1, eri_k, mo_phase1.conj(), mo_ks, optimize=True)
+        aaaa *= 1.0/nkpts
+
+        eri_k = mo_ks = kconserv = None 
+
+        ncastot = nkpts * ncas
+        assert aaaa.shape == (ncastot, ncastot, ncastot, ncastot)
+        return aaaa
     
     def dump_chk(self, **kwargs):
         pass
