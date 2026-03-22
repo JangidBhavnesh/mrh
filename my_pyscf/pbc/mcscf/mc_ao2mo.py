@@ -63,7 +63,6 @@ def _do_ao2mo_direct(kcasscf, mo_kpts, nkpts, ncore, ncas, nmo, level=1):
                 mo_ppaa = [mo_kpts[k], mo_kpts[k], mo_kpts[k][:, :ncore], mo_kpts[k][:, :ncore]]
                 temp = mydf.ao2mo(mo_ppaa, [kpts[k]]*4, compact=False).reshape(nmo, nmo, ncore, ncore)
                 j_pc[k] = np.einsum('ppjj->pj', temp)
-                print(j_pc[k].shape)
                 mo_papa = [mo_kpts[k], mo_kpts[k][:, :ncore], mo_kpts[k], mo_kpts[k][:, :ncore]]
                 temp = mydf.ao2mo(mo_papa, [kpts[k]]*4, compact=False).reshape(nmo, ncore, nmo, ncore)
                 k_pc[k] = np.einsum('pjpj->pj', temp)
@@ -230,7 +229,7 @@ class _ERIS:
         vhf_c: np.array (nkpts, nmo, nmo)
             VHF matrix due to core electrons
     '''
-    def __init__(self, kcasscf, mo_kpts, method='direct', level=1):
+    def __init__(self, kcasscf, mo_kpts, method='disk', level=1):
         self.erifile = None
         self.ppaa_kpts = None
         self.papa_kpts = None
@@ -251,7 +250,7 @@ class _ERIS:
         
         vj_kpts, vk_kpts = kcasscf._scf.get_jk(cell, dmcore_kpts, kpts=kpts, hermi=1)
         self.vhf_c = np.array(
-            [reduce(np.dot, (mo_kpts[k].conj().T, 2.0 * vj_kpts[k] - vk_kpts[k], mo_kpts[k]))
+            [reduce(np.dot, (mo_kpts[k].conj().T, vj_kpts[k] - 0.5*vk_kpts[k], mo_kpts[k]))
              for k in range(nkpts)], 
              dtype=dtype)
         t1 = log.timer('vhf construction for core density', *t1)
