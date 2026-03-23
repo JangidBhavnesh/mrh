@@ -384,38 +384,46 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
 
         # hdm2 have k1, k2, k3, so it will only contribute to the diagonal
         # when k1, k2 and k3 are equal to the k of interest. 
-        for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
-            k4 = kconserv[k1, k2, k3]
-            if k == k1 == k2 == k3 == k4:
-                v_diag = np.einsum('ijij->ij', hdm2[k1, k2, k3]) # (k1, k1)
-                hdiag[k][ncore:nocc,:] += v_diag.conj().T  # (k1, k1)
-                hdiag[k][:,ncore:nocc] += v_diag # (k1, k1)
+        # for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
+        #     k4 = kconserv[k1, k2, k3]
+        #     if k == k1 == k2 == k3 == k4:
+        #         v_diag = np.einsum('ijij->ij', hdm2[k1, k2, k3]) # (k1, k1)
+        #         hdiag[k][ncore:nocc,:] += v_diag.conj().T  # (k1, k1)
+        #         hdiag[k][:,ncore:nocc] += v_diag # (k1, k1)
+        # Above code should be equal to this, nope?
+        v_diag = np.einsum('ijij->ij', hdm2[k, k, k]) # (k1, k1)
+        hdiag[k][ncore:nocc,:] += v_diag.conj().T  # (k1, k1)
+        hdiag[k][:,ncore:nocc] += v_diag # (k1, k1)
 
+    # Pack the gradients and hessian diagonal    
     g_orb = np.hstack([mc.pack_uniq_var(g[k] - g[k].conj().T) 
                        for k in range(nkpts)])
     h_diag = np.hstack([mc.pack_uniq_var(hdiag[k]) 
                         for k in range(nkpts)])
-    # Hessian operator
+    
+    # Hessian-vector
     def h_op(x):
         # Since the orbital optimization is done for one giant matrix, so
-        # I need to unpack this.
+        # I need to unpack this. When I will implement the k-CIAH for the orbital 
+        # optimization below won't be required.
+
         nmopack = mc.pack_uniq_var(np.zeros((nmo, nmo))).shape[0]
         x = x.reshape(nkpts, nmopack)
         x2 = np.empty((nkpts, nmo, nmo), dtype=dtype)
         for k in range(nkpts):
-            x1 = mc.unpack_uniq_var(x[k])
-            x2[k] = reduce(np.dot, (h1e_mo[k], x1, dm1[k]))
-            x2[k] -= 0.5 * np.dot((g[k] + g[k].conj().T), x1)
-            x2[k][:ncore] += 2.0 * reduce(np.dot, (x1[:ncore,ncore:], vhf_ca[k][ncore:]))
-            x2[k][ncore:nocc] += reduce(np.dot, (casdm1_kpts[k], x1[ncore:nocc], eris.vhf_c[k]))
+            x1 = mc.unpack_uniq_var(x[k]) # (k, k)
+            x2[k] = reduce(np.dot, (h1e_mo[k], x1, dm1[k])) # (k, k)
+            x2[k] -= 0.5 * np.dot((g[k] + g[k].conj().T), x1) # (k, k)
+            x2[k][:ncore] += 2.0 * reduce(np.dot, (x1[:ncore,ncore:], vhf_ca[k][ncore:])) # (k, k)
+            x2[k][ncore:nocc] += reduce(np.dot, (casdm1_kpts[k], x1[ncore:nocc], eris.vhf_c[k])) # (k, k)
 
+            # TODO: this for loop can be optimized.
             for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
-                k4 = kconserv[k1, k2, k3]
-                if not k4 == k:
-                    continue
-                else:
-                    x2[k][:, ncore:nocc] += np.einsum('purv,rv->pu', hdm2[k1, k2, k3], x1[:,ncore:nocc])
-            
+                if k == k1 == k2:
+                    x1temp = mc.unpack_uniq_var(x[k3]) # (k3, k3)
+                    hdm2temp = hdm2[k1, k2, k3] # (k, k, k3, k3)
+                    x2[k][:, ncore:nocc] += np.einsum('purv,rv->pu', hdm2temp, x1temp[:,ncore:nocc]) # (k, k)
+
             if ncore > 0:
                 # I need to modify this function: mc.update_jk_in_ah as well.
                 va, vc = mc.update_jk_in_ah(mo_coeff[k], x1, casdm1_kpts[k], eris, k)
@@ -423,6 +431,9 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
                 x2[k][:ncore,ncore:] += vc
             
             x2[k] = x2[k] - x2[k].conj().T
+        
+        
+        x1temp = hdm2temp = None
 
         return np.hstack([mc.pack_uniq_var(x2_) for x2_ in x2])
     
