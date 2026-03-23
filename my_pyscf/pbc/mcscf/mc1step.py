@@ -1032,11 +1032,11 @@ class PBCCASSCF(casci.PBCCASBASE):
         dm4 = reduce(np.dot, (mo_k[:,ncore:nocc], casdm1_k, r_k[ncore:nocc], mo_k.T))
         dm4 = dm4 + dm4.conj().T
 
-        vj, vk = self.get_jk(cell, (dm3, dm3*2.0 + dm4), kpts=kpts[kptindx])
+        vj, vk  = self.get_jk(self._scf.cell, dm3, kpts_band=kpts[kptindx])
+        va = reduce(np.dot, (casdm1_k, mo_k[:,ncore:nocc].conj().T, vj * 2.0 - vk, mo_k))
 
-        va = reduce(np.dot, (casdm1_k, mo_k[:,ncore:nocc].conj().T, vj[0]*2-vk[0], mo_k))
-        vc = reduce(np.dot, (mo_k[:,:ncore].conj().T, vj[1]*2-vk[1], mo_k[:,ncore:]))
-
+        vj, vk = self.get_jk(cell, dm3*2.0 + dm4, kpts_band=kpts[kptindx])
+        vc = reduce(np.dot, (mo_k[:,:ncore].conj().T, vj*2.0 - vk, mo_k[:,ncore:]))
         return va, vc
     
     def update_casdm(self, mo, u, fcivec, e_cas, eris, envs={}):
