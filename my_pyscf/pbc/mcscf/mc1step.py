@@ -279,8 +279,6 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
         for k in range(nkpts):
             uc = u[k][:, :ncore].copy()
             ua = u[k][:, ncore:nocc].copy()
-            rmat = u[k] - np.eye(nmo, dtype=dtype)
-            ra = rmat[:, ncore:nocc].copy()
             mo_c = np.dot(mo_coeff[k], uc)
             mo_a = np.dot(mo_coeff[k], ua)
             dm_c = 2.0 * np.dot(mo_c, mo_c.conj().T)
@@ -363,7 +361,7 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
         hdiag[k] -= g_diag + g_diag.reshape(-1, 1)
         idx = np.arange(nmo)
         hdiag[k][idx, idx] += 2.0 * g_diag
-        # TODO: Check whether the vhf_ca is coming from gorb_update or above
+        
         v_diag = vhf_ca[k].diagonal() 
         hdiag[k][:, :ncore] += 2.0 * v_diag.reshape(-1, 1)
         hdiag[k][:ncore] += 2.0 * v_diag
@@ -388,11 +386,10 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
         # when k1, k2 and k3 are equal to the k of interest. 
         for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
             k4 = kconserv[k1, k2, k3]
-            if k4 != k: continue
-            else:
-                v_diag = np.einsum('ijij->ij', hdm2[k1, k2, k3])
-                hdiag[k][ncore:nocc,:] += v_diag.conj().T
-                hdiag[k][:,ncore:nocc] += v_diag
+            if k == k1 == k2 == k3 == k4:
+                v_diag = np.einsum('ijij->ij', hdm2[k1, k2, k3]) # (k1, k1)
+                hdiag[k][ncore:nocc,:] += v_diag.conj().T  # (k1, k1)
+                hdiag[k][:,ncore:nocc] += v_diag # (k1, k1)
 
     g_orb = np.hstack([mc.pack_uniq_var(g[k] - g[k].conj().T) 
                        for k in range(nkpts)])
