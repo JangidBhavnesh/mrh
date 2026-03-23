@@ -13,6 +13,7 @@ from pyscf.pbc.lib import kpts_helper
 from mrh.my_pyscf.pbc.mcscf import casci
 from mrh.my_pyscf.pbc.mcscf.mc_ao2mo import _ERIS
 from mrh.my_pyscf.pbc.mcscf.k2R import  get_mo_coeff_k2R
+from mrh.my_pyscf.pbc.mcscf import casci as casciModule
 
 logger = lib.logger
 
@@ -775,7 +776,7 @@ class PBCCASSCF(casci.PBCCASBASE):
 
     __doc__ = molCASSCF.__doc__
 
-    # I ddin't want to do this, but I don't know if there is any other way to directly use these options
+    # I didn't want to do this, but I don't know if there is any other way to directly use these options
     # from the molecular code.
     max_stepsize = getattr(__config__, 'pbc_mcscf_mc1step_CASSCF_max_stepsize', .02)
     max_cycle_macro = getattr(__config__, 'pbc_mcscf_mc1step_CASSCF_max_cycle_macro', 50)
@@ -1004,7 +1005,6 @@ class PBCCASSCF(casci.PBCCASBASE):
     
     gen_g_hop = gen_g_hop
     rotate_orb_cc = rotate_orb_cc
-    from mrh.my_pyscf.pbc.mcscf import casci as casciModule
     get_h2eff = casciModule.PBCCASCI.get_h2eff
     
     def ao2mo(self, mo_coeff):
@@ -1040,7 +1040,6 @@ class PBCCASSCF(casci.PBCCASBASE):
         return va, vc
     
     def update_casdm(self, mo, u, fcivec, e_cas, eris, envs={}):
-        # raise NotImplementedError('update_casdm is not implemented for PBC-CASSCF yet')
         np.set_printoptions(precision=3, suppress=True)
         nkpts = self.nkpts
         kpts = self._scf.kpts
@@ -1053,7 +1052,6 @@ class PBCCASSCF(casci.PBCCASBASE):
 
         u = block_diag_to_kblocks(u, nkpts, nmo) # (nkpts, nmo, nmo)
         
-        print(u.real)
         rmat = np.array([umat - np.eye(nmo) for umat in u], dtype=dtype) # (nkpts, nmo, nmo)
 
         hcore = self.get_hcore()
@@ -1081,7 +1079,8 @@ class PBCCASSCF(casci.PBCCASBASE):
             for k in range(nkpts):
                 ua = u[k][:,ncore:nocc].copy()
                 mo1_cas = mo1[k][:,ncore:nocc].copy()
-                h1[k] = reduce(np.dot, (ua.conj().T, h1e_mo[k], ua)) # update h1e for active space in k-space (mo basis)
+                # update h1e for active space in k-space (mo basis)
+                h1[k] = reduce(np.dot, (ua.conj().T, h1e_mo[k], ua))
                 h1[k] += reduce(np.dot, (mo1_cas.conj().T, vj[k] - vk[k] * 0.5, mo1_cas)) # add the contribution from the vj vk terms
                 # do the transformation to R-space (mo basis)
             
@@ -1109,15 +1108,19 @@ class PBCCASSCF(casci.PBCCASBASE):
             for k in range(nkpts):
                 ua = u[k][:,ncore:nocc].copy()
                 jk = reduce(np.dot, (ua.conj().T, eris.vhf_c[k], ua))
-                for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
-                    k4 = kconserv[k1, k2, k3]
-                    if k4 != k:
-                        continue
-                    else:
-                        ppaa = eris.ppaa(k1, k2, k3)
-                        jk += np.einsum('pquv,pq->uv', ppaa, ddm[k1])
-                        papa = eris.papa(k1, k2, k3)
-                        jk -= 0.5 * np.einsum('puqv,pq->uv', papa, ddm[k1])
+                # for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
+                #     if k1 != k:
+                #         continue
+                #     else:
+                #         ppaa = eris.ppaa(k1, k1, k1) # (k1, k1, k1, k1)
+                #         jk += np.einsum('pquv,pq->uv', ppaa, ddm[k1]) # (k1, k1)
+                #         papa = eris.papa(k1, k1, k1) # (k1, k1, k1, k1)
+                #         jk -= 0.5 * np.einsum('puqv,pq->uv', papa, ddm[k1]) # (k1, k1)
+                # I have rewritten above code here:
+                ppaa = eris.ppaa(k, k, k) # (k, k, k, k)
+                jk += np.einsum('pquv,pq->uv', ppaa, ddm[k]) # (k, k)
+                papa = eris.papa(k, k, k) # (k, k, k, k)
+                jk -= 0.5 * np.einsum('puqv,pq->uv', papa, ddm[k]) # (k, k)
                 
                 h1[k] = reduce(np.dot, (ua.conj().T, h1e_mo[k], ua)) # k-space (mo basis)
                 h1[k] += jk # k-space (mo-basis)
@@ -1133,7 +1136,8 @@ class PBCCASSCF(casci.PBCCASBASE):
 
             def _convert_to_R_space(eri_k):
                 out = np.einsum('auR,bvS,abcuvwt,cwT,abctU->RSTU',
-                            mo_phase1.conj(), mo_phase1, eri_k, mo_phase1.conj(), mo_ks, optimize=True)
+                            mo_phase1.conj(), mo_phase1, eri_k, mo_phase1.conj(), 
+                            mo_ks, optimize=True)
                 out *= 1.0/nkpts
                 return out
             
@@ -1143,7 +1147,8 @@ class PBCCASSCF(casci.PBCCASBASE):
             for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
                 ppaa = eris.ppaa(k1, k2, k3)
                 aaaa[k1, k2, k3] = ppaa[ncore:nocc,ncore:nocc,:,:].copy()
-                aa11[k1, k2, k3] = np.einsum('ps, qt, pquv -> stuv', u[k1][:,ncore:nocc], u[k2][:,ncore:nocc], ppaa)
+                aa11[k1, k2, k3] = np.einsum('ps, qt, pquv -> stuv', u[k1][:,ncore:nocc], 
+                                             u[k2][:,ncore:nocc], ppaa)
         
             aa11_R = _convert_to_R_space(aa11)
             aaaa_R = _convert_to_R_space(aaaa)
@@ -1166,16 +1171,15 @@ class PBCCASSCF(casci.PBCCASBASE):
             a11a_R = a11a_R + a11a_R.conj().transpose(0, 1, 3, 2)
             
             h2_R = aa11_R + a11a_R
-
             aa11_R = a11a_R = None
 
         ecore = 0
         for k in range(nkpts):
             ecore += np.einsum('pq,pq->', h1e_mo[k], ddm[k])
             ecore += np.einsum('pq,pq->', eris.vhf_c[k], ddm[k])
+        ecore += self.energy_nuc() * nkpts
 
         ci1, g = self.solve_approx_ci(h1_R, h2_R, fcivec, ecore, e_cas, envs)
-        
         # In case of external CI solvers like DMRG, or even for the state-average condition
         # we won't need this.
         if g is not None:
@@ -1210,7 +1214,7 @@ class PBCCASSCF(casci.PBCCASBASE):
                   getattr(self.fcisolver, 'absorb_h1e', None)):
             raise NotImplementedError('direct kernel is not tested/implemented for direct_spin1_cplx')
 
-        h2eff = self.fcisolver.absorb_h1e(h1, h2, ncas, nelecas, 0.5)
+        h2eff = self.fcisolver.absorb_h1e(h1, h2, ncas*nkpts, (nkpts*nelecas[0], nkpts*nelecas[1]), 0.5)
 
         def contract_2e(c):
             hc = self.fcisolver.contract_2e(h2eff, c, ncas*nkpts, (nelecas[0]*nkpts, nelecas[1]*nkpts))
@@ -1221,6 +1225,7 @@ class PBCCASSCF(casci.PBCCASBASE):
         hc = contract_2e(ci0)
 
         g = hc - e_ci * ci0.ravel()
+        
         if self.ci_response_space > 7 or ci0.size <= self.fcisolver.pspace_size:
             logger.debug(self, 'CI step by full response')
             max_memory = max(400, self.max_memory - lib.current_memory()[0])
