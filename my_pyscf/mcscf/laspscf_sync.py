@@ -1,6 +1,6 @@
 from pyscf import lib, symm
 from mrh.my_pyscf.fci.csfstring import ImpossibleCIvecError
-from mrh.my_pyscf.mcscf import _DFLASPSCF
+from mrh.my_pyscf.mcscf import _DFLASCI
 from scipy.sparse import linalg as sparse_linalg
 from scipy import linalg 
 import numpy as np
@@ -13,7 +13,7 @@ class MicroIterInstabilityException (Exception):
 
 def kernel (las, mo_coeff=None, ci0=None, casdm0_fr=None, conv_tol_grad=1e-4, 
         assert_no_dupes=False, verbose=lib.logger.NOTE):
-    from mrh.my_pyscf.mcscf.laspscf import _eig_inactive_virtual
+    from mrh.my_pyscf.mcscf.lasci import _eig_inactive_virtual
     if mo_coeff is None: mo_coeff = las.mo_coeff
     if assert_no_dupes: las.assert_no_duplicates ()
     log = lib.logger.new_logger(las, verbose)
@@ -37,8 +37,7 @@ def kernel (las, mo_coeff=None, ci0=None, casdm0_fr=None, conv_tol_grad=1e-4,
                                            axes=((1),(1))).transpose (1,0,2))
         dm1s_sub = np.stack (dm1s_sub, axis=0)
         dm1s = dm1s_sub.sum (0)
-        veff = las.get_veff (dm=dm1s.sum (0))
-        veff = las.split_veff (veff, h2eff_sub, mo_coeff=mo_coeff, casdm1s_sub=casdm0_sub)
+        veff = las.get_veff (dm=dm1s)
         casdm1s_sub = casdm0_sub
         casdm1frs = casdm0_fr
     else:
@@ -48,10 +47,10 @@ def kernel (las, mo_coeff=None, ci0=None, casdm0_fr=None, conv_tol_grad=1e-4,
         if (ci0 is None or any ([c is None for c in ci0]) or
           any ([any ([c2 is None for c2 in c1]) for c1 in ci0])):
             raise RuntimeError ("failed to populate get_init_guess")
-        veff = las.get_veff (dm = las.make_rdm1 (mo_coeff=mo_coeff, ci=ci0))
-        casdm1s_sub = las.make_casdm1s_sub (ci=ci0)
         casdm1frs = las.states_make_casdm1s_sub (ci=ci0)
-        veff = las.split_veff (veff, h2eff_sub, mo_coeff=mo_coeff, ci=ci0, casdm1s_sub=casdm1s_sub)
+        casdm1s_sub = las.make_casdm1s_sub (ci=ci0, casdm1frs=casdm1frs)
+        dm1s = las.make_rdm1s (mo_coeff=mo_coeff, ci=ci0, casdm1s_sub=casdm1s_sub)
+        veff = las.get_veff (dm = dm1s)
     t1 = log.timer('LASPSCF initial get_veff', *t1)
 
     ugg = None
@@ -65,10 +64,9 @@ def kernel (las, mo_coeff=None, ci0=None, casdm0_fr=None, conv_tol_grad=1e-4,
         log.info ('LASPSCF subspace CI energies: {}'.format (e_cas))
         t1 = log.timer ('LASPSCF ci_cycle', *t1)
 
-        veff = veff.sum (0)/2
         # Canonicalize inactive and virtual spaces to set many off-diagonal elements of the
         # orbital-rotation Hessian to zero, which should improve the microiteration below
-        fock = las.get_hcore () + veff
+        fock = las.get_hcore () + veff.sum (0)/2
         fock = mo_coeff.conj ().T @ fock @ mo_coeff
         orbsym = getattr (mo_coeff, 'orbsym', None)
         ene, umat = _eig_inactive_virtual (las, fock, orbsym=orbsym)
@@ -78,17 +76,13 @@ def kernel (las, mo_coeff=None, ci0=None, casdm0_fr=None, conv_tol_grad=1e-4,
         h2eff_sub[:,:] = umat.conj ().T @ h2eff_sub
 
         casdm1s_new = las.make_casdm1s_sub (ci=ci1)
-        if not isinstance (las, _DFLASPSCF) or las.verbose > lib.logger.DEBUG:
+        if not isinstance (las, _DFLASCI):
             #veff = las.get_veff (mo_coeff=mo_coeff, ci=ci1)
-            veff_new = las.get_veff (dm = las.make_rdm1 (mo_coeff=mo_coeff, ci=ci1))
-            if not isinstance (las, _DFLASPSCF): veff = veff_new
-        if isinstance (las, _DFLASPSCF):
+            veff = las.get_veff (dm = las.make_rdm1s (mo_coeff=mo_coeff, ci=ci1))
+        if isinstance (las, _DFLASCI):
             dcasdm1s = [dm_new - dm_old for dm_new, dm_old in zip (casdm1s_new, casdm1s_sub)]
-            veff += las.fast_veffa (dcasdm1s, h2eff_sub, mo_coeff=mo_coeff, ci=ci1) 
-            if las.verbose > lib.logger.DEBUG:
-                errmat = veff - veff_new
-                lib.logger.debug (las, 'fast_veffa error: {}'.format (linalg.norm (errmat)))
-        veff = las.split_veff (veff, h2eff_sub, mo_coeff=mo_coeff, ci=ci1)
+            bmPu = getattr (h2eff_sub, 'bmPu', None)
+            veff += las.fast_veffa (dcasdm1s, bmPu, mo_coeff=mo_coeff, ci=ci1) 
         casdm1s_sub = casdm1s_new
 
         t1 = log.timer ('LASPSCF get_veff after ci', *t1)
@@ -188,8 +182,7 @@ def kernel (las, mo_coeff=None, ci0=None, casdm0_fr=None, conv_tol_grad=1e-4,
             t1 = log.timer ('LASPSCF Hessian update', *t1)
 
             #veff = las.get_veff (mo_coeff=mo_coeff, ci=ci1)
-            veff = las.get_veff (dm = las.make_rdm1 (mo_coeff=mo_coeff, ci=ci1))
-            veff = las.split_veff (veff, h2eff_sub, mo_coeff=mo_coeff, ci=ci1)
+            veff = las.get_veff (dm = las.make_rdm1s (mo_coeff=mo_coeff, ci=ci1))
             t1 = log.timer ('LASPSCF get_veff after secondorder', *t1)
         except MicroIterInstabilityException as e:
             log.info ('Unstable microiteration aborted: %s', str (e))
@@ -198,8 +191,7 @@ def kernel (las, mo_coeff=None, ci0=None, casdm0_fr=None, conv_tol_grad=1e-4,
             for i in range (3): # Make up to 3 attempts to scale-down x if necessary
                 mo2, ci2, h2eff_sub2 = H_op.update_mo_ci_eri (x, h2eff_sub)
                 t1 = log.timer ('LASPSCF Hessian update', *t1)
-                veff2 = las.get_veff (dm = las.make_rdm1 (mo_coeff=mo2, ci=ci2))
-                veff2 = las.split_veff (veff2, h2eff_sub2, mo_coeff=mo2, ci=ci2)
+                veff2 = las.get_veff (dm = las.make_rdm1s (mo_coeff=mo2, ci=ci2))
                 t1 = log.timer ('LASPSCF get_veff after secondorder', *t1)
                 e2 = las.energy_nuc () + las.energy_elec (mo_coeff=mo2, ci=ci2, h2eff=h2eff_sub2,
                                                           veff=veff2)
@@ -223,8 +215,9 @@ def kernel (las, mo_coeff=None, ci0=None, casdm0_fr=None, conv_tol_grad=1e-4,
         e_tot_test = las.get_hop (ugg=ugg, mo_coeff=mo_coeff, ci=ci1, h2eff_sub=h2eff_sub,
                                   veff=veff, do_init_eri=False).e_tot
     dm_core = 2 * mo_coeff[:,:las.ncore] @ mo_coeff[:,:las.ncore].conj ().T
-    veff_a = np.stack ([las.fast_veffa ([d[state] for d in casdm1frs], h2eff_sub,
-                                        mo_coeff=mo_coeff, ci=ci1, _full=True)
+    bmPu = getattr (h2eff_sub, 'bmPu', None)
+    veff_a = np.stack ([las.fast_veffa ([d[state] for d in casdm1frs], bmPu,
+                                        mo_coeff=mo_coeff, ci=ci1)
                         for state in range (las.nroots)], axis=0)
     veff_c = las.get_veff (dm=dm_core)
     # veff's spin-summed component should be correct because I called get_veff with spin-summed rdm
@@ -533,8 +526,8 @@ class LASPSCFSymm_UnitaryGroupGenerators (LASPSCF_UnitaryGroupGenerators):
             self.ci_transformers.append (tf_list)
 
 def _init_df_(h_op):
-    from mrh.my_pyscf.mcscf.laspscf import _DFLASPSCF
-    if isinstance (h_op.las, _DFLASPSCF):
+    from mrh.my_pyscf.mcscf.lasci import _DFLASCI
+    if isinstance (h_op.las, _DFLASCI):
         h_op.with_df = h_op.las.with_df
         if h_op.las.use_gpu:
            pass
@@ -714,33 +707,9 @@ class LASPSCF_HessianOperator (sparse_linalg.LinearOperator):
         casdm1 = casdm1a + casdm1b
         moH_coeff = mo_coeff.conjugate ().T
         if veff is None:
-            from mrh.my_pyscf.mcscf.laspscf import _DFLASPSCF 
-            if isinstance (las, _DFLASPSCF):
-                _init_df_(self)
-                # Can't use this module's get_veff because here I need to have f_aa and f_ii
-                # On the other hand, I know that dm1s spans only the occupied orbitals
-                rho = np.tensordot (self.bPpj[:,:nocc,:], self.dm1s[:,:nocc,:nocc].sum (0))
-                vj_ao = np.zeros (nao*(nao+1)//2, dtype=rho.dtype)
-                b0 = 0
-                for eri1 in self.with_df.loop ():
-                    b1 = b0 + eri1.shape[0]
-                    vj_ao += np.dot (rho[b0:b1], eri1)
-                    b0 = b1
-                vj_mo = moH_coeff @ lib.unpack_tril (vj_ao) @ mo_coeff
-                vPpi = self.bPpj[:,:,:ncore] * np.sqrt (2.0)
-                no_occ, no_coeff = linalg.eigh (casdm1)
-                no_occ[no_occ<0] = 0.0
-                no_coeff *= np.sqrt (no_occ)[None,:]
-                vPpu = np.dot (self.bPpj[:,:,ncore:nocc], no_coeff)
-                vPpj = np.append (vPpi, vPpu, axis=2)
-                vk_mo = np.tensordot (vPpj, vPpj, axes=((0,2),(0,2)))
-                smo = las._scf.get_ovlp () @ mo_coeff
-                smoH = smo.conjugate ().T
-                veff = smo @ (vj_mo - vk_mo/2) @ smoH
-            else:
-                veff = las.get_veff (dm = np.dot (mo_coeff, 
-                                                  np.dot (self.dm1s.sum (0), moH_coeff)))
-            veff = las.split_veff (veff, h2eff_sub, mo_coeff=mo_coeff, casdm1s_sub=self.casdm1fs)
+            veff = las.get_veff (dm = np.dot (
+                mo_coeff, np.dot (self.dm1s, moH_coeff)
+            ).transpose (1,0,2))
         self.eri_paaa = eri_paaa = lib.numpy_helper.unpack_tril (
             h2eff_sub.reshape (nmo*ncas, ncas*(ncas+1)//2)).reshape (nmo, ncas,
             ncas, ncas)

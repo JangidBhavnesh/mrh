@@ -9,7 +9,7 @@ from mrh.my_pyscf.fci import csf_solver
 from mrh.my_pyscf.fci.csfstring import CSFTransformer
 from mrh.my_pyscf.fci.spin_op import contract_sdown, contract_sup, mdown, mup
 from mrh.my_pyscf.fci.spin_op import norm_sdown, norm_sup
-from mrh.my_pyscf.mcscf.laspscf import get_space_info
+from mrh.my_pyscf.mcscf.lasci import get_space_info
 from mrh.my_pyscf.mcscf.productstate import ProductStateFCISolver
 from mrh.my_pyscf.lassi.lassis.excitations import ExcitationPSFCISolver
 from mrh.my_pyscf.lassi.spaces import spin_shuffle, spin_shuffle_ci
@@ -596,7 +596,7 @@ class LASSIS (LASSI):
                  crash_locmin=False, opt=1, **kwargs):
         '''
         Key attributes:
-            _las : instance of class `LASPSCFNoSymm`
+            _las : instance of class `LASCINoSymm`
                 The encapsulated LASSCF wave function. The CI vectors of the reference state are,
                 i.e., _las.get_single_state_las (state=0).ci.
             ci_spin_flips : doubly nested list of ndarrays

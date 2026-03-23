@@ -1137,7 +1137,7 @@ def make_stdm12s (las, ci, nelec_frs, **kwargs):
     ''' Build spin-separated LAS product-state 1- and 2-body transition density matrices
 
     Args:
-        las : instance of :class:`LASPSCFNoSymm`
+        las : instance of :class:`LASCINoSymm`
         ci : list of list of ndarrays
             Contains all CI vectors
         nelec_frs : ndarray of shape (nfrags,nroots,2)
