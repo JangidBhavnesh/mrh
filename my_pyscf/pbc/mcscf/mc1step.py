@@ -38,25 +38,42 @@ Steps
 
 def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
     '''
-    To solve the second order or quasi-second order CASSCF equations, we need to generate the gradient and the Hessian-vector product. I am generalizing pyscf/mcscf/mc1step.py to the k-point case. 
+    To solve the second order or quasi-second order CASSCF equations, we need to 
+    generate the gradient and the Hessian-vector product. 
+    I am generalizing pyscf/mcscf/mc1step.py to the k-point case. 
     Note that the input args are different than the original gen_g_hop function.
-    PySCF implementation doesn't have the docstring, but I am writing one to make my life
-    easier.
+    PySCF implementation doesn't have the docstring, but I am writing one to make my or
+    future developer life easier.
     args:
         mc: casscf object
             instance of the CASSCF class.
-        mo_coeff: list of np.ndarray (nkpts, nao, nmo)
+        mo_coeff: list of np.ndarray (nkpts, nao, nmo) (block orbitals)
             List of the MO coefficients for each k-point.
-        mo_phase: list of np.ndarray (nkpts, nmo, nR)
-            List of the phase factors for transforming the mo_orb from k-to-r. This is used to transform the casdm1 and casdm2 to k-space.
-        u: list of np.ndarray (nkpts, nmo, nmo)
+        mo_phase: list of np.ndarray (nkpts, ncas, ncastot)
+            List of the phase factors for transforming the block orbitals to wannier orbitals.
+            This is used to transform the casdm1 and casdm2 to block orbital basis, which is then used
+            to compute the grad, hessian-vector product and hessian diagonal.
+            Look below for the description of the various variables.
+        u: list of np.ndarray (nkpts, nmo, nmo) (block orbitals)
             orbital rotation matrix for each k-point.
-        casdm1: np.ndarray (nkpts*ncas, nkpts*ncas)
-            1-RDM in the CAS space. This is in the MO basis.
-        casdm2: np.ndarray (nkpts*nkpts*nkpts*ncas*ncas, nkpts*nkpts*nkpts*ncas*ncas)
-            2-RDM in the CAS space. This is in the MO basis.
+        casdm1: np.ndarray (ncastot, ncastot) (wannier orbitals)
+            1-RDM in the CAS space. This is in the wannier MO basis.
+        casdm2: np.ndarray (ncastot, ncastot, ncastot, ncastot) (wannier orbitals)
+            2-RDM in the CAS space. This is in the wannier MO basis.
         eris: ao2mo object for the casscf object.
-
+            Saved Attributes in the eris object are:
+            All of them in the block orbital basis.
+            ppaa: np.array (nkpts, nkpts, nkpts, nmo, nmo, ncas, ncas)/ read from disk 
+                It's a function that takes k1, k2, k3 as input and returns the ppaa integrals
+            papa: np.array (nkpts, nkpts, nkpts, nmo, ncas, nmo, ncas)/ read from disk
+                It's a function that takes k1, k2, k3 as input and returns the papa integrals
+            j_pc: np.array (nkpts, nmo, ncore)
+                potential due to core electrons
+            k_pc: np.array (nkpts, nmo, ncore)
+                potential due to core electrons
+            vhf_c: np.array (nkpts, nmo, nmo)
+                VHF matrix due to core electrons
+        
         Additionally, some other variables used in this functions are:
         Note, ncore, ncas, nelecas is for the unit-cell not for the whole supercell.
             ncas: int
@@ -65,18 +82,24 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
                 Number of active space electrons. (nalpha, nbeta)
             nkpts: int
                 Number of k-points.
+            ncastot: int
+                Total number of active space orbitals in the supercell. 
+                This is equal to ncas * nkpts.
             ncore: int
                 Number of core orbitals.
     returns:
+        Note: The output shapes of these objects are converted to 1D arrays to be compatible with
+        Gamma-CIAH solver. However, once debugged I will use the k-CIAH, in that case the shapes would be as mentioned below.
         g_orb: list of np.ndarray (nkpts, nmo, nmo)
-            Orbital gradient for each k-point.
-        gorb_update: function
+            Orbital gradient for each k-point. (block orbital basis)
+        gorb_update: function 
             Function to update the orbital gradient after the orbital rotation.
         h_op: function
-            Function to compute the Hessian-vector product.
-        h_diag: np.ndarray (nkpts, nmo, ncas)
+            Function to compute the Hessian-vector product. (block orbital basis)
+        h_diag: np.ndarray (nkpts, nmo, ncas) (block orbital basis)
             Diagonal of the Hessian matrix. This is used for preconditioning in the Davidson solver.
     '''
+
     ncas = mc.ncas
     nelecas = mc.nelecas
     nkpts = mc.nkpts
@@ -89,18 +112,21 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
     
     ncasncas = ncas*ncas
     nmonmo = nmo*nmo
-    nkncas = nkpts*ncas
+    ncastot = nkpts*ncas
 
     kconserv = kpts_helper.get_kconserv(mc._scf.cell, mc._scf.kpts)
 
-    assert casdm1.shape == (nkncas, ) * 2
-    assert casdm2.shape == (nkncas, ) * 4
-    assert casdm1.dtype == casdm2.dtype
-    
+    log = logger.new_logger(mc, mc.verbose)
+
+    if log.verbose >= logger.DEBUG:
+        assert casdm1.shape == (ncastot, ) * 2
+        assert casdm2.shape == (ncastot, ) * 4
+        assert casdm1.dtype == casdm2.dtype
+
     # First convert the casdm1 and casdm2 to k-space.
-    # The constructed dm1 would be in MO basis.
+    # The constructed dm1 would be in block orbitals (MO basis).
     dm1 = np.zeros((nkpts, nmo, nmo), dtype=casdm1.dtype)
-    casdm1_kpts = np.zeros((nkpts, ncas, ncas), dtype=casdm1.dtype)
+    casdm1_kpts = np.zeros((nkpts, ncas, ncas), dtype=dtype)
     idx = np.arange(ncore)
     
     for k in range(nkpts):
@@ -109,14 +135,23 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
         dm1[k][ncore:nocc, ncore:nocc] = casdm1_k
         casdm1_kpts[k] = casdm1_k
     
-    casdm2_kpts = np.zeros((nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas), dtype=casdm1.dtype)
+    log.info("Number of electrons in the CAS space: %s", 
+              sum([casdm1_kpts[k].trace() for k in range(nkpts)]).real)
+    
+    casdm2_kpts = np.zeros((nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas), dtype=dtype)
 
     for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
         k4 = kconserv[k1, k2, k3]
-        dm2_k = 1.0/nkpts * np.einsum('iP, jQ, PQRS, kR, lS->ijkl', 
+        dm2_k = np.einsum('iP, jQ, PQRS, kR, lS->ijkl', 
                                       mo_phase[k1].conj(), mo_phase[k2], casdm2, mo_phase[k3].conj(), mo_phase[k4])
         casdm2_kpts[k1, k2, k3] = dm2_k
-
+    
+    log.info("Number of electron: %s", np.einsum('ppqq->', casdm2).real)
+    log.info("Number of electrons in the CAS space from casdm2: %s", 
+               sum([np.einsum('ppqq->', casdm2_kpts[k1,k1,k3]) 
+                    for k1 in range(nkpts) 
+                    for k3 in range(nkpts)]).real)
+    exit()
     # Construct the potential
     jkcaa = np.zeros((nkpts, nocc, ncas), dtype=dtype)
     vhf_a = np.zeros((nkpts, nmo, nmo), dtype=dtype)
@@ -559,7 +594,7 @@ def kernel(casscf, mo_coeff, mo_phase, tol=1e-7, conv_tol_grad=None,
             norm_ddm_micro = np.linalg.norm(casdm1 - casdm1_prev)
             casdm1_prev = casdm1
             t3m = log.timer('update CAS DM', *t3m)
-
+            
             # I have kept the gradient in the R-space.
             if isinstance(gci, np.ndarray):
                 norm_gci = np.linalg.norm(gci)
@@ -619,7 +654,6 @@ def kernel(casscf, mo_coeff, mo_phase, tol=1e-7, conv_tol_grad=None,
         casdm1_prev = casdm1_last = casdm1
         log.timer('CASCI solver', *t2m)
         t3m = t2m = t1m = log.timer('macro iter %2d'%imacro, *t1m)
-
         de, elast = e_tot - elast, e_tot
         if (abs(de) < tol and norm_gorb0 < conv_tol_grad and
                 norm_ddm < conv_tol_ddm and
@@ -739,7 +773,6 @@ class PBCCASSCF(casci.PBCCASBASE):
         self.mo_coeff = mo_coeff_backup
         del mo_coeff_backup
         log = logger.new_logger(self, verbose)
-        log.info('')
         log.info('nkpts = %d', self.nkpts)
         return self
     
@@ -833,25 +866,25 @@ class PBCCASSCF(casci.PBCCASBASE):
                     log.info('macro iter %3d (%3d JK  %3d micro), '
                              'CASSCF E = %#.15g  dE = % .8e',
                              envs['imacro'], envs['njk'], envs['imicro'],
-                             e_tot.real, e_tot-envs['elast'].real)
+                             e_tot.real, (e_tot-envs['elast']).real)
                 else:
                     log.info('macro iter %3d (%3d JK  %3d micro), '
                              'CASSCF E = %#.15g  dE = % .8e  S^2 = %.7f',
                              envs['imacro'], envs['njk'], envs['imicro'],
-                             e_tot.real, e_tot-envs['elast'].real, ss[0])
+                             e_tot.real, (e_tot-envs['elast']).real, ss[0].real)
                 if 'norm_gci' in envs and envs['norm_gci'] is not None:
                     log.info('               |grad[o]|=%5.3g  '
                              '|grad[c]|=%5.3g  |ddm|=%5.3g  |maxRot[o]|=%5.3g',
                              envs['norm_gorb0'].real,
-                             envs['norm_gci'], envs['norm_ddm'], envs['max_offdiag_u'])
+                             envs['norm_gci'].real, envs['norm_ddm'].real, envs['max_offdiag_u'].real)
                 else:
                     log.info('               |grad[o]|=%5.3g  |ddm|=%5.3g  |maxRot[o]|=%5.3g',
-                             envs['norm_gorb0'].real, envs['norm_ddm'], envs['max_offdiag_u'])
+                             envs['norm_gorb0'].real, envs['norm_ddm'].real, envs['max_offdiag_u'].real)
             else:  # Initialization step
                 if ss is None:
                     log.info('CASCI E = %#.15g', e_tot.real)
                 else:
-                    log.info('CASCI E = %#.15g  S^2 = %.7f', e_tot.real, ss[0])
+                    log.info('CASCI E = %#.15g  S^2 = %.7f', e_tot.real, ss[0].real)
         return e_tot, e_cas, fcivec
 
 
@@ -905,12 +938,12 @@ class PBCCASSCF(casci.PBCCASBASE):
         In pbc_casscf, I don't have worry about two options (DF vs non DF) as in the molecular code. 
         The integrals will always be transformed to the MO basis using DF only.
         '''
-        eris = _ERIS(self, mo_coeff)
+        eris = _ERIS(self, mo_coeff, method='direct')
         return eris
     
     def update_jk_in_ah(self, mo_k, r_k, casdm1_k, eris, kptindx):
         cell = self._scf.cell
-        kpts = self.kpts
+        kpts = self._scf.kpts
         ncore = self.ncore
         ncas = self.ncas
         nocc = ncore + ncas
@@ -934,6 +967,7 @@ class PBCCASSCF(casci.PBCCASBASE):
     
     def update_casdm(self, mo, u, fcivec, e_cas, eris, envs={}):
         # raise NotImplementedError('update_casdm is not implemented for PBC-CASSCF yet')
+        np.set_printoptions(precision=3, suppress=True)
         nkpts = self.nkpts
         kpts = self._scf.kpts
         ncas = self.ncas
@@ -943,8 +977,9 @@ class PBCCASSCF(casci.PBCCASBASE):
         nocc = ncore + ncas
         dtype = mo[0].dtype
 
-        print(u.shape)
         u = block_diag_to_kblocks(u, nkpts, nmo) # (nkpts, nmo, nmo)
+        
+        print(u.real)
         rmat = np.array([umat - np.eye(nmo) for umat in u], dtype=dtype) # (nkpts, nmo, nmo)
 
         hcore = self.get_hcore()
@@ -953,11 +988,9 @@ class PBCCASSCF(casci.PBCCASBASE):
         h1e_mo = np.empty((nkpts, nmo, nmo), dtype=dtype)
         for k in range(nkpts):
             uc = u[k][:,:ncore]
-            ra = rmat[k][:,ncore:nocc].copy()
-            h1e_mo[k] = reduce(np.dot, (mo[k].conj().T, hcore[k], mo[k])) #k-space (mo basis)
-            # h1e_mo[k] = lib.einsum('ui,uv,vj->ij', mo_phase[k].conj(), h1e_mo[k], mo_phase[k]) # back to R-space (mo-basis)
+            h1e_mo[k] = reduce(np.dot, (mo[k].conj().T, hcore[k], mo[k]))
             ddm[k] = np.dot(uc, uc.conj().T) * 2.0
-            ddm[k][np.diag_indices(ncore)] -= 2
+            ddm[k][np.diag_indices(ncore)] -= 2.0
         
         if self.with_dep4:
             mo1 = np.array([np.dot(mo[k], u[k]) 
@@ -974,12 +1007,13 @@ class PBCCASSCF(casci.PBCCASBASE):
             for k in range(nkpts):
                 ua = u[k][:,ncore:nocc].copy()
                 mo1_cas = mo1[k][:,ncore:nocc].copy()
-                h1temp = reduce(np.dot, (ua.conj().T, h1e_mo[k], ua)) # update h1e for active space in k-space (mo basis)
-                h1temp += reduce(np.dot, (mo1_cas.conj().T, vj[k] - vk[k] * 0.5, mo1_cas)) # add the contribution from the vj vk terms
+                h1[k] = reduce(np.dot, (ua.conj().T, h1e_mo[k], ua)) # update h1e for active space in k-space (mo basis)
+                h1[k] += reduce(np.dot, (mo1_cas.conj().T, vj[k] - vk[k] * 0.5, mo1_cas)) # add the contribution from the vj vk terms
                 # do the transformation to R-space (mo basis)
-                h1[k] = lib.einsum('ui,uv,vj->ij', mo_phase1[k].conj(), h1temp, mo_phase1[k])
-            h2 = self._exact_paaa(mo, u)
-            vj = vk = None
+            
+            h1_R = lib.einsum('xui,xuv,xvj->ij', mo_phase1.conj(), h1, mo_phase1)
+            h2_R = self._exact_paaa(mo, u)
+            vj = vk = h1 = None
         
         else:
             # h1e
@@ -1015,7 +1049,7 @@ class PBCCASSCF(casci.PBCCASBASE):
                 h1[k] += jk # k-space (mo-basis)
                 
             h1_R = lib.einsum('xui,xuv,xvj->ij', mo_phase1.conj(), h1, mo_phase1) # transform to R-space basis
-            
+            # print(h1_R.real)
             # h2e term
             '''
             ppaa = np.einsum('ps, qt, pquv -> stuv', ua, ua, eris.ppaa)
@@ -1111,8 +1145,8 @@ class PBCCASSCF(casci.PBCCASBASE):
         e_ci = e_cas - ecore
 
         hc = contract_2e(ci0)
-        g = hc - e_ci * ci0.ravel()
 
+        g = hc - e_ci * ci0.ravel()
         if self.ci_response_space > 7 or ci0.size <= self.fcisolver.pspace_size:
             logger.debug(self, 'CI step by full response')
             max_memory = max(400, self.max_memory - lib.current_memory()[0])
@@ -1308,13 +1342,13 @@ def _fake_h_for_fast_casci(casscf, mo, mo_phase, eris):
     mo_cas = [mo[k][:,ncore:nocc] for k in range(nkpts)]
     core_dm = [np.dot(mo_core[k], mo_core[k].conj().T) * 2 
                for k in range(nkpts)]
+    
     hcore = casscf.get_hcore()
     energy_core = nkpts * casscf.energy_nuc() # Remember energy would be divided by nkpts in the end.
     energy_core += sum([np.einsum('ij,ji', core_dm[k], hcore[k]) 
                         for k in range(nkpts)])
     energy_core += sum([eris.vhf_c[k][:ncore,:ncore].trace() 
                         for k in range(nkpts)])
-    
     # h1, and h2 in mo basis
     h1eff = np.asarray([reduce(np.dot, (mo_cas[k].conj().T, hcore[k], mo_cas[k])) 
                         for k in range(nkpts)])
@@ -1329,8 +1363,7 @@ def _fake_h_for_fast_casci(casscf, mo, mo_phase, eris):
     eri_k = np.empty((nkpts,nkpts,nkpts, ncas, ncas, ncas, ncas), dtype=dtype)
 
     for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
-        print(eris.ppaa(k1,k2,k3)[ncore:nocc,ncore:nocc,ncore:nocc,ncore:nocc].shape, eri_k.shape)
-        eri_k[k1,k2,k3] = eris.ppaa(k1,k2,k3)[ncore:nocc,ncore:nocc,ncore:nocc,ncore:nocc]
+        eri_k[k1,k2,k3] = eris.ppaa(k1,k2,k3)[ncore:nocc,ncore:nocc, :, :]
     
     eri_cas = np.einsum('auR,bvS,abcuvwt,cwT,abctU->RSTU',
                          mo_phase.conj(), mo_phase, eri_k, mo_phase.conj(), mo_ks, optimize=True)
