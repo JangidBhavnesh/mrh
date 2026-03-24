@@ -136,28 +136,27 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
         dm1[k][ncore:nocc, ncore:nocc] = casdm1_k
         casdm1_kpts[k] = casdm1_k
     
-    # Sanity checks.
-    log.debug("Number of electrons in the CAS space: %s",  
-              sum([casdm1_kpts[k].trace() for k in range(nkpts)]).real)
-    if log.verbose >= logger.DEBUG1:
-        for k in range(nkpts):
-            log.debug1("Number of electrons in the CAS space for k-point %s: %s", 
-                       k, casdm1_kpts[k].trace().real)
-            
     casdm2_kpts = np.zeros((nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas), dtype=dtype)
 
     for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
         k4 = kconserv[k1, k2, k3]
-        dm2_k = np.einsum('iP, jQ, PQRS, kR, lS->ijkl', 
+        dm2_k = np.einsum('iP, jQ, PQRS, kR, lS->ijkl',
                                       mo_phase[k1].conj(), mo_phase[k2], casdm2, mo_phase[k3].conj(), mo_phase[k4])
         casdm2_kpts[k1, k2, k3] = dm2_k
     
     # Sanity checks.
-    log.debug("Number of electron: %s", np.einsum('ppqq->', casdm2).real)
-    log.debug("Number of electrons in the CAS space from casdm2: %s", 
-               sum([np.einsum('ppqq->', casdm2_kpts[k1,k1,k3]) 
-                    for k1 in range(nkpts) 
-                    for k3 in range(nkpts)]).real)
+    if log.verbose >= logger.DEBUG1:
+        log.debug("Number of electrons in the CAS space: %s",  
+              sum([casdm1_kpts[k].trace() for k in range(nkpts)]).real)
+        for k in range(nkpts):
+            log.debug1("Number of electrons in the CAS space for k-point %s: %s", 
+                       k, casdm1_kpts[k].trace().real)
+        
+        log.debug("Number of electron: %s", np.einsum('ppqq->', casdm2).real)
+        log.debug("Number of electrons in the CAS space from casdm2: %s", 
+                   sum([np.einsum('ppqq->', casdm2_kpts[k1,k1,k3]) 
+                        for k1 in range(nkpts) 
+                        for k3 in range(nkpts)]).real)
     
     # Construct the potential
     jkcaa = np.zeros((nkpts, nocc, ncas), dtype=dtype)
@@ -166,16 +165,16 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
 
     # TODO: Should host the hdm2 on the disk.
     hdm2 = np.zeros((nkpts, nkpts, nkpts, nmo, ncas, nmo, ncas), dtype=dtype)
-    
-    reshape_ = (nmo, nmo, ncas, ncas)
+
     # Collect the contribution from different k1, k2 and k3 whenever they are
     # equals to momentum of the output entity.
     for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
         k4 = kconserv[k1, k2, k3]
         k = k1
         # I think we should not loop over nmo, because it will be solved for 
-        # a given k-point. To remove the loop over nmo, as done in the molecular
-        # code, I have first converted that code without for loop, matched it with loop.
+        # a given k-point, means the number of orbitals would be way small than total system. 
+        # To remove the loop over nmo, as done in the molecular code, I have first converted 
+        # that code without for loop, matched it with loop.
         # That code is:
         # ppaa = eris.ppaa
         # papa = eris.papa
@@ -211,7 +210,7 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
             dm2 = casdm2_kpts[k2, k4, k2] # (k2, k1, k2, k1)
             dm2m = dm2.reshape(ncasncas, ncasncas)
             ppaa = eris.ppaa(k1, k3, k2) # (k1, k2, k2, k1)
-            jtmp = lib.dot(ppaa.reshape(nmonmo, ncasncas), dm2m).reshape(reshape_) # (k1, k2, k2, k1)
+            jtmp = lib.dot(ppaa.reshape(nmonmo, ncasncas), dm2m).reshape(nmo, nmo, ncas, ncas) # (k1, k2, k2, k1)
             g_dm2[k] += np.einsum('puuv->pv', jtmp[:, ncore:nocc, :, :]) # (k1, k1)
 
         k4 = kconserv[k1, k2, k3]
@@ -220,7 +219,7 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
             ppaa = eris.ppaa(k1, k3, k2) # (k1, k3, k2, k4j)
             dm2j = casdm2_kpts[k2, k4j, k2]    # (k2, k4j, k2, k4)
             dm2jm = dm2j.reshape(ncasncas, ncasncas)
-            jtmp = lib.dot(ppaa.reshape(nmonmo, ncasncas),dm2jm).reshape(reshape_) # (k1, k3, k2, k4)
+            jtmp = lib.dot(ppaa.reshape(nmonmo, ncasncas),dm2jm).reshape(nmo, nmo, ncas, ncas) # (k1, k3, k2, k4)
             hdm2[k1, k2, k3] += jtmp.conj().transpose(0, 2, 1, 3) # (k1, k2, k3, k4)
 
         papa = eris.papa(k1, k2, k3) # (k1, k2, k3, k4)
@@ -962,7 +961,6 @@ class PBCCASSCF(casci.PBCCASBASE):
                     log.info('CASCI E = %#.15g  S^2 = %.7f', e_tot.real, ss[0].real)
         return e_tot, e_cas, fcivec
 
-
     # casci = molCASSCF.casci
     uniq_var_indices = molCASSCF.uniq_var_indices
 
@@ -1126,8 +1124,7 @@ class PBCCASSCF(casci.PBCCASBASE):
                 h1[k] += jk # k-space (mo-basis)
                 
             h1_R = lib.einsum('xui,xuv,xvj->ij', mo_phase1.conj(), h1, mo_phase1) # transform to R-space basis
-            # print(h1_R.real)
-            # h2e term
+            
             '''
             ppaa = np.einsum('ps, qt, pquv -> stuv', ua, ua, eris.ppaa)
             papa = np.einsum('ps, qt, puqv -> sutv', ua, ua, eris.papa)
@@ -1225,7 +1222,7 @@ class PBCCASSCF(casci.PBCCASBASE):
         hc = contract_2e(ci0)
 
         g = hc - e_ci * ci0.ravel()
-        
+
         if self.ci_response_space > 7 or ci0.size <= self.fcisolver.pspace_size:
             logger.debug(self, 'CI step by full response')
             max_memory = max(400, self.max_memory - lib.current_memory()[0])
@@ -1269,10 +1266,26 @@ class PBCCASSCF(casci.PBCCASBASE):
         return ci1, g
     
 
-    def get_grad(self, *args, **kwargs):
-        # TODO: Implement this.
-        pass
-    
+    def get_grad(self, mo_coeff=None, casdm1_casdm2=None, eris=None):
+        '''
+        Orbital gradients: differentiation of total energy with orbital 
+        rotations.
+        '''
+        if mo_coeff is None: mo_coeff = self.mo_coeff
+        if eris is None: eris = self.ao2mo(mo_coeff)
+        # The mo_phase is needed for the transformation of the integrals to R-space. 
+        # I will just compute it here.
+        mo_phase = get_mo_coeff_k2R(self._scf, mo_coeff, self.ncore, self.ncas)[-1]
+        if casdm1_casdm2 is None:
+            nkpts = self.nkpts
+            ncastot = nkpts * self.ncas
+            nelecas = (nkpts * self.nelecas[0], nkpts * self.nelecas[1])
+            civec = self.casci(mo_coeff, mo_phase, self.ci, eris)[2]
+            casdm1, casdm2 = self.fcisolver.make_rdm12(civec, ncastot, nelecas)
+        else:
+            casdm1, casdm2 = casdm1_casdm2
+        return self.gen_g_hop(mo_coeff, mo_phase, 1, casdm1, casdm2, eris)[0]
+
     def _exact_paaa(self, mo_kpts, u_kpts, out=None):
         '''
         # In the molecular code, the paaa term is created which is then
@@ -1308,6 +1321,7 @@ class PBCCASSCF(casci.PBCCASBASE):
 
     def update_from_chk(self, chkfile=None):
         raise NotImplementedError('update_from_chk is not implemented for PBC-CASSCF yet')
+    
     update = update_from_chk
 
     def rotate_mo(self, mo_coeff, u, log=None):
@@ -1400,6 +1414,7 @@ def block_diag_to_kblocks(mat, nkpts, nmo):
                      for k in range(nkpts)])
 
 from mrh.my_pyscf.pbc.mcscf.casci import PBCCASCI
+
 def _fake_h_for_fast_casci(casscf, mo, mo_phase, eris):
     mc = casscf.view(PBCCASCI)
     mc.mo_coeff = mo
