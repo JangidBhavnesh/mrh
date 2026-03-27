@@ -189,9 +189,11 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
         # jkcaa -= 2.0 * numpy.einsum('iiuv,uv->iu',ppaa[:nocc, :nocc, :, :], casdm1)
         # papa = ppaa = jtmp = ktmp = dm2tmp = None
 
+        ppaa = eris.ppaa(k1, k2, k3) # (k1, k2, k3, k4)
+        papa = eris.papa(k1, k2, k3) # (k1, k2, k3, k4)
+
         if k3 == k4 and k1 == k2:
             # assert kconserv[k1, k1, k3] == k3
-            ppaa = eris.ppaa(k1, k2, k3) # (k1, k1, k3, k3)
             vhf_a[k] += np.einsum('pquv,uv->pq', ppaa, casdm1_kpts[k3]) # (k1,k1)
             if k1 == k3:
                 # assert kconserv[k1, k1, k1] == k1
@@ -199,19 +201,16 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
         
         if k2 == k4 and k1 == k3:
             # assert kconserv[k1, k2, k1] == k2
-            papa = eris.papa(k1, k2, k3) # (k1, k2, k1, k2) 
             vhf_a[k] -= 0.5*np.einsum('puqv,uv->pq', papa, casdm1_kpts[k2]) # (k1,k1)
             if k1 == k2:
                 # assert kconserv[k1, k1, k1] == k1
                 jkcaa[k]  += 6.0 * np.einsum('iuiv,uv->iu', papa[:nocc, :, :nocc, :], casdm1_kpts[k2]) # (k1,k1) 
 
-        if k2 == k3 and k1 == k4:
-            # assert kconserv[k2, k4, k2] == k4
-            dm2 = casdm2_kpts[k2, k4, k2] # (k2, k1, k2, k1)
-            dm2m = dm2.reshape(ncasncas, ncasncas)
-            ppaa = eris.ppaa(k1, k3, k2) # (k1, k2, k2, k1)
-            jtmp = lib.dot(ppaa.reshape(nmonmo, ncasncas), dm2m).reshape(nmo, nmo, ncas, ncas) # (k1, k2, k2, k1)
-            g_dm2[k] += np.einsum('puuv->pv', jtmp[:, ncore:nocc, :, :]) # (k1, k1)
+        kv = kconserv[k2, k1, k4]
+        if kv == k3:
+            dm2_blk  = casdm2_kpts[k2, k1, k4] # (k2, k1, k4, k3)
+            jtmp = np.einsum('pqvw, utwv->pqut', ppaa, dm2_blk)
+            g_dm2[k1] += 1/nkpts *np.einsum('puuv->pv', jtmp[:, ncore:nocc, :, :])
 
         k4 = kconserv[k1, k2, k3]
         k4j = kconserv[k1, k3, k2]
@@ -222,7 +221,6 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
             jtmp = lib.dot(ppaa.reshape(nmonmo, ncasncas),dm2jm).reshape(nmo, nmo, ncas, ncas) # (k1, k3, k2, k4)
             hdm2[k1, k2, k3] += jtmp.conj().transpose(0, 2, 1, 3) # (k1, k2, k3, k4)
 
-        papa = eris.papa(k1, k2, k3) # (k1, k2, k3, k4)
         if kconserv[k2, k4, k2] == k4:
             dm2x = casdm2_kpts[k2, k4, k2]   # (k2, k4, k2, k4)
             ktmp = np.einsum('puqv,uvrs->pqrs', papa, dm2x, optimize=True) # (k1, k3, k2, k4)
@@ -240,17 +238,18 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
     g = np.zeros((nkpts,nmo,nmo), dtype=dtype)
 
     hcore = mc.get_hcore() # (nkpts, nao, nao)
+
     for k in range(nkpts):
         vhf_ca[k] = eris.vhf_c[k] + vhf_a[k]
         h1e_mo[k] = reduce(np.dot, (mo_coeff[k].conj().T, hcore[k], mo_coeff[k])) # (block orbital MO basis)
     
+    hcore = None
+
     # Orbital Gradients:
     for k in range(nkpts):
         g[k][:,:ncore] = 2.0 * (h1e_mo[k][:,:ncore] + vhf_ca[k][:,:ncore])
         g[k][:,ncore:nocc] = np.dot(h1e_mo[k][:, ncore:nocc] + eris.vhf_c[k][:, ncore:nocc], casdm1_kpts[k])
         g[k][:,ncore:nocc] += g_dm2[k]
-    
-    hcore = None
 
     def gorb_update(u, fcivec):
         # Note: currently I am using the CIAH not the k-CIAH, so the update matrix is packed into
