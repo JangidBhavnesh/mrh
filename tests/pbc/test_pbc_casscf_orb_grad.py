@@ -25,7 +25,7 @@ class KnownValues(unittest.TestCase):
         cell.max_memory = 100000
         cell.ke_cutoff = 100
         cell.precision = 1e-12
-        cell.verbose = lib.logger.INFO
+        cell.verbose = 0
         cell.build()
 
         kmesh1D = [3, 1, 1]
@@ -48,7 +48,8 @@ class KnownValues(unittest.TestCase):
         kmf_orb_grad = kmf.get_grad(mo_ref, kmf.mo_occ)
         kmc_orb_grad = kmc.get_grad(mo_coeff=mo_ref)
 
-        assert np.allclose(kmf_orb_grad, kmc_orb_grad, atol=1e-7)
+        for a, b in zip(kmf_orb_grad, kmc_orb_grad):
+            self.assertAlmostEqual(a, b, places=7)
 
 if __name__ == "__main__":
     # Orbital gradient test for k-CASSCF.
