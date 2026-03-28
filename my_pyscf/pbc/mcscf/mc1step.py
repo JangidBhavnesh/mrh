@@ -1,4 +1,3 @@
-import os
 import sys
 import numpy as np
 import scipy
@@ -200,37 +199,37 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
         if k2 == k4 and k1 == k3:
             papa = mc._scf.with_df.ao2mo([mo_coeff[k1], mo_coeff[k2][:, ncore:nocc], mo_coeff[k2][:, ncore:nocc], mo_coeff[k1]],
                                                           kpts=[kpts[k1], kpts[k2], kpts[k2], kpts[k1]], 
-                                                          compact=False).reshape(nmo, ncas, ncas, nmo)
+                                                          compact=False).reshape(nmo, ncas, ncas, nmo) 
             vhf_a[k] -= 0.5/nkpts * np.einsum('puvq,uv->pq', papa, casdm1_kpts[k2])
-            # if k1 == k2:
-            #     # assert kconserv[k1, k1, k1] == k1
-            #     jkcaa[k]  += 6.0 * np.einsum('iuiv,uv->iu', papa[:nocc, :, :nocc, :], casdm1_kpts[k2]) # (k1,k1) 
-        papa = eris.papa(k1, k2, k3) # (k1, k2, k3, k4)
-        kv = kconserv[k2, k1, k4]
-        if kv == k3:
-            dm2_blk  = casdm2_kpts[k2, k1, k4] # (k2, k1, k4, k3)
-            jtmp = np.einsum('pqvw, utwv->pqut', ppaa, dm2_blk)
-            g_dm2[k1] += 1/nkpts *np.einsum('puuv->pv', jtmp[:, ncore:nocc, :, :])
+            if k1 == k2:
+                papa = eris.papa(k1, k2, k3) # (k1, k2, k3, k4)
+                jkcaa[k]  += 6.0 * np.einsum('iuiv,uv->iu', papa[:nocc, :, :nocc, :], casdm1_kpts[k2]) # (k1,k1) 
+        
+        ppaa = eris.ppaa(k1, k2, k3)   # (k1, k2, k3, k4)
+        kv = kconserv[k1, k2, k3]
+        if kv == k4:
+            dm2_blk = casdm2_kpts[k1, k2, k3]   # (k1, k2, k3, k4)
+            jtmp = 1/nkpts * np.einsum('pqvw,tuvw->pqut', ppaa, dm2_blk)
+            g_dm2[k1] += np.einsum('puuv->pv', jtmp[:, ncore:nocc, :, :])
 
-        if False:
-            k4 = kconserv[k1, k2, k3]
-            k4j = kconserv[k1, k3, k2]
-            if kconserv[k2, k4j, k2] == k4:
-                ppaa = eris.ppaa(k1, k3, k2) # (k1, k3, k2, k4j)
-                dm2j = casdm2_kpts[k2, k4j, k2]    # (k2, k4j, k2, k4)
-                dm2jm = dm2j.reshape(ncasncas, ncasncas)
-                jtmp = lib.dot(ppaa.reshape(nmonmo, ncasncas),dm2jm).reshape(nmo, nmo, ncas, ncas) # (k1, k3, k2, k4)
-                hdm2[k1, k2, k3] += jtmp.conj().transpose(0, 2, 1, 3) # (k1, k2, k3, k4)
+        k4 = kconserv[k1, k2, k3]
+        k4j = kconserv[k1, k3, k2]
+        if kconserv[k2, k4j, k2] == k4:
+            ppaa = eris.ppaa(k1, k3, k2) # (k1, k3, k2, k4j)
+            dm2j = casdm2_kpts[k2, k4j, k2]    # (k2, k4j, k2, k4)
+            dm2jm = dm2j.reshape(ncasncas, ncasncas)
+            jtmp = lib.dot(ppaa.reshape(nmonmo, ncasncas),dm2jm).reshape(nmo, nmo, ncas, ncas) # (k1, k3, k2, k4)
+            hdm2[k1, k2, k3] += jtmp.conj().transpose(0, 2, 1, 3) # (k1, k2, k3, k4)
 
-            if kconserv[k2, k4, k2] == k4:
-                dm2x = casdm2_kpts[k2, k4, k2]   # (k2, k4, k2, k4)
-                ktmp = np.einsum('puqv,uvrs->pqrs', papa, dm2x, optimize=True) # (k1, k3, k2, k4)
-                hdm2[k1, k2, k3] += ktmp.conj().transpose(0, 2, 1, 3)  # (k1, k2, k3, k4)
+        if kconserv[k2, k4, k2] == k4:
+            dm2x = casdm2_kpts[k2, k4, k2]   # (k2, k4, k2, k4)
+            ktmp = np.einsum('puqv,uvrs->pqrs', papa, dm2x, optimize=True) # (k1, k3, k2, k4)
+            hdm2[k1, k2, k3] += ktmp.conj().transpose(0, 2, 1, 3)  # (k1, k2, k3, k4)
 
-            if kconserv[k2, k2, k4] == k4: # This is redundant, still keeping it for safety.
-                dm2x = casdm2_kpts[k2, k2, k4]   # (k2, k2, k4, k4)
-                ktmp = np.einsum('puqv,urvs->pqrs', papa, dm2x, optimize=True) # (k1, k3, k2, k4)
-                hdm2[k1, k2, k3] += ktmp.conj().transpose(0, 2, 1, 3)  # (k1, k2, k3, k4)
+        if kconserv[k2, k2, k4] == k4: # This is redundant, still keeping it for safety.
+            dm2x = casdm2_kpts[k2, k2, k4]   # (k2, k2, k4, k4)
+            ktmp = np.einsum('puqv,urvs->pqrs', papa, dm2x, optimize=True) # (k1, k3, k2, k4)
+            hdm2[k1, k2, k3] += ktmp.conj().transpose(0, 2, 1, 3)  # (k1, k2, k3, k4)
 
     ppaa = papa = jtmp = ktmp = temp = None
     
