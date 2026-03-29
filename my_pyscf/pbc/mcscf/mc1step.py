@@ -100,6 +100,8 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
             Diagonal of the Hessian matrix. This is used for preconditioning in the Davidson solver.
     '''
 
+    kmf = mc._scf
+    cell = kmf.cell
     ncas = mc.ncas
     nelecas = mc.nelecas
     nkpts = mc.nkpts
@@ -108,13 +110,13 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
     nmo = mo_coeff[0].shape[1]
     dtype = casdm1.dtype
 
-    kpts = mc._scf.kpts
+    kpts = kmf.kpts
     
     ncasncas = ncas*ncas
     nmonmo = nmo*nmo
     ncastot = nkpts*ncas
 
-    kconserv = kpts_helper.get_kconserv(mc._scf.cell, mc._scf.kpts)
+    kconserv = kpts_helper.get_kconserv(cell, kpts)
 
     log = logger.new_logger(mc, mc.verbose)
 
@@ -198,7 +200,7 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
         
         # if k2 == k4 and k1 == k3:
         if (k1 == k4) and (k2 == k3):
-            papa = mc._scf.with_df.ao2mo([mo_coeff[k1], mo_coeff[k2][:, ncore:nocc], mo_coeff[k2][:, ncore:nocc], mo_coeff[k1]],
+            papa = kmf.with_df.ao2mo([mo_coeff[k1], mo_coeff[k2][:, ncore:nocc], mo_coeff[k2][:, ncore:nocc], mo_coeff[k1]],
                                                           kpts=[kpts[k1], kpts[k2], kpts[k2], kpts[k1]], 
                                                           compact=False).reshape(nmo, ncas, ncas, nmo) 
             vhf_a[k] -= 0.5/nkpts * np.einsum('puvq,uv->pq', papa, casdm1_kpts[k2])
@@ -258,13 +260,14 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
         # one giant matrix. This will need restructure once I switch to k-CIAH.
         u = block_diag_to_kblocks(u, nkpts, nmo)
         assert u.shape == (nkpts, nmo, nmo)
-        
+
         # Doing this transformation to get the mo_phase which would be required to 
         # transofrmation of casdm1 and casdm2.
-        mo1 = [np.dot(mo_coeff[k], u[k]) for k in range(nkpts)]
-        mo_phase1 = get_mo_coeff_k2R(mc._scf, mo1, ncore, ncas)[-1]
+        mo1 = np.array([np.dot(mo_coeff[k], u[k]) 
+                        for k in range(nkpts)])
+        mo_phase1 = get_mo_coeff_k2R(kmf, mo1, ncore, ncas)[-1]
 
-        g = np.zeros((nkpts, nmo, nmo), dtype=dtype)
+        # Compute the RDMs        
         ncastot = nkpts * ncas
         nelectot = (nkpts*nelecas[0], nkpts*nelecas[1])
         casdm1, casdm2 = mc.fcisolver.make_rdm12(fcivec, ncastot, nelectot)
@@ -277,77 +280,80 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
                               mo_phase1[k3].conj(), mo_phase1[k4])
             return dm2_k
         
+        # To update the gradients:
+        nao = mo_coeff[0].shape[0]
+        g = np.zeros((nkpts, nmo, nmo), dtype=dtype)
+        dm_core_kpts = np.empty((nkpts, nao, nao), dtype=dtype)
+        dm_act_kpts =  np.empty((nkpts, nao, nao), dtype=dtype)
+
         for k in range(nkpts):
             uc = u[k][:, :ncore].copy()
             ua = u[k][:, ncore:nocc].copy()
             mo_c = np.dot(mo_coeff[k], uc)
             mo_a = np.dot(mo_coeff[k], ua)
-            dm_c = 2.0 * np.dot(mo_c, mo_c.conj().T)
+            dm_core_kpts[k] = 2.0 * np.dot(mo_c, mo_c.conj().T)
             casdm1_k = reduce(np.dot, (mo_phase1[k], casdm1, mo_phase1[k].conj().T))
-            dm_a = reduce(np.dot, (mo_a, casdm1_k, mo_a.conj().T))
-            vj, vk = mc.get_jk(mc._scf.cell, dm_c, kpts_band=kpts[k])
-            vhf_c = reduce(np.dot, (mo1[k].conj().T, vj-vk*0.5, mo1[k][:,:nocc]))
-            vj, vk = mc.get_jk(mc._scf.cell, dm_a, kpts_band=kpts[k])
-            vhf_a = reduce(np.dot, (mo1[k].conj().T, vj-vk*0.5, mo1[k][:,:nocc]))
-            h1e_mo1k = reduce(np.dot, (u[k].conj().T, h1e_mo[k], u[k][:,:nocc]))
+            dm_act_kpts[k] = reduce(np.dot, (mo_a, casdm1_k, mo_a.conj().T))
 
+        # Now compute the vj and vk for the core and active density matrices separately, 
+        # then contract with the mo1 to get the vhf in the mo1 basis.
+        vj_k, vk_k = mc.get_jk(cell, dm_core_kpts, kpts, hermi=1, exxdiv=None)
+
+        vhf_c = np.array([reduce(
+            np.dot, (mo1[k].conj().T, vj_k[k]-vk_k[k]*0.5, mo1[k][:,:nocc])) 
+            for k in range(nkpts)])
+        
+        vj_k, vk_k = mc.get_jk(cell, dm_act_kpts, kpts, hermi=1, exxdiv=None)
+
+        vhf_a = np.array([reduce(
+            np.dot, (mo1[k].conj().T, vj_k[k]-vk_k[k]*0.5, mo1[k][:,:nocc])) 
+            for k in range(nkpts)])
+
+        for k in range(nkpts):
+            h1e_mo1k = reduce(np.dot, (u[k].conj().T, h1e_mo[k], u[k][:,:nocc]))
             g[k][:, :ncore] = 2.0 * (h1e_mo1k[:,:ncore] + vhf_c[:,:ncore] + vhf_a[:,:ncore])
             g[k][:,ncore:nocc] = np.dot(h1e_mo1k[:,ncore:nocc] + vhf_c[:,ncore:nocc], casdm1_k)
 
-            # These objects would be insanly huge. Instead of creating them and storing, I think I should 
-            # compute them on the fly whenever they are required.
-            # p1aa = np.empty((nkpts, nkpts, nkpts, nmo, ncas, ncasncas), dtype=dtype)
-            # paa1 = np.empty((nkpts, nkpts, nkpts, nmo, ncasncas, ncas), dtype=dtype)
-            # aaaa = np.empty((nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas), dtype=dtype)
-            # for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
-            #     k4 = kconserv[k1, k2, k3]
-            #     if not k4 == k:
-            #         pass
-            #     else:
-            #         jbuf = eris.ppaa[k1, k2, k3]
-            #         kbuf = eris.papa[k1, k2, k3]
-            #         p1aa[k1, k2, k3] = np.einsum('pu, pqm-> qum', ua, jbuf.reshape(nmo, nmo, -1))
-            #         paa1[k1, k2, k3] = np.einsum('pqm, pu-> qmu', kbuf.conj().transpose(0,2,1,3).reshape(nmo, nmo, -1), ra)
-            #         aaaa[k1, k2, k3] = jbuf[ncore:nocc, ncore:nocc, :, :]
-            
-            # Benchmarked on the molecular code.
-            # ppaa = eris.ppaa
-            # papa = eris.papa
-            # p1aa = numpy.einsum('pr, tq, rquv-> ptuv', u.T, ua.T, ppaa)
-            # paa1 = numpy.einsum('pr, ruvq, qt -> puvt', u.T, papa.transpose(0,1,3,2), ra)
-            # p1aa += paa1
-            # p1aa += paa1.transpose(0,1,3,2)
-            # g[:, :ncore:nocc] += np.einsum('puwx, wxuv->pu', p1aa, casdm2)
-            for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
-                k4 = kconserv[k1, k2, k3]
-                if k1 != k: continue
-                else:
-                    # ppaa has (k1, k2, k3, k4) and dm2_k would be of moemntum (k3,k4,k2,k1)
-                    # then only it contribute to the grad. Similar logic is also used for the papa.
-                    if kconserv[k3, k4, k2] == k1:
-                        # coulomb contribution
-                        ppaa = eris.ppaa(k1, k2, k3) # (k1, k2, k3, k4)
-                        ua = u[k2][:, ncore:nocc].copy() # (k2, k2)
-                        p1aa = np.einsum('pr, tq, rquv-> ptuv', u[k1].conj().T, ua.conj().T, ppaa) # (k1, k2, k3, k4)
-                        dm2_k = _get_casdm2_kpts(casdm2, mo_phase1, (k3, k4, k2, k1)) # (k3, k4, k2, k1)
-                        # g[k][:, ncore:nocc] += np.einsum('puwx,wxuv->pv', p1aa, dm2_k) # (k1, k1)
+        vj_k = vk_k = vhf_a = vhf_c = h1e_mo1k = dm_core_kpts = dm_act_kpts = None
 
-                        # exchange contribution-1
-                        papa = eris.papa(k1, k2, k3) # (k1, k2, k3, k4)
-                        ra = (u[k3] - np.eye(nmo, dtype=dtype))[:, ncore:nocc] # (k3, k3)
-                        paa1 = np.einsum('pr, ruqv, qt -> putv', u[k].conj().T, papa, ra) # (k1, k2, k3, k4)
-                        # g[k][:, ncore:nocc] += np.einsum('puwx,wxuv->pv', paa1, dm2_k) # (k1, k1)
-                        p1aa = p1aa + paa1
-                        g[k][:, ncore:nocc] += np.einsum('puwx,wxuv->pv', paa1, dm2_k) # (k1, k1)
+        # These objects would be insanly huge. Instead of creating them and storing, I think I should 
+        # compute them on the fly whenever they are required.
+        # Benchmarked on the molecular code.
+        # ppaa = eris.ppaa
+        # papa = eris.papa
+        # p1aa = numpy.einsum('pr, tq, rquv-> ptuv', u.T, ua.T, ppaa)
+        # paa1 = numpy.einsum('pr, ruvq, qt -> puvt', u.T, papa.transpose(0,1,3,2), ra)
+        # p1aa += paa1
+        # p1aa += paa1.transpose(0,1,3,2)
+        # g[:, :ncore:nocc] += np.einsum('puwx, wxuv->pu', p1aa, casdm2)
+        for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
+            k4 = kconserv[k1, k2, k3]
+            # ppaa has (k1, k2, k3, k4) and dm2_k would be of moemntum (k3,k4,k2,k1)
+            # then only it contribute to the grad. Similar logic is also used for the papa.
+            if kconserv[k3, k4, k2] == k1:
+                # coulomb contribution
+                ppaa = eris.ppaa(k1, k2, k3) # (k1, k2, k3, k4)
+                ua = u[k2][:, ncore:nocc].copy() # (k2, k2)
+                p1aa = np.einsum('pr, tq, rquv-> ptuv', u[k1].conj().T, ua.conj().T, ppaa) # (k1, k2, k3, k4)
+                dm2_k = _get_casdm2_kpts(casdm2, mo_phase1, (k3, k4, k2, k1)) # (k3, k4, k2, k1)
+                # g[k][:, ncore:nocc] += np.einsum('puwx,wxuv->pv', p1aa, dm2_k) # (k1, k1)
 
-                    # exchange contribution-2       
-                    if kconserv[k4, k3, k2] == k1:
-                        papa = eris.papa(k1, k2, k3) # (k1, k2, k3, k4)
-                        ra = (u[k3] - np.eye(nmo, dtype=dtype))[:, ncore:nocc] # (k3, k3)
-                        paa1 = np.einsum('pr, ruqv, qt -> puvt', u[k].conj().T, papa, ra) # (k1, k2, k4, k3)
-                        dm2_k = _get_casdm2_kpts(casdm2, mo_phase1, (k4, k3, k2, k1)) # (k4, k3, k2, k1)
-                        g[k][:, ncore:nocc] += np.einsum('puwx, wxuv->pv', paa1, dm2_k) # (k1, k1)
-        
+                # exchange contribution-1
+                papa = eris.papa(k1, k2, k3) # (k1, k2, k3, k4)
+                ra = (u[k3] - np.eye(nmo, dtype=dtype))[:, ncore:nocc] # (k3, k3)
+                paa1 = np.einsum('pr, ruqv, qt -> putv', u[k1].conj().T, papa, ra) # (k1, k2, k3, k4)
+                # g[k][:, ncore:nocc] += np.einsum('puwx,wxuv->pv', paa1, dm2_k) # (k1, k1)
+                p1aa = p1aa + paa1
+                g[k1][:, ncore:nocc] += np.einsum('puwx,wxuv->pv', paa1, dm2_k) # (k1, k1)
+
+            # exchange contribution-2       
+            if kconserv[k4, k3, k2] == k1:
+                papa = eris.papa(k1, k2, k3) # (k1, k2, k3, k4)
+                ra = (u[k3] - np.eye(nmo, dtype=dtype))[:, ncore:nocc] # (k3, k3)
+                paa1 = np.einsum('pr, ruqv, qt -> puvt', u[k1].conj().T, papa, ra) # (k1, k2, k4, k3)
+                dm2_k = _get_casdm2_kpts(casdm2, mo_phase1, (k4, k3, k2, k1)) # (k4, k3, k2, k1)
+                g[k1][:, ncore:nocc] += np.einsum('puwx, wxuv->pv', paa1, dm2_k) # (k1, k1)
+    
         papa = ppaa = p1aa = paa1 = None
         return np.hstack([mc.pack_uniq_var(grd - grd.conj().T) for grd in g])    
     
