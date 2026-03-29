@@ -254,7 +254,6 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
         g[k][:,ncore:nocc] = np.dot(h1e_mo[k][:, ncore:nocc] + eris.vhf_c[k][:, ncore:nocc], casdm1_kpts[k])
         g[k][:,ncore:nocc] += g_dm2[k]
 
-
     def gorb_update(u, fcivec):
         # Note: currently I am using the CIAH not the k-CIAH, so the update matrix is packed into
         # one giant matrix. This will need restructure once I switch to k-CIAH.
@@ -297,23 +296,25 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
 
         # Now compute the vj and vk for the core and active density matrices separately, 
         # then contract with the mo1 to get the vhf in the mo1 basis.
-        vj_k, vk_k = mc.get_jk(cell, dm_core_kpts, kpts, hermi=1, exxdiv=None)
+        vj_k, vk_k = mc._scf.get_jk(cell, dm_kpts=dm_core_kpts, hermi=1, 
+                                    with_j=True, with_k=True, kpts=kpts, exxdiv=None)
 
         vhf_c = np.array([reduce(
             np.dot, (mo1[k].conj().T, vj_k[k]-vk_k[k]*0.5, mo1[k][:,:nocc])) 
             for k in range(nkpts)])
         
-        vj_k, vk_k = mc.get_jk(cell, dm_act_kpts, kpts, hermi=1, exxdiv=None)
-
+        vj_k, vk_k = mc._scf.get_jk(cell, dm_kpts=dm_act_kpts, hermi=1, 
+                                    kpts=kpts, with_j=True, with_k=True,exxdiv=None)
         vhf_a = np.array([reduce(
             np.dot, (mo1[k].conj().T, vj_k[k]-vk_k[k]*0.5, mo1[k][:,:nocc])) 
             for k in range(nkpts)])
 
         for k in range(nkpts):
+            casdm1_k = reduce(np.dot, (mo_phase1[k], casdm1, mo_phase1[k].conj().T))
             h1e_mo1k = reduce(np.dot, (u[k].conj().T, h1e_mo[k], u[k][:,:nocc]))
-            g[k][:, :ncore] = 2.0 * (h1e_mo1k[:,:ncore] + vhf_c[:,:ncore] + vhf_a[:,:ncore])
-            g[k][:,ncore:nocc] = np.dot(h1e_mo1k[:,ncore:nocc] + vhf_c[:,ncore:nocc], casdm1_k)
-
+            g[k][:, :ncore] = 2.0 * (h1e_mo1k[:,:ncore] + vhf_c[k][:,:ncore] + vhf_a[k][:,:ncore])
+            g[k][:,ncore:nocc] = np.dot(h1e_mo1k[:,ncore:nocc] + vhf_c[k][:,ncore:nocc], casdm1_k)
+        
         vj_k = vk_k = vhf_a = vhf_c = h1e_mo1k = dm_core_kpts = dm_act_kpts = None
 
         # These objects would be insanly huge. Instead of creating them and storing, I think I should 
@@ -328,31 +329,23 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
         # g[:, :ncore:nocc] += np.einsum('puwx, wxuv->pu', p1aa, casdm2)
         for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
             k4 = kconserv[k1, k2, k3]
-            # ppaa has (k1, k2, k3, k4) and dm2_k would be of moemntum (k3,k4,k2,k1)
-            # then only it contribute to the grad. Similar logic is also used for the papa.
-            if kconserv[k3, k4, k2] == k1:
-                # coulomb contribution
-                ppaa = eris.ppaa(k1, k2, k3) # (k1, k2, k3, k4)
-                ua = u[k2][:, ncore:nocc].copy() # (k2, k2)
-                p1aa = np.einsum('pr, tq, rquv-> ptuv', u[k1].conj().T, ua.conj().T, ppaa) # (k1, k2, k3, k4)
-                dm2_k = _get_casdm2_kpts(casdm2, mo_phase1, (k3, k4, k2, k1)) # (k3, k4, k2, k1)
-                # g[k][:, ncore:nocc] += np.einsum('puwx,wxuv->pv', p1aa, dm2_k) # (k1, k1)
+            # Coloumb contribution
+            ppaa = eris.ppaa(k1, k2, k3) # (k1, k2, k3, k4)
+            ua = np.array(u[k2][:, ncore:nocc]).copy() # (k2, k2)
+            p1aa = 1/nkpts * np.einsum('pr, tq, rquv-> ptuv', u[k1].conj().T, ua.conj().T, ppaa) # (k1, k2, k3, k4)
+            dm2_k = _get_casdm2_kpts(casdm2, mo_phase1, (k1, k2, k3, k4))
+            g[k1][:, ncore:nocc] += np.einsum('puuv->pv', np.einsum('pqvw,tuvw->pqut', p1aa, dm2_k)) # (k1, k1)
+           
+            # Exchange contribution-1
+            papa = eris.papa(k1, k2, k3) # (k1, k2, k3, k4)
+            ra = (u[k3] - np.eye(nmo, dtype=dtype))[:, ncore:nocc] # (k3, k3)
+            paa1 = 1/nkpts * np.einsum('pr, ruqv, qt -> putv', u[k1].conj().T, papa, ra) # (k1, k2, k3, k4)
+            g[k1][:, ncore:nocc] += np.einsum('puuv->pv', np.einsum('pqvw,tuvw->pqut', paa1, dm2_k)) # (k1, k1)
 
-                # exchange contribution-1
-                papa = eris.papa(k1, k2, k3) # (k1, k2, k3, k4)
-                ra = (u[k3] - np.eye(nmo, dtype=dtype))[:, ncore:nocc] # (k3, k3)
-                paa1 = np.einsum('pr, ruqv, qt -> putv', u[k1].conj().T, papa, ra) # (k1, k2, k3, k4)
-                # g[k][:, ncore:nocc] += np.einsum('puwx,wxuv->pv', paa1, dm2_k) # (k1, k1)
-                p1aa = p1aa + paa1
-                g[k1][:, ncore:nocc] += np.einsum('puwx,wxuv->pv', paa1, dm2_k) # (k1, k1)
-
-            # exchange contribution-2       
-            if kconserv[k4, k3, k2] == k1:
-                papa = eris.papa(k1, k2, k3) # (k1, k2, k3, k4)
-                ra = (u[k3] - np.eye(nmo, dtype=dtype))[:, ncore:nocc] # (k3, k3)
-                paa1 = np.einsum('pr, ruqv, qt -> puvt', u[k1].conj().T, papa, ra) # (k1, k2, k4, k3)
-                dm2_k = _get_casdm2_kpts(casdm2, mo_phase1, (k4, k3, k2, k1)) # (k4, k3, k2, k1)
-                g[k1][:, ncore:nocc] += np.einsum('puwx, wxuv->pv', paa1, dm2_k) # (k1, k1)
+            # Exchange contribution-2
+            paa1 = 1/nkpts * np.einsum('pr, ruqv, qt -> puvt', u[k1].conj().T, papa, ra) # (k1, k2, k4, k3)
+            dm2_k = _get_casdm2_kpts(casdm2, mo_phase1, (k1, k2, k4, k3))
+            g[k1][:, ncore:nocc] += np.einsum('puuv->pv', np.einsum('pqvw,tuvw->pqut', paa1, dm2_k)) # (k1, k1)
     
         papa = ppaa = p1aa = paa1 = None
         return np.hstack([mc.pack_uniq_var(grd - grd.conj().T) for grd in g])    
@@ -1291,7 +1284,7 @@ class PBCCASSCF(casci.PBCCASBASE):
             casdm1, casdm2 = self.fcisolver.make_rdm12(civec, ncastot, nelecas)
         else:
             casdm1, casdm2 = casdm1_casdm2
-        return self.gen_g_hop(mo_coeff, mo_phase, 1, casdm1, casdm2, eris)[0]
+        return self.gen_g_hop(mo_coeff, mo_phase, 1, casdm1, casdm2, eris)[:2]
 
     def _exact_paaa(self, mo_kpts, u_kpts, out=None):
         '''
