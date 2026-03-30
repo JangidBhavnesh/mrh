@@ -348,7 +348,7 @@ if __name__ == "__main__":
     cell.build()
 
     t0 = (lib.logger.process_clock(), lib.logger.perf_counter())
-    kmesh = [2, 2, 2]
+    kmesh = [2, 1, 1]
     kpts = cell.make_kpts(kmesh)
     
     kmf = scf.KRHF(cell, kpts).density_fit()
@@ -397,11 +397,13 @@ if __name__ == "__main__":
     # Compare the vhf_c integrals
     compare_integrals(eris.vhf_c, eris2.vhf_c, "vhf_c", (nkpts, nmo, nmo))
 
-    # Compare the ppaa and papa integrals
+    # Compare the ppaa, papa, and paap integrals
     # Gamma point (k1=k2=k3=0)
     compare_integrals(eris.ppaa(0, 0, 0), eris2.ppaa(0, 0, 0), "ppaa", (nmo, nmo, ncas, ncas))
     compare_integrals(eris.papa(0, 0, 0), eris2.papa(0, 0, 0), "papa", (nmo, ncas, nmo, ncas))
-    
+    compare_integrals(eris.paap(0, 0, 0), eris2.paap(0, 0, 0), "paap", (nmo, ncas, ncas, nmo))
+
     # Non-Gamma point (k1=0, k2=0, k3=1)
     compare_integrals(eris.ppaa(0, 0, 1), eris2.ppaa(0, 0, 1), "ppaa", (nmo, nmo, ncas, ncas))
     compare_integrals(eris.papa(0, 0, 1), eris2.papa(0, 0, 1), "papa", (nmo, ncas, nmo, ncas))
+    compare_integrals(eris.paap(0, 0, 1), eris2.paap(0, 0, 1), "paap", (nmo, ncas, ncas, nmo))
