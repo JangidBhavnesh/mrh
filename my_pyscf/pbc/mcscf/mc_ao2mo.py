@@ -35,6 +35,7 @@ def _do_ao2mo_direct(kcasscf, mo_kpts, nkpts, ncore, ncas, nmo, level=1):
 
     ppaa = np.empty((nkpts, nkpts, nkpts, nmo, nmo, ncas, ncas), dtype=dtype)
     papa = np.empty((nkpts, nkpts, nkpts, nmo, ncas, nmo, ncas), dtype=dtype)
+    paap = np.empty((nkpts, nkpts, nkpts, nmo, ncas, ncas, nmo), dtype=dtype)
 
     kconserv = kpts_helper.get_kconserv(cell, kpts)
     for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
@@ -47,10 +48,17 @@ def _do_ao2mo_direct(kcasscf, mo_kpts, nkpts, ncore, ncas, nmo, level=1):
     for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
         k4 = kconserv[k1, k2, k3]
         papa[k1, k2, k3] = mydf.ao2mo([mo_kpts[k1], mo_kpts[k2][:, ncore:nocc], mo_kpts[k3], mo_kpts[k4][:, ncore:nocc]],
-                          [kpts[i] for i in (k1, k2, k3, k4)],
-                          compact=False).reshape(nmo, ncas, nmo, ncas)    
+                        [kpts[i] for i in (k1, k2, k3, k4)],
+                        compact=False).reshape(nmo, ncas, nmo, ncas)
     t2 = log.timer('density fitting ao2mo papa', *t1)
-    
+
+    for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
+        k4 = kconserv[k1, k2, k3]
+        paap[k1, k2, k3] = mydf.ao2mo([mo_kpts[k1], mo_kpts[k2][:, ncore:nocc], mo_kpts[k3][:, ncore:nocc], mo_kpts[k4]],
+                        [kpts[i] for i in (k1, k2, k3, k4)],
+                        compact=False).reshape(nmo, ncas, ncas, nmo)
+    t3 = log.timer('density fitting ao2mo paap', *t2)
+
     # This is very naive implementation, would require a lot of optimization.
     if level == 1:
         if ncore == 0:
@@ -69,7 +77,7 @@ def _do_ao2mo_direct(kcasscf, mo_kpts, nkpts, ncore, ncas, nmo, level=1):
     else:
         j_pc = k_pc = None
     log.timer('density fitting ao2mo j_pc, k_pc', *t2)
-    return ppaa, papa, j_pc, k_pc
+    return ppaa, papa, paap, j_pc, k_pc
 
 def _do_ao2mo_disk(kcasscf, mo_kpts, nkpts, ncore, ncas, nmo, level=1):
     cell = kcasscf._scf.cell
@@ -233,6 +241,7 @@ class _ERIS:
         self.erifile = None
         self.ppaa_kpts = None
         self.papa_kpts = None
+        self.paap_kpts = None
         log = lib.logger.Logger(kcasscf.stdout, kcasscf.verbose)
         cell = kcasscf._scf.cell
         kpts = kcasscf._scf.kpts
@@ -262,7 +271,7 @@ class _ERIS:
               mem_incore, mem_now, kcasscf.max_memory)
         if (method == 'direct' and mem_now + mem_incore < 0.9 * kcasscf.max_memory):
             log.debug('Using direct ERI transformation.')
-            self.ppaa_kpts, self.papa_kpts, self.j_pc, self.k_pc = _do_ao2mo_direct(kcasscf, mo_kpts, nkpts, ncore, ncas, nmo, level=level)
+            self.ppaa_kpts, self.papa_kpts, self.paap_kpts, self.j_pc, self.k_pc = _do_ao2mo_direct(kcasscf, mo_kpts, nkpts, ncore, ncas, nmo, level=level)
             t1 = log.timer('direct ao2mo', *t1)
         else:
             log.debug('Using disk ERI transformation.')
@@ -276,6 +285,7 @@ class _ERIS:
         # I am defining two lambda functions that will access the integrals based on the method used.
         self.ppaa = lambda k1, k2, k3: self.get_ppaa(k1, k2, k3)
         self.papa = lambda k1, k2, k3: self.get_papa(k1, k2, k3)
+        self.paap = lambda k1, k2, k3: self.get_paap(k1, k2, k3)
 
         log.timer('Total ERI transformation', *t0)
 
@@ -297,6 +307,8 @@ class _ERIS:
     def get_papa(self, k1, k2, k3):
         return self._get("papa", k1, k2, k3)
 
+    def get_paap(self, k1, k2, k3):
+        return self._get("paap", k1, k2, k3)
 
 if __name__ == "__main__":
     from pyscf.pbc import gto, scf
