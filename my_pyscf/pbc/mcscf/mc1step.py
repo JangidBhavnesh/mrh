@@ -200,10 +200,12 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
         
         # if k2 == k4 and k1 == k3:
         if (k1 == k4) and (k2 == k3):
-            papa = kmf.with_df.ao2mo([mo_coeff[k1], mo_coeff[k2][:, ncore:nocc], mo_coeff[k2][:, ncore:nocc], mo_coeff[k1]],
-                                                          kpts=[kpts[k1], kpts[k2], kpts[k2], kpts[k1]], 
-                                                          compact=False).reshape(nmo, ncas, ncas, nmo) 
-            vhf_a[k] -= 0.5/nkpts * np.einsum('puvq,uv->pq', papa, casdm1_kpts[k2])
+            # paap = kmf.with_df.ao2mo([mo_coeff[k1], mo_coeff[k2][:, ncore:nocc], mo_coeff[k2][:, ncore:nocc], mo_coeff[k1]],
+            #                                               kpts=[kpts[k1], kpts[k2], kpts[k2], kpts[k1]], 
+            #                                               compact=False).reshape(nmo, ncas, ncas, nmo)
+            paap = eris.paap(k1, k2, k3) # (k1, k2, k3, k4)
+            vhf_a[k] -= 0.5/nkpts * np.einsum('puvq,uv->pq', paap, casdm1_kpts[k2])
+            
             if k1 == k2:
                 papa = eris.papa(k1, k2, k3) # (k1, k2, k3, k4)
                 jkcaa[k]  += 6.0 * np.einsum('iuiv,uv->iu', papa[:nocc, :, :nocc, :], casdm1_kpts[k2]) # (k1,k1) 
@@ -329,7 +331,6 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
         # p1aa += paa1
         # p1aa += paa1.transpose(0,1,3,2)
         # g[:, :ncore:nocc] += np.einsum('puwx, wxuv->pu', p1aa, casdm2)
-        
         for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
             k4 = kconserv[k1, k2, k3]
             ppaa = eris.ppaa(k1, k2, k3)
@@ -339,9 +340,10 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
             ra4 = (u[k4] - np.eye(nmo, dtype=dtype))[:, ncore:nocc]
             p1aa = 1/nkpts * np.einsum('pr,tq,rquv->ptuv', u[k1].conj().T, ua.T, ppaa, optimize=True)
             pa1a = 1/nkpts * np.einsum('pr,ruqv,qt->putv', u[k1].conj().T, papa, ra3.conj(), optimize=True)
-            paap = kmf.with_df.ao2mo([mo_coeff[k1], mo_coeff[k2][:, ncore:nocc], mo_coeff[k3][:, ncore:nocc], mo_coeff[k4]],
-                                                          kpts=[kpts[k1], kpts[k2], kpts[k3], kpts[k4]], 
-                                                          compact=False).reshape(nmo, ncas, ncas, nmo) 
+            # paap = kmf.with_df.ao2mo([mo_coeff[k1], mo_coeff[k2][:, ncore:nocc], mo_coeff[k3][:, ncore:nocc], mo_coeff[k4]],
+            #                                               kpts=[kpts[k1], kpts[k2], kpts[k3], kpts[k4]], 
+            #                                               compact=False).reshape(nmo, ncas, ncas, nmo) 
+            paap = eris.paap(k1, k2, k3)
             paa1 = 1/nkpts * np.einsum('pr,rvuq,qt->pvtu',u[k1].conj().T,paap, ra4, optimize=True)
             p1aa = p1aa + pa1a + paa1
             dm2_k = _get_casdm2_kpts(casdm2, mo_phase1, (k1, k2, k3, k4))
