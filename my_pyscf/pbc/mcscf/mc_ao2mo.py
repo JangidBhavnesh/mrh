@@ -35,6 +35,7 @@ def _do_ao2mo_direct(kcasscf, mo_kpts, nkpts, ncore, ncas, nmo, level=1):
 
     ppaa = np.empty((nkpts, nkpts, nkpts, nmo, nmo, ncas, ncas), dtype=dtype)
     papa = np.empty((nkpts, nkpts, nkpts, nmo, ncas, nmo, ncas), dtype=dtype)
+    paap = np.empty((nkpts, nkpts, nkpts, nmo, ncas, ncas, nmo), dtype=dtype)
 
     kconserv = kpts_helper.get_kconserv(cell, kpts)
     for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
@@ -47,10 +48,17 @@ def _do_ao2mo_direct(kcasscf, mo_kpts, nkpts, ncore, ncas, nmo, level=1):
     for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
         k4 = kconserv[k1, k2, k3]
         papa[k1, k2, k3] = mydf.ao2mo([mo_kpts[k1], mo_kpts[k2][:, ncore:nocc], mo_kpts[k3], mo_kpts[k4][:, ncore:nocc]],
-                          [kpts[i] for i in (k1, k2, k3, k4)],
-                          compact=False).reshape(nmo, ncas, nmo, ncas)    
+                        [kpts[i] for i in (k1, k2, k3, k4)],
+                        compact=False).reshape(nmo, ncas, nmo, ncas)
     t2 = log.timer('density fitting ao2mo papa', *t1)
-    
+
+    for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
+        k4 = kconserv[k1, k2, k3]
+        paap[k1, k2, k3] = mydf.ao2mo([mo_kpts[k1], mo_kpts[k2][:, ncore:nocc], mo_kpts[k3][:, ncore:nocc], mo_kpts[k4]],
+                        [kpts[i] for i in (k1, k2, k3, k4)],
+                        compact=False).reshape(nmo, ncas, ncas, nmo)
+    t3 = log.timer('density fitting ao2mo paap', *t2)
+
     # This is very naive implementation, would require a lot of optimization.
     if level == 1:
         if ncore == 0:
@@ -69,7 +77,7 @@ def _do_ao2mo_direct(kcasscf, mo_kpts, nkpts, ncore, ncas, nmo, level=1):
     else:
         j_pc = k_pc = None
     log.timer('density fitting ao2mo j_pc, k_pc', *t2)
-    return ppaa, papa, j_pc, k_pc
+    return ppaa, papa, paap, j_pc, k_pc
 
 def _do_ao2mo_disk(kcasscf, mo_kpts, nkpts, ncore, ncas, nmo, level=1):
     cell = kcasscf._scf.cell
@@ -87,6 +95,7 @@ def _do_ao2mo_disk(kcasscf, mo_kpts, nkpts, ncore, ncas, nmo, level=1):
     erifile = lib.H5TmpFile()
     erifile.require_group("ppaa")
     erifile.require_group("papa")
+    erifile.require_group("paap")
 
     t1 = t0 = (logger.process_clock(), logger.perf_counter())
     log = lib.logger.Logger(kcasscf.stdout, kcasscf.verbose)
@@ -178,6 +187,19 @@ def _do_ao2mo_disk(kcasscf, mo_kpts, nkpts, ncore, ncas, nmo, level=1):
     ppaa = zij_12 = zkl_34 = None
     t2 = log.timer('density fitting ao2mo ppaa', *t2)
 
+    # Step-4: Construct the paap integrals
+    for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
+        k4 = kconserv[k1, k2, k3]
+        paap = np.zeros((nmo*ncas, nmo*ncas), dtype=dtype)
+        zij_12 = grp[f"{k1}_{k2}"][:, :, ncore:ncore+ncas][()] # pa
+        zkl_34 = grp[f"{k3}_{k4}"][:, ncore:ncore+ncas, :][()] # ap
+        zij_12 = zij_12.reshape(-1, nmo*ncas)
+        zkl_34 = zkl_34.reshape(-1, ncas*nmo)
+        sign = grp2[f"{k1}_{k2}"][()]
+        lib.dot(zij_12.T, zkl_34, sign, paap, 1)
+        erifile[f"paap/{k1}_{k2}_{k3}"] = paap.reshape(nmo, ncas, ncas, nmo)
+    paap = zij_12 = zkl_34 = None
+    t3 = log.timer('density fitting ao2mo paap', *t2)
     if level == 1:
         j_pc_kpts = np.zeros((nkpts, nmo, ncore), dtype=dtype)
         k_pc_kpts = np.zeros((nkpts, nmo, ncore), dtype=dtype)
@@ -192,7 +214,7 @@ def _do_ao2mo_disk(kcasscf, mo_kpts, nkpts, ncore, ncas, nmo, level=1):
     else:
         j_pc_kpts = None
         k_pc_kpts = None
-    log.timer('density fitting ao2mo j_pc and k_pc', *t2)
+    log.timer('density fitting ao2mo j_pc and k_pc', *t3)
     fxpp.close()
     return erifile, j_pc_kpts, k_pc_kpts
 
@@ -233,6 +255,7 @@ class _ERIS:
         self.erifile = None
         self.ppaa_kpts = None
         self.papa_kpts = None
+        self.paap_kpts = None
         log = lib.logger.Logger(kcasscf.stdout, kcasscf.verbose)
         cell = kcasscf._scf.cell
         kpts = kcasscf._scf.kpts
@@ -262,7 +285,7 @@ class _ERIS:
               mem_incore, mem_now, kcasscf.max_memory)
         if (method == 'direct' and mem_now + mem_incore < 0.9 * kcasscf.max_memory):
             log.debug('Using direct ERI transformation.')
-            self.ppaa_kpts, self.papa_kpts, self.j_pc, self.k_pc = _do_ao2mo_direct(kcasscf, mo_kpts, nkpts, ncore, ncas, nmo, level=level)
+            self.ppaa_kpts, self.papa_kpts, self.paap_kpts, self.j_pc, self.k_pc = _do_ao2mo_direct(kcasscf, mo_kpts, nkpts, ncore, ncas, nmo, level=level)
             t1 = log.timer('direct ao2mo', *t1)
         else:
             log.debug('Using disk ERI transformation.')
@@ -276,6 +299,7 @@ class _ERIS:
         # I am defining two lambda functions that will access the integrals based on the method used.
         self.ppaa = lambda k1, k2, k3: self.get_ppaa(k1, k2, k3)
         self.papa = lambda k1, k2, k3: self.get_papa(k1, k2, k3)
+        self.paap = lambda k1, k2, k3: self.get_paap(k1, k2, k3)
 
         log.timer('Total ERI transformation', *t0)
 
@@ -297,6 +321,8 @@ class _ERIS:
     def get_papa(self, k1, k2, k3):
         return self._get("papa", k1, k2, k3)
 
+    def get_paap(self, k1, k2, k3):
+        return self._get("paap", k1, k2, k3)
 
 if __name__ == "__main__":
     from pyscf.pbc import gto, scf
@@ -322,7 +348,7 @@ if __name__ == "__main__":
     cell.build()
 
     t0 = (lib.logger.process_clock(), lib.logger.perf_counter())
-    kmesh = [2, 2, 2]
+    kmesh = [2, 1, 1]
     kpts = cell.make_kpts(kmesh)
     
     kmf = scf.KRHF(cell, kpts).density_fit()
@@ -371,11 +397,13 @@ if __name__ == "__main__":
     # Compare the vhf_c integrals
     compare_integrals(eris.vhf_c, eris2.vhf_c, "vhf_c", (nkpts, nmo, nmo))
 
-    # Compare the ppaa and papa integrals
+    # Compare the ppaa, papa, and paap integrals
     # Gamma point (k1=k2=k3=0)
     compare_integrals(eris.ppaa(0, 0, 0), eris2.ppaa(0, 0, 0), "ppaa", (nmo, nmo, ncas, ncas))
     compare_integrals(eris.papa(0, 0, 0), eris2.papa(0, 0, 0), "papa", (nmo, ncas, nmo, ncas))
-    
+    compare_integrals(eris.paap(0, 0, 0), eris2.paap(0, 0, 0), "paap", (nmo, ncas, ncas, nmo))
+
     # Non-Gamma point (k1=0, k2=0, k3=1)
     compare_integrals(eris.ppaa(0, 0, 1), eris2.ppaa(0, 0, 1), "ppaa", (nmo, nmo, ncas, ncas))
     compare_integrals(eris.papa(0, 0, 1), eris2.papa(0, 0, 1), "papa", (nmo, ncas, nmo, ncas))
+    compare_integrals(eris.paap(0, 0, 1), eris2.paap(0, 0, 1), "paap", (nmo, ncas, ncas, nmo))
