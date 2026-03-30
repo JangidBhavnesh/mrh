@@ -36,6 +36,17 @@ Steps
 2. Integrate the above functions with k-point CIAH solver.
 '''
 
+def _get_casdm2_kpts(casdm2, mo_phase1, klabel):
+    '''
+    Compute the 2RDM for a given k-point configuration.
+    '''
+    k1, k2, k3, k4 = klabel
+    dm2_k = np.einsum('iP, jQ, PQRS, kR, lS->ijkl', 
+                        mo_phase1[k1].conj(), mo_phase1[k2], 
+                        casdm2, 
+                        mo_phase1[k3].conj(), mo_phase1[k4])
+    return dm2_k
+
 def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
     '''
     To solve the second order or quasi-second order CASSCF equations, we need to 
@@ -141,8 +152,7 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
 
     for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
         k4 = kconserv[k1, k2, k3]
-        dm2_k = np.einsum('iP, jQ, PQRS, kR, lS->ijkl',
-                                      mo_phase[k1].conj(), mo_phase[k2], casdm2, mo_phase[k3].conj(), mo_phase[k4])
+        dm2_k = _get_casdm2_kpts(casdm2, mo_phase, (k1, k2, k3, k4))
         casdm2_kpts[k1, k2, k3] = dm2_k
 
     # Sanity checks.
@@ -159,28 +169,28 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
                         for k1 in range(nkpts) 
                         for k3 in range(nkpts)]).real)
     
+    # Step-1:Orbital Gradients
     # Construct the potential
     vhf_a = np.zeros((nkpts, nmo, nmo), dtype=dtype)
     g_dm2 = np.zeros((nkpts, nmo, ncas), dtype=dtype)
 
     # Collect the contribution from different k1, k2 and k3 whenever they are
     # equals to momentum of the output entity.
+    # I think we should not loop over nmo, because it will be solved for 
+    # a given k-point, means the number of orbitals would be way small than total system. 
+    # To remove the loop over nmo, as done in the molecular code, I have first converted 
+    # that code without for loop, matched it with loop.
+    # That code is:
+    # ppaa = eris.ppaa
+    # papa = eris.papa
+    # vhf_a = numpy.einsum('pquv,uv->pq', ppaa, casdm1)
+    # vhf_a -= 0.5*numpy.einsum('puqv,uv->pq', papa, casdm1)
+    # jtmp = lib.dot(ppaa.reshape(nmo*nmo,-1), casdm2.reshape(ncas*ncas,-1))
+    # jtmp = jtmp.reshape(nmo,nmo,ncas,ncas) # nmo, nmo, ncas, ncas
+    # g_dm2 = numpy.einsum('puuv->pv', jtmp[:, ncore:nocc])
     for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
         k4 = kconserv[k1, k2, k3]
-        # I think we should not loop over nmo, because it will be solved for 
-        # a given k-point, means the number of orbitals would be way small than total system. 
-        # To remove the loop over nmo, as done in the molecular code, I have first converted 
-        # that code without for loop, matched it with loop.
-        # That code is:
-        # ppaa = eris.ppaa
-        # papa = eris.papa
-        # vhf_a = numpy.einsum('pquv,uv->pq', ppaa, casdm1)
-        # vhf_a -= 0.5*numpy.einsum('puqv,uv->pq', papa, casdm1)
-        # jtmp = lib.dot(ppaa.reshape(nmo*nmo,-1), casdm2.reshape(ncas*ncas,-1))
-        # jtmp = jtmp.reshape(nmo,nmo,ncas,ncas) # nmo, nmo, ncas, ncas
-        # g_dm2 = numpy.einsum('puuv->pv', jtmp[:, ncore:nocc])
         ppaa = eris.ppaa(k1, k2, k3) # (k1, k2, k3, k4)
-        papa = eris.papa(k1, k2, k3) # (k1, k2, k3, k4)
 
         if (k1 == k2) and (k3==k4):
             vhf_a[k1] +=  1.0/nkpts * np.einsum('pquv,vu->pq', ppaa, casdm1_kpts[k3]) # (k1,k1)
@@ -193,53 +203,43 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
         jtmp = 1/nkpts * np.einsum('pqvw,tuvw->pqut', ppaa[:, ncore:nocc, :, :], dm2_blk)
         g_dm2[k1] += np.einsum('puuv->pv', jtmp)
 
-    ppaa = papa = jtmp = ktmp = temp = None
+    ppaa = dm2_blk = paap = jtmp = None
     
-    vhf_ca = np.zeros((nkpts,nmo,nmo), dtype=dtype)
-    h1e_mo = np.zeros((nkpts,nmo,nmo), dtype=dtype)
-    g = np.zeros((nkpts,nmo,nmo), dtype=dtype)
-
+    # Now assemble the pieces and construct the gradient.    
     hcore = mc.get_hcore() # (nkpts, nao, nao)
     
-    for k in range(nkpts):
-        vhf_ca[k] = eris.vhf_c[k] + vhf_a[k]
-        h1e_mo[k] = reduce(np.dot, (mo_coeff[k].conj().T, hcore[k], mo_coeff[k])) # (block orbital MO basis)
-    
+    vhf_ca = np.array([eris.vhf_c[k] + vhf_a[k] 
+                       for k in range(nkpts)], dtype=dtype) # (nkpts, nmo, nmo) (block orbital basis)
+    h1e_mo = np.array([reduce(np.dot, (mo_coeff[k].conj().T, hcore[k], mo_coeff[k])) 
+                       for k in range(nkpts)], dtype=dtype) # (nkpts, nmo, nmo) (block orbital MO basis)
     hcore = None
-    
-    # Orbital Gradients:
+
+    g = np.zeros((nkpts,nmo,nmo), dtype=dtype)
     for k in range(nkpts):
         g[k][:,:ncore] = 2.0 * (h1e_mo[k][:,:ncore] + vhf_ca[k][:,:ncore])
         g[k][:,ncore:nocc] = np.dot(h1e_mo[k][:, ncore:nocc] + eris.vhf_c[k][:, ncore:nocc], casdm1_kpts[k])
         g[k][:,ncore:nocc] += g_dm2[k]
 
-    # Gradient update function, at the fixed hessians this function updates the gradients 
-    # after the orbital rotation.
+    # Step-2: Gradient update function
+    # In second order one-step orbital optimization, in the micro iterations : the gradient is updated
+    # with the fixed hessians and rotated set of orbitals rather than transforming the 2e integrals again.
+
     def gorb_update(u, fcivec):
-        # Note: currently I am using the CIAH not the k-CIAH, so the update matrix is packed into
+        # TODO: Note: currently I am using the CIAH not the k-CIAH, so the update matrix is packed into
         # one giant matrix. This will need restructure once I switch to k-CIAH.
+
         u = block_diag_to_kblocks(u, nkpts, nmo)
         assert u.shape == (nkpts, nmo, nmo)
 
-        # Doing this transformation to get the mo_phase which would be required to 
-        # transofrmation of casdm1 and casdm2.
         mo1 = np.array([np.dot(mo_coeff[k], u[k]) 
-                        for k in range(nkpts)])
+                        for k in range(nkpts)], dtype=dtype) # (nkpts, nao, nmo)
         mo_phase1 = get_mo_coeff_k2R(kmf, mo1, ncore, ncas)[-1]
 
         # Compute the RDMs        
         ncastot = nkpts * ncas
         nelectot = (nkpts*nelecas[0], nkpts*nelecas[1])
-        casdm1, casdm2 = mc.fcisolver.make_rdm12(fcivec, ncastot, nelectot)
-        
-        def _get_casdm2_kpts(casdm2, mo_phase1, klabel):
-            k1, k2, k3, k4 = klabel
-            dm2_k = np.einsum('iP, jQ, PQRS, kR, lS->ijkl', 
-                              mo_phase1[k1].conj(), mo_phase1[k2], 
-                              casdm2, 
-                              mo_phase1[k3].conj(), mo_phase1[k4])
-            return dm2_k
-        
+        casdm1, casdm2 = mc.fcisolver.make_rdm12(fcivec, ncastot, nelectot) # Wannier basis
+                
         # To update the gradients:
         nao = mo_coeff[0].shape[0]
         g = np.zeros((nkpts, nmo, nmo), dtype=dtype)
@@ -262,13 +262,13 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
 
         vhf_c = np.array([reduce(
             np.dot, (mo1[k].conj().T, vj_k[k]-vk_k[k]*0.5, mo1[k][:,:nocc])) 
-            for k in range(nkpts)])
+            for k in range(nkpts)], dtype=dtype)
         
         vj_k, vk_k = mc._scf.get_jk(cell, dm_kpts=dm_act_kpts, hermi=1, 
                                     kpts=kpts, with_j=True, with_k=True,exxdiv=None)
         vhf_a = np.array([reduce(
             np.dot, (mo1[k].conj().T, vj_k[k]-vk_k[k]*0.5, mo1[k][:,:nocc])) 
-            for k in range(nkpts)])
+            for k in range(nkpts)], dtype=dtype)
 
         for k in range(nkpts):
             casdm1_k = reduce(np.dot, (mo_phase1[k], casdm1, mo_phase1[k].conj().T))
@@ -278,6 +278,7 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
         
         vj_k = vk_k = vhf_a = vhf_c = h1e_mo1k = dm_core_kpts = dm_act_kpts = None
 
+        # 2e part of the gradient update.
         # These objects would be insanly huge. Instead of creating them and storing, I think I should 
         # compute them on the fly whenever they are required.
         # Benchmarked on the molecular code.
@@ -292,24 +293,24 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
             k4 = kconserv[k1, k2, k3]
             ppaa = eris.ppaa(k1, k2, k3)
             papa = eris.papa(k1, k2, k3)
+            paap = eris.paap(k1, k2, k3)
             ua  = u[k2][:, ncore:nocc]
             ra3 = (u[k3] - np.eye(nmo, dtype=dtype))[:, ncore:nocc]
             ra4 = (u[k4] - np.eye(nmo, dtype=dtype))[:, ncore:nocc]
             p1aa = 1/nkpts * np.einsum('pr,tq,rquv->ptuv', u[k1].conj().T, ua.T, ppaa, optimize=True)
             pa1a = 1/nkpts * np.einsum('pr,ruqv,qt->putv', u[k1].conj().T, papa, ra3.conj(), optimize=True)
-            # paap = kmf.with_df.ao2mo([mo_coeff[k1], mo_coeff[k2][:, ncore:nocc], mo_coeff[k3][:, ncore:nocc], mo_coeff[k4]],
-            #                                               kpts=[kpts[k1], kpts[k2], kpts[k3], kpts[k4]], 
-            #                                               compact=False).reshape(nmo, ncas, ncas, nmo) 
-            paap = eris.paap(k1, k2, k3)
             paa1 = 1/nkpts * np.einsum('pr,rvuq,qt->pvtu',u[k1].conj().T,paap, ra4, optimize=True)
             p1aa = p1aa + pa1a + paa1
+
             dm2_k = _get_casdm2_kpts(casdm2, mo_phase1, (k1, k2, k3, k4))
+            
             g[k1][:, ncore:nocc] += np.einsum('puwx,vuwx->pv', p1aa, dm2_k, optimize=True)
 
-        papa = ppaa = p1aa = paa1 = pa1a = dm2_k = None
+        papa = ppaa = paap = p1aa = paa1 = pa1a = dm2_k = None
+
         return np.hstack([mc.pack_uniq_var(g[k] - g[k].conj().T) for k in range(nkpts)])    
     
-    # Hessian diagonal
+    # Step-3: Hessian diagonal
     jkcaa = np.zeros((nkpts, nocc, ncas), dtype=dtype)
     # TODO: Should host the hdm2 on the disk.
     hdm2 = np.zeros((nkpts, nkpts, nkpts, nmo, ncas, nmo, ncas), dtype=dtype)
