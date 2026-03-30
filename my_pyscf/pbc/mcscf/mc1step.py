@@ -332,28 +332,24 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
         papa = eris.papa(k1, k2, k3) # (k1, k2, k3, k4)
 
         if (k1 == k2 == k3 == k4):
-            jkcaa[k]  += 6.0 * np.einsum('iuiv,uv->iu', papa[:nocc, :, :nocc, :], casdm1_kpts[k2]) # (k1,k1) 
-            jkcaa[k] -= 2.0 * np.einsum('iiuv,uv->iu', ppaa[:nocc, :nocc, :, :], casdm1_kpts[k3]) # (k1,k1) 
+            jkcaa[k]  += 6.0 * np.einsum('iuiv,uv->iu', papa[:nocc, :, :nocc, :], casdm1_kpts[k1]) # (k1,k1) 
+            jkcaa[k] -= 2.0 * np.einsum('iiuv,uv->iu', ppaa[:nocc, :nocc, :, :], casdm1_kpts[k1]) # (k1,k1) 
     
         k4j = kconserv[k1, k3, k2]
         if kconserv[k2, k4j, k2] == k4:
             ppaa = eris.ppaa(k1, k3, k2) # (k1, k3, k2, k4j)
-            dm2j = casdm2_kpts[k2, k4j, k2]    # (k2, k4j, k2, k4)
-            dm2jm = dm2j.reshape(ncasncas, ncasncas)
-            jtmp = lib.dot(ppaa.reshape(nmonmo, ncasncas),dm2jm).reshape(nmo, nmo, ncas, ncas) # (k1, k3, k2, k4)
-            hdm2[k1, k2, k3] += jtmp.conj().transpose(0, 2, 1, 3) # (k1, k2, k3, k4)
+            dm2_blk = casdm2_kpts[k2, k4j, k2]    # (k2, k4j, k2, k4)
+            hdm2[k1, k2, k3] += 1.0 / nkpts * np.einsum('pqtu,tuvw->pvqw', ppaa, dm2_blk) # (k1, k2, k3, k4)
 
         if kconserv[k2, k4, k2] == k4:
-            papa = eris.papa(k1, k2, k3) # (k1, k3, k2, k4j)
-            dm2x = casdm2_kpts[k2, k4, k2]   # (k2, k4, k2, k4)
-            ktmp = np.einsum('puqv,uvrs->pqrs', papa, dm2x, optimize=True) # (k1, k3, k2, k4)
-            hdm2[k1, k2, k3] += ktmp.conj().transpose(0, 2, 1, 3)  # (k1, k2, k3, k4)
+            papa = eris.papa(k1, k2, k3) # (k1, k2, k3, k4)
+            dm2_blk = casdm2_kpts[k2, k4, k2] # (k2, k4, k2, k4)
+            hdm2[k1, k2, k3] += 1.0 / nkpts * np.einsum('puqv,uvrs->prqs', papa, dm2_blk, optimize=True)  # (k1, k2, k3, k4)
 
         if kconserv[k2, k2, k4] == k4: # This is redundant, still keeping it for safety.
-            papa = eris.papa(k1, k2, k3) # (k1, k3, k2, k4j)
-            dm2x = casdm2_kpts[k2, k2, k4]   # (k2, k2, k4, k4)
-            ktmp = np.einsum('puqv,urvs->pqrs', papa, dm2x, optimize=True) # (k1, k3, k2, k4)
-            hdm2[k1, k2, k3] += ktmp.conj().transpose(0, 2, 1, 3)  # (k1, k2, k3, k4)
+            paap = eris.paap(k1, k2, k4) # (k1, k2, k4, k3x)
+            dm2_blk = casdm2_kpts[k2, k2, k4]   # (k2, k4, k2, k4)
+            hdm2[k1, k2, k3] += 1.0 / nkpts * np.einsum('puvq,uvrs->prqs', paap, dm2_blk, optimize=True) # (k1, k2, k3, k4)
 
     ppaa = papa = jtmp = ktmp = temp = None
 
