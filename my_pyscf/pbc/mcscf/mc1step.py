@@ -254,6 +254,7 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
         g[k][:,ncore:nocc] = np.dot(h1e_mo[k][:, ncore:nocc] + eris.vhf_c[k][:, ncore:nocc], casdm1_kpts[k])
         g[k][:,ncore:nocc] += g_dm2[k]
 
+
     def gorb_update(u, fcivec):
         # Note: currently I am using the CIAH not the k-CIAH, so the update matrix is packed into
         # one giant matrix. This will need restructure once I switch to k-CIAH.
@@ -327,28 +328,26 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
         # p1aa += paa1
         # p1aa += paa1.transpose(0,1,3,2)
         # g[:, :ncore:nocc] += np.einsum('puwx, wxuv->pu', p1aa, casdm2)
+        
         for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
             k4 = kconserv[k1, k2, k3]
-            # Coloumb contribution
-            ppaa = eris.ppaa(k1, k2, k3) # (k1, k2, k3, k4)
-            ua = np.array(u[k2][:, ncore:nocc]).copy() # (k2, k2)
-            p1aa = 1/nkpts * np.einsum('pr, tq, rquv-> ptuv', u[k1].conj().T, ua.conj().T, ppaa) # (k1, k2, k3, k4)
+            ppaa = eris.ppaa(k1, k2, k3)
+            papa = eris.papa(k1, k2, k3)
+            ua  = u[k2][:, ncore:nocc]
+            ra3 = (u[k3] - np.eye(nmo, dtype=dtype))[:, ncore:nocc]
+            ra4 = (u[k4] - np.eye(nmo, dtype=dtype))[:, ncore:nocc]
+            p1aa = 1/nkpts * np.einsum('pr,tq,rquv->ptuv', u[k1].conj().T, ua.T, ppaa, optimize=True)
+            pa1a = 1/nkpts * np.einsum('pr,ruqv,qt->putv', u[k1].conj().T, papa, ra3.conj(), optimize=True)
+            paap = kmf.with_df.ao2mo([mo_coeff[k1], mo_coeff[k2][:, ncore:nocc], mo_coeff[k3][:, ncore:nocc], mo_coeff[k4]],
+                                                          kpts=[kpts[k1], kpts[k2], kpts[k3], kpts[k4]], 
+                                                          compact=False).reshape(nmo, ncas, ncas, nmo) 
+            paa1 = 1/nkpts * np.einsum('pr,rvuq,qt->pvtu',u[k1].conj().T,paap, ra4, optimize=True)
+            p1aa = p1aa + pa1a + paa1
             dm2_k = _get_casdm2_kpts(casdm2, mo_phase1, (k1, k2, k3, k4))
-            g[k1][:, ncore:nocc] += np.einsum('puuv->pv', np.einsum('pqvw,tuvw->pqut', p1aa, dm2_k)) # (k1, k1)
-           
-            # Exchange contribution-1
-            papa = eris.papa(k1, k2, k3) # (k1, k2, k3, k4)
-            ra = (u[k3] - np.eye(nmo, dtype=dtype))[:, ncore:nocc] # (k3, k3)
-            paa1 = 1/nkpts * np.einsum('pr, ruqv, qt -> putv', u[k1].conj().T, papa, ra) # (k1, k2, k3, k4)
-            g[k1][:, ncore:nocc] += np.einsum('puuv->pv', np.einsum('pqvw,tuvw->pqut', paa1, dm2_k)) # (k1, k1)
+            g[k1][:, ncore:nocc] += np.einsum('puwx,vuwx->pv', p1aa, dm2_k, optimize=True)
 
-            # Exchange contribution-2
-            paa1 = 1/nkpts * np.einsum('pr, ruqv, qt -> puvt', u[k1].conj().T, papa, ra) # (k1, k2, k4, k3)
-            dm2_k = _get_casdm2_kpts(casdm2, mo_phase1, (k1, k2, k4, k3))
-            g[k1][:, ncore:nocc] += np.einsum('puuv->pv', np.einsum('pqvw,tuvw->pqut', paa1, dm2_k)) # (k1, k1)
-    
-        papa = ppaa = p1aa = paa1 = None
-        return np.hstack([mc.pack_uniq_var(grd - grd.conj().T) for grd in g])    
+        papa = ppaa = p1aa = paa1 = pa1a = dm2_k = None
+        return np.hstack([mc.pack_uniq_var(g[k] - g[k].conj().T) for k in range(nkpts)])    
     
     # Hessian diagonal
     hdiag = np.empty((nkpts, nmo, nmo), dtype=dtype)
