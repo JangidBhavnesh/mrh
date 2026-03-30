@@ -254,7 +254,8 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
         g[k][:,ncore:nocc] = np.dot(h1e_mo[k][:, ncore:nocc] + eris.vhf_c[k][:, ncore:nocc], casdm1_kpts[k])
         g[k][:,ncore:nocc] += g_dm2[k]
 
-
+    # Gradient update function, at the fixed hessians this function updates the gradients 
+    # after the orbital rotation.
     def gorb_update(u, fcivec):
         # Note: currently I am using the CIAH not the k-CIAH, so the update matrix is packed into
         # one giant matrix. This will need restructure once I switch to k-CIAH.
