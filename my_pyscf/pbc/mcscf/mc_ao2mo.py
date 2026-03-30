@@ -95,6 +95,7 @@ def _do_ao2mo_disk(kcasscf, mo_kpts, nkpts, ncore, ncas, nmo, level=1):
     erifile = lib.H5TmpFile()
     erifile.require_group("ppaa")
     erifile.require_group("papa")
+    erifile.require_group("paap")
 
     t1 = t0 = (logger.process_clock(), logger.perf_counter())
     log = lib.logger.Logger(kcasscf.stdout, kcasscf.verbose)
@@ -186,6 +187,19 @@ def _do_ao2mo_disk(kcasscf, mo_kpts, nkpts, ncore, ncas, nmo, level=1):
     ppaa = zij_12 = zkl_34 = None
     t2 = log.timer('density fitting ao2mo ppaa', *t2)
 
+    # Step-4: Construct the paap integrals
+    for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
+        k4 = kconserv[k1, k2, k3]
+        paap = np.zeros((nmo*ncas, nmo*ncas), dtype=dtype)
+        zij_12 = grp[f"{k1}_{k2}"][:, :, ncore:ncore+ncas][()] # pa
+        zkl_34 = grp[f"{k3}_{k4}"][:, ncore:ncore+ncas, :][()] # ap
+        zij_12 = zij_12.reshape(-1, nmo*ncas)
+        zkl_34 = zkl_34.reshape(-1, ncas*nmo)
+        sign = grp2[f"{k1}_{k2}"][()]
+        lib.dot(zij_12.T, zkl_34, sign, paap, 1)
+        erifile[f"paap/{k1}_{k2}_{k3}"] = paap.reshape(nmo, ncas, ncas, nmo)
+    paap = zij_12 = zkl_34 = None
+    t3 = log.timer('density fitting ao2mo paap', *t2)
     if level == 1:
         j_pc_kpts = np.zeros((nkpts, nmo, ncore), dtype=dtype)
         k_pc_kpts = np.zeros((nkpts, nmo, ncore), dtype=dtype)
@@ -200,7 +214,7 @@ def _do_ao2mo_disk(kcasscf, mo_kpts, nkpts, ncore, ncas, nmo, level=1):
     else:
         j_pc_kpts = None
         k_pc_kpts = None
-    log.timer('density fitting ao2mo j_pc and k_pc', *t2)
+    log.timer('density fitting ao2mo j_pc and k_pc', *t3)
     fxpp.close()
     return erifile, j_pc_kpts, k_pc_kpts
 
