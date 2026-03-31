@@ -363,20 +363,26 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
 
     ppaa = papa = jtmp = temp = None
 
-    hdiag = np.empty((nkpts, nmo, nmo), dtype=dtype)
+    # After the construction of the hdm2 and jkcaa, I can construct the hessian diagonal.
+    # Note: I think hessian diagonal would be block diagonal in k-space, because the orbital rotations 
+    # are only allowed within the same k-point !
+
+    hdiag = np.zeros((nkpts, nmo, nmo), dtype=dtype)
     for k in range(nkpts):
-        temp = np.einsum('ii, jj->ij', h1e_mo[k], dm1[k])
+        temp = np.einsum('ii,jj->ij', h1e_mo[k], dm1[k])
         temp -= h1e_mo[k] * dm1[k]
         hdiag[k] = temp + temp.conj().T
 
         g_diag = g[k].diagonal()
         hdiag[k] -= g_diag + g_diag.reshape(-1, 1)
+        
         idx = np.arange(nmo)
         hdiag[k][idx, idx] += 2.0 * g_diag
-        
+
         v_diag = vhf_ca[k].diagonal() 
         hdiag[k][:, :ncore] += 2.0 * v_diag.reshape(-1, 1)
         hdiag[k][:ncore] += 2.0 * v_diag
+
         idx = np.arange(ncore)
         hdiag[k][idx, idx] -= 4.0 * v_diag[:ncore]
 
@@ -394,18 +400,9 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
         hdiag[k][:nocc,ncore:nocc] -= jkcaa[k]
         hdiag[k][ncore:nocc,:nocc] -= jkcaa[k].conj().T
 
-        # hdm2 have k1, k2, k3, so it will only contribute to the diagonal
-        # when k1, k2 and k3 are equal to the k of interest. 
-        # for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
-        #     k4 = kconserv[k1, k2, k3]
-        #     if k == k1 == k2 == k3 == k4:
-        #         v_diag = np.einsum('ijij->ij', hdm2[k1, k2, k3]) # (k1, k1)
-        #         hdiag[k][ncore:nocc,:] += v_diag.conj().T  # (k1, k1)
-        #         hdiag[k][:,ncore:nocc] += v_diag # (k1, k1)
-        # Above code should be equal to this, nope?
-        v_diag = np.einsum('ijij->ij', hdm2[k, k, k]) # (k1, k1)
-        hdiag[k][ncore:nocc,:] += v_diag.conj().T  # (k1, k1)
-        hdiag[k][:,ncore:nocc] += v_diag # (k1, k1)
+        v_diag = np.einsum('ijij->ij', hdm2[k, k, k])
+        hdiag[k][ncore:nocc,:] += v_diag.conj().T
+        hdiag[k][:,ncore:nocc] += v_diag
 
     # Pack the gradients and hessian diagonal    
     g_orb = np.hstack([mc.pack_uniq_var(g[k] - g[k].conj().T) 
@@ -413,7 +410,7 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
     h_diag = np.hstack([mc.pack_uniq_var(hdiag[k]) 
                         for k in range(nkpts)])
     
-    # Hessian-vector
+    # Step-4: Hessian-vector product
     def h_op(x):
         # Since the orbital optimization is done for one giant matrix, so
         # I need to unpack this. When I will implement the k-CIAH for the orbital 
