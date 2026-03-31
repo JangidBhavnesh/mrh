@@ -314,7 +314,6 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
     jkcaa = np.zeros((nkpts, nocc, ncas), dtype=dtype)
     # TODO: Should host the hdm2 on the disk.
     hdm2 = np.zeros((nkpts, nkpts, nkpts, nmo, ncas, nmo, ncas), dtype=dtype)
-    
     # This code is benchmarked on the molecular code.
     # ppaa = eris.ppaa
     # papa = eris.papa
@@ -325,33 +324,44 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
     # jkcaa  = 6.0 * numpy.einsum('iuiv,uv->iu', papa[:nocc, :, :nocc, :], casdm1)
     # jkcaa -= 2.0 * numpy.einsum('iiuv,uv->iu',ppaa[:nocc, :nocc, :, :], casdm1)
 
-    # TODO: This needs revisit with translation symmetry and proper benchmarking.
+    # hdm2: which is the 2e part of the hessian diagonal. It have the contraction of 2e integrals with 2-RDMs.
+    # The above dot products in the einsum format is written as the
+    # hdm2_J = np.einsum('pqwx,wxuv->puqv', ppaa, casdm2)
+    # hdm2_K = np.einsum('pwqx,xuwv->puqv', papa, casdm2)
+    # hdm2_K += np.einsum('pwqx,wuxv->puqv', papa, casdm2)
+
     for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
         k4 = kconserv[k1, k2, k3]
-        ppaa = eris.ppaa(k1, k2, k3) # (k1, k2, k3, k4)
-        papa = eris.papa(k1, k2, k3) # (k1, k2, k3, k4)
 
+        # jkcaa term
         if (k1 == k2 == k3 == k4):
-            jkcaa[k]  += 6.0 * np.einsum('iuiv,uv->iu', papa[:nocc, :, :nocc, :], casdm1_kpts[k1]) # (k1,k1) 
-            jkcaa[k] -= 2.0 * np.einsum('iiuv,uv->iu', ppaa[:nocc, :nocc, :, :], casdm1_kpts[k1]) # (k1,k1) 
-    
-        k4j = kconserv[k1, k3, k2]
-        if kconserv[k2, k4j, k2] == k4:
-            ppaa = eris.ppaa(k1, k3, k2) # (k1, k3, k2, k4j)
-            dm2_blk = casdm2_kpts[k2, k4j, k2]    # (k2, k4j, k2, k4)
-            hdm2[k1, k2, k3] += 1.0 / nkpts * np.einsum('pqtu,tuvw->pvqw', ppaa, dm2_blk) # (k1, k2, k3, k4)
+            ppaa = eris.ppaa(k1, k2, k3)  # (k1, k2, k3, k4)
+            papa = eris.papa(k1, k2, k3)  # (k1, k2, k3, k4)
+            jkcaa[k1] += 6.0 * np.einsum('iuiv,uv->iu', papa[:nocc, :, :nocc, :], casdm1_kpts[k1])
+            jkcaa[k1] -= 2.0 * np.einsum('iiuv,uv->iu', ppaa[:nocc, :nocc, :, :], casdm1_kpts[k1])
 
-        if kconserv[k2, k4, k2] == k4:
-            papa = eris.papa(k1, k2, k3) # (k1, k2, k3, k4)
-            dm2_blk = casdm2_kpts[k2, k4, k2] # (k2, k4, k2, k4)
-            hdm2[k1, k2, k3] += 1.0 / nkpts * np.einsum('puqv,uvrs->prqs', papa, dm2_blk, optimize=True)  # (k1, k2, k3, k4)
+        # hdm2: J term
+        for kw in range(nkpts):
+            kx = kconserv[k1, k3, kw]
+            if kconserv[kw, kx, k2] == k4:
+                ppaa = eris.ppaa(k1, k3, kw)  # (k1, k3, kw, kx)
+                dm2  = casdm2_kpts[kw, kx, k2] # (kw, kx, k2, k4)
+                hdm2[k1, k2, k3] += (1.0 / nkpts) * np.einsum('pqwx,wxuv->puqv', ppaa, dm2, optimize=True)
 
-        if kconserv[k2, k2, k4] == k4: # This is redundant, still keeping it for safety.
-            paap = eris.paap(k1, k2, k4) # (k1, k2, k4, k3x)
-            dm2_blk = casdm2_kpts[k2, k2, k4]   # (k2, k4, k2, k4)
-            hdm2[k1, k2, k3] += 1.0 / nkpts * np.einsum('puvq,uvrs->prqs', paap, dm2_blk, optimize=True) # (k1, k2, k3, k4)
+         # hdm2: K term
+        for kw in range(nkpts):
+            kx = kconserv[k1, kw, k3]
+            papa = eris.papa(k1, kw, k3) # (k1, kw, k3, kx)
 
-    ppaa = papa = jtmp = ktmp = temp = None
+            if kconserv[kx, k2, kw] == k4:
+                dm2 = casdm2_kpts[kx, k2, kw] # (kx, k2, kw, k4)
+                hdm2[k1, k2, k3] += (1.0 / nkpts) * np.einsum('pwqx,xuwv->puqv', papa, dm2, optimize=True)
+
+            if kconserv[kw, k2, kx] == k4:
+                dm2 = casdm2_kpts[kw, k2, kx] # (kw, k2, kx, k4)
+                hdm2[k1, k2, k3] += (1.0 / nkpts) * np.einsum('pwqx,wuxv->puqv', papa, dm2, optimize=True)
+
+    ppaa = papa = jtmp = temp = None
 
     hdiag = np.empty((nkpts, nmo, nmo), dtype=dtype)
     for k in range(nkpts):
