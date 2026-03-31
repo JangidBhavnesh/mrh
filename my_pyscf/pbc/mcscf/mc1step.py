@@ -409,13 +409,12 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
                        for k in range(nkpts)])
     h_diag = np.hstack([mc.pack_uniq_var(hdiag[k]) 
                         for k in range(nkpts)])
-    
+        
     # Step-4: Hessian-vector product
     def h_op(x):
         # Since the orbital optimization is done for one giant matrix, so
         # I need to unpack this. When I will implement the k-CIAH for the orbital 
         # optimization below won't be required.
-
         nmopack = mc.pack_uniq_var(np.zeros((nmo, nmo))).shape[0]
         x = x.reshape(nkpts, nmopack)
         x2 = np.empty((nkpts, nmo, nmo), dtype=dtype)
@@ -426,12 +425,12 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
             x2[k][:ncore] += 2.0 * reduce(np.dot, (x1[:ncore,ncore:], vhf_ca[k][ncore:])) # (k, k)
             x2[k][ncore:nocc] += reduce(np.dot, (casdm1_kpts[k], x1[ncore:nocc], eris.vhf_c[k])) # (k, k)
 
-            # TODO: this for loop can be optimized.
-            for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
-                if k == k1 == k2:
-                    x1temp = mc.unpack_uniq_var(x[k3]) # (k3, k3)
-                    hdm2temp = hdm2[k1, k2, k3] # (k, k, k3, k3)
-                    x2[k][:, ncore:nocc] += np.einsum('purv,rv->pu', hdm2temp, x1temp[:,ncore:nocc]) # (k, k)
+            for k3 in range(nkpts):
+                k4 = kconserv[k, k, k3]
+                if k4 != k3: continue
+                hdm2temp = hdm2[k, k, k3]
+                x1temp = mc.unpack_uniq_var(x[k3]) # (k3, k3)
+                x2[k][:, ncore:nocc] += np.einsum('purv,rv->pu', hdm2temp, x1temp[:, ncore:nocc], optimize=True)
 
             if ncore > 0:
                 # I need to modify this function: mc.update_jk_in_ah as well.
