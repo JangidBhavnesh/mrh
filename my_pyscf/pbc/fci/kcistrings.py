@@ -148,6 +148,47 @@ def gen_k_sector_linkstr_info(link_indexa, link_indexb, nkpts, kindx):
     
     return np.asarray(blocks, dtype=np.int32)
 
+def _build_sector_map_spin(link_index, nkpts):
+    '''
+    Building sector string lists and global-to-local lookup for one spin sector.
+    args:
+        link_index : ndarray, shape (nstr, nlink, 8)
+            k-aware link index for one spin sector.
+        nkpts : int
+            Number of k-points / momentum sectors.
+    returns:
+        str_k : list of ndarrays
+            str_k[k] contains global string ids whose parent-string momentum is k.
+        str_k2tot : ndarray, shape (nkpts, nstr)
+            str_k2tot[k, str_global] gives the local index of str_global 
+            inside sector k. It is -1 if str_global is not in sector k.
+    '''
+    dtype = np.int32
+    assert link_index.ndim == 3
+    assert link_index.shape[2] == 8
+
+    nstr = link_index.shape[0]
+
+    _str_k = np.asarray(link_index[:, 0, 4], dtype=dtype)
+
+    str_k = [np.where(_str_k == k)[0].astype(dtype, copy=False)
+             for k in range(nkpts)]
+
+    str_k2tot = -np.ones((nkpts, nstr), dtype=dtype)
+    
+    for k, ids in enumerate(str_k):
+        ids = np.asarray(ids, dtype=dtype)
+        str_k2tot[k, ids] = np.arange(ids.size, dtype=dtype)
+    
+    return str_k, str_k2tot
+
+def gen_k_sector_maps(link_indexa, link_indexb, nkpts):
+    '''
+    Build alpha/beta sector string lists and global-to-local maps.
+    '''
+    alpha_by_kindx, alpha_str_k2tot = _build_sector_map_spin(link_indexa, nkpts)
+    beta_by_kindx, beta_str_k2tot = _build_sector_map_spin(link_indexb, nkpts)
+    return alpha_by_kindx, beta_by_kindx, alpha_str_k2tot, beta_str_k2tot
 
 if __name__ == "__main__":
     from pyscf.fci import cistring
