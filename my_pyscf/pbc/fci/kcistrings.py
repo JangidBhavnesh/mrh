@@ -81,14 +81,81 @@ def gen_linkstr_index_k(orb_list, nocc, orb_k, nkpts, strs=None):
 
     return link_index
 
+def _count_det_per_k(link_index):
+    '''
+    Count the number of determinants in each momentum sector K0 using the link index.
+    Assumes that link_index is sorted by K0 (which is true for the output of gen_linkstr_index_k).
+    '''
+    if isinstance(link_index, tuple):
+        return tuple(_count_det_per_k(x) for x in link_index)
+
+    assert link_index.ndim == 3
+    assert link_index.shape[2] >= 5
+
+    K0_values = np.asarray(link_index[:, 0, 4], dtype=np.int32)
+    unique_K0, counts = np.unique(K0_values, return_counts=True)
+
+    return {int(kindx): int(ndet_k) 
+            for kindx, ndet_k in zip(unique_K0, counts)}
+
+def gen_k_sector_linkstr_info(link_indexa, link_indexb, nkpts, kindx):
+    '''
+    Building the sector-specific link index info for k-FCI.
+    args:
+    link_indexa, link_indexb : ndarray, shape (na, nlink, 8)
+        The k-aware link index for alpha and beta strings.
+    nkpts : int
+        Number of k-points.
+    kindx : int
+         Target total momentum sector, interpreted modulo nkpts.
+    returns:
+        blocks : ndarray, shape (nblocks, 6)
+            Each row is: [ka, kb, na, nb, offset, size]
+            where:
+                ka      alpha-string momentum sector
+                kb      beta-string momentum sector
+                na      number of alpha strings in sector ka
+                nb      number of beta strings in sector kb
+                offset  starting offset of this block in flattened fcivec
+                size    na * nb
+    '''
+    assert link_indexa.ndim == link_indexb.ndim == 3
+    assert link_indexa.shape[2] == link_indexb.shape[2] == 8
+
+    kindx = int(kindx) % nkpts
+
+    count_a, count_b = _count_det_per_k((link_indexa, link_indexb))
+
+    blocks = []
+    offset = 0
+
+    for ka in range(nkpts):
+        kb = (kindx - ka) % nkpts
+
+        na = count_a.get(ka, 0)
+        nb = count_b.get(kb, 0)
+
+        size = na * nb
+        if size == 0:
+            continue
+
+        blocks.append([ka, kb, na, nb, offset, size])
+        offset += size
+
+    # Aha, this can also happen.
+    if len(blocks) == 0:
+        return np.zeros((0, 6), dtype=np.int32)
+    
+    return np.asarray(blocks, dtype=np.int32)
 
 
 if __name__ == "__main__":
     from pyscf.fci import cistring
 
-    norb = 18
-    nalpha = 9 
-    nkpts = 2
+    norb = 16
+    nalpha, nbeta = (8, 8)
+    nkpts = 8
+    assert norb % nkpts == 0
     norb_per_k = norb // nkpts
     orb_k = np.arange(norb, dtype=np.int32) // norb_per_k
 
@@ -112,3 +179,12 @@ if __name__ == "__main__":
 
     assert np.all(K0_stored == K0_stored[:, [0]])
     assert np.array_equal(K0_stored[:, 0], K_str)
+
+    link_indexa = gen_linkstr_index_k(range(norb), nalpha, orb_k, nkpts)
+    link_indexb = gen_linkstr_index_k(range(norb), nbeta, orb_k, nkpts)
+    blocks = gen_k_sector_linkstr_info(link_indexa, link_indexb, nkpts=nkpts, kindx=0)
+
+    print(blocks)
+    # Note blocks are stored as [ka, kb, na, nb, offset, size]
+    print("Number of determinants in kindx 0 =", blocks[:, 5].sum())
+    print("Ratio of ndet in kindx 0 / total det =", blocks[:, 5].sum() / (link_indexa.shape[0] * link_indexb.shape[0]))
