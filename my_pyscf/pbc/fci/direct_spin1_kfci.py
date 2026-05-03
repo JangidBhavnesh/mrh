@@ -1,10 +1,12 @@
 import numpy as np
 
+
 from pyscf.fci.addons import _unpack_nelec
 from mrh.my_pyscf.pbc.fci import rdm_helper, kcistrings
 
 
-from mrh.my_pyscf.pbc.fci.kcistrings import gen_k_sector_linkstr_info, gen_k_sector_maps
+from mrh.my_pyscf.pbc.fci.kcistrings import gen_k_sector_linkstr_info, gen_k_sector_maps, build_k_links_spin
+
 
 # Author: Bhavnesh Jangid
 
@@ -27,7 +29,6 @@ def _unpack(norb, nelec, link_index, nkpts, spin=None):
     else:
         assert link_index[0].shape[2] == link_index[1].shape[2] == 8
         return link_index
-
 
 def contract_1e_k(h1e, fcivec, norb, nelec, nkpts, kindx, link_index=None):
     '''
@@ -153,13 +154,294 @@ def contract_1e_k(h1e, fcivec, norb, nelec, nkpts, kindx, link_index=None):
 
     return sigma_ci
 
+def _get_ci_sectors(fcivec, blocks, nkpts):
+    '''
+    Extract blocked CI vectors from a full CI vector based on k-sector information.
+    '''
+    ci_blocks = [[None for _ in range(nkpts)] for _ in range(nkpts)]
+    for ka, kb, nstra, nstrb, offset, size in blocks:
+        ci_blocks[ka][kb] = fcivec[offset:offset + size].reshape(nstra, nstrb)
+    return ci_blocks
+
+def get_links_by_k(links, k):
+    out = []
+    for dK_links in links["by_k_dk"][k]:
+        out.extend(dK_links)
+    return out
+
+def get_links_by_k_dk(links, k, dK):
+    return links["by_k_dk"][k][dK]
+
+def build_links_by_global_source(links, nkpts):
+    by_global_source = {}
+
+    for k in range(nkpts):
+        for dK in range(nkpts):
+            for link in links["by_k_dk"][k][dK]:
+                by_global_source.setdefault(link.str0_global, []).append(link)
+
+    return by_global_source
+
+def get_links_from_global_source(links, src_global, nkpts):
+    if "_by_global_source" not in links:
+        links["_by_global_source"] = build_links_by_global_source(links, nkpts)
+
+    return links["_by_global_source"].get(src_global, [])
+
+def contract_ab(eri, ci0_block, ci1_blocks, links_a, links_b, ka, kb):
+    '''
+    Applying the two-electron part of the Hamiltonian that involves both alpha and beta strings.
+
+    '''
+    nkpts = eri.shape[0]
+
+    for la in get_links_by_k(links_a, ka):
+        dKa = la.dK
+        ka1 = la.k1
+
+        dKb_needed = (-dKa) % nkpts
+
+        for lb in get_links_by_k_dk(links_b, kb, dKb_needed):
+            kb1 = lb.k1
+            ci1_block = ci1_blocks[ka1][kb1]
+
+            if ci1_block is None:
+                continue
+
+            kp_a = la.k_cre
+            kq_a = la.k_des
+            kr_b = lb.k_cre
+            ks_b = lb.k_des
+
+            if (kp_a - kq_a + kr_b - ks_b) % nkpts != 0:
+                continue
+
+            p_a = la.cre_l
+            q_a = la.des_l
+            r_b = lb.cre_l
+            s_b = lb.des_l
+
+            val_ab = eri[kp_a, kq_a, kr_b, p_a, q_a, r_b, s_b]
+
+            kp_b = lb.k_cre
+            kq_b = lb.k_des
+            kr_a = la.k_cre
+            ks_a = la.k_des
+
+            if (kp_b - kq_b + kr_a - ks_a) % nkpts != 0:
+                continue
+
+            p_b = lb.cre_l
+            q_b = lb.des_l
+            r_a = la.cre_l
+            s_a = la.des_l
+
+            val_ba = eri[kp_b, kq_b, kr_a, p_b, q_b, r_a, s_a]
+
+            val = val_ab + val_ba
+
+            ci1_block[la.str1_local, lb.str1_local] += (val * la.sign * lb.sign * 
+                                                        ci0_block[la.str0_local, lb.str0_local])
+
+
+def build_links_by_global_source(links, nkpts):
+    by_global_source = {}
+
+    for k in range(nkpts):
+        for dK in range(nkpts):
+            for link in links["by_k_dk"][k][dK]:
+                by_global_source.setdefault(link.str0_global, []).append(link)
+
+    return by_global_source
+
+
+def contract_aa(eri, ci0_blocks, ci1_blocks, links_a, ka, kb):
+    nkpts = eri.shape[0]
+
+    ci0_block = ci0_blocks[ka][kb]
+    if ci0_block is None:
+        return
+
+    if "_by_global_source" not in links_a:
+        links_a["_by_global_source"] = build_links_by_global_source(links_a, nkpts)
+
+    for l1 in get_links_by_k(links_a, ka):
+        dK1 = l1.dK
+        a0 = l1.str0_local
+        a_mid_global = l1.str1_global
+
+        links_from_mid = links_a["_by_global_source"].get(a_mid_global, [])
+
+        for l2 in links_from_mid:
+            if l2.k0 != l1.k1:
+                continue
+
+            dK2 = l2.dK
+
+            if (dK1 + dK2) % nkpts != 0:
+                continue
+
+            ka1 = l2.k1
+            ci1_block = ci1_blocks[ka1][kb]
+
+            if ci1_block is None:
+                continue
+
+            # l1 acts first:  E_rs
+            r = l1.cre_l
+            s = l1.des_l
+            kr = l1.k_cre
+            ks = l1.k_des
+
+            # l2 acts second: E_pq
+            p = l2.cre_l
+            q = l2.des_l
+            kp = l2.k_cre
+            kq = l2.k_des
+
+            if (kp - kq + kr - ks) % nkpts != 0:
+                continue
+
+            val = eri[kp, kq, kr, p, q, r, s]
+
+            a1 = l2.str1_local
+
+            ci1_block[a1, :] += (
+                val * l1.sign * l2.sign * ci0_block[a0, :]
+            )
+
+
+def contract_bb(eri, ci0_blocks, ci1_blocks, links_b, ka, kb):
+    nkpts = eri.shape[0]
+
+    ci0_block = ci0_blocks[ka][kb]
+    if ci0_block is None:
+        return
+
+    if "_by_global_source" not in links_b:
+        links_b["_by_global_source"] = build_links_by_global_source(links_b, nkpts)
+
+    for l1 in get_links_by_k(links_b, kb):
+        dK1 = l1.dK
+        b0 = l1.str0_local
+        b_mid_global = l1.str1_global
+
+        links_from_mid = links_b["_by_global_source"].get(b_mid_global, [])
+
+        for l2 in links_from_mid:
+            if l2.k0 != l1.k1:
+                continue
+
+            dK2 = l2.dK
+
+            if (dK1 + dK2) % nkpts != 0:
+                continue
+
+            kb1 = l2.k1
+            ci1_block = ci1_blocks[ka][kb1]
+
+            if ci1_block is None:
+                continue
+
+            # l1 acts first: E_rs
+            r = l1.cre_l
+            s = l1.des_l
+            kr = l1.k_cre
+            ks = l1.k_des
+
+            # l2 acts second: E_pq
+            p = l2.cre_l
+            q = l2.des_l
+            kp = l2.k_cre
+            kq = l2.k_des
+
+            if (kp - kq + kr - ks) % nkpts != 0:
+                continue
+
+            val = eri[kp, kq, kr, p, q, r, s]
+
+            if val == 0:
+                continue
+
+            b1 = l2.str1_local
+
+            ci1_block[:, b1] += (
+                val * l1.sign * l2.sign * ci0_block[:, b0]
+            )
+
+def contract_2e_k(eri, fcivec, norb, nelec, nkpts, target_k, link_index=None):
+    '''
+    Contract two-electron Hamiltonian with a k-FCI vector in a fixed total momentum sector.
+    args:
+        eri : ndarray, shape (nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas)
+            Two-electron integrals in k-space, in chemist notation.
+        fcivec : ndarray, shape (sector_size,)
+            k-FCI vector in the target total momentum sector.
+        norb : int
+            Total number of orbitals.
+        nelec : tuple of 2 ints
+            Number of alpha and beta electrons.
+        nkpts : int
+            Number of k-points / momentum sectors.
+        target_k : int
+            Target total momentum sector for the output sigma vector.
+        link_indexa, link_indexb : tuple of 2 ndarrays
+            Look up tables/link index for alpha and beta strings. 
+            These should be k-aware link indices, and the link columns are:
+            [cre, des, target_address, parity, k0, k_cre, k_des, dK].
+    returns:
+        sigma_ci : ndarray, shape (sector_size,)
+            Result of the Hamiltonian-vector product in the target momentum sector.    
+    '''
+    nkpts = eri.shape[0]
+    dtype = np.result_type(eri.dtype, fcivec.dtype)
+
+    link_indexa, link_indexb = _unpack(norb, nelec, link_index, nkpts)
+    straid_k, strbid_k, str2tot_a, str2tot_b = gen_k_sector_maps(link_indexa, link_indexb, nkpts)
+    links_a = build_k_links_spin(link_indexa, norb, nkpts, straid_k, str2tot_a)
+    links_b = build_k_links_spin(link_indexb, norb, nkpts, strbid_k, str2tot_b)
+    
+    straid_k = strbid_k = str2tot_a = str2tot_b = None # free up some memory
+
+    sigma_ci = np.zeros(fcivec.shape, dtype=dtype, order="C")
+    
+    blocks = gen_k_sector_linkstr_info(link_indexa, link_indexb, nkpts, target_k)
+
+    # sanity check: the total size of the k-sector blocks should match the size of the fcivec.
+    sector_size = int(blocks[:, 5].sum())
+    assert fcivec.size == sector_size
+    
+    # Now rearrange the fcivec into a blocked structure based on the k-sectors of the 
+    # alpha and beta strings.
+    ci0_blocks = _get_ci_sectors(fcivec, blocks, nkpts)
+    ci1_blocks = _get_ci_sectors(sigma_ci, blocks, nkpts)
+
+    # Free up some memory.
+    blocks = None
+
+    for ka in range(nkpts):
+        kb = (target_k - ka) % nkpts
+
+        if ci0_blocks[ka][kb] is None:
+            continue
+
+        # contract2e for alpha beta blocks
+        contract_ab(eri, ci0_blocks[ka][kb], ci1_blocks, links_a, links_b, ka, kb)
+
+        # same-spin alpha-alpha part
+        contract_aa(eri, ci0_blocks, ci1_blocks, links_a, ka, kb)
+        
+        # same-spin beta-beta part
+        contract_bb(eri, ci0_blocks, ci1_blocks, links_b, ka, kb)
+
+    return sigma_ci
 
 if __name__ == '__main__':
     
     TEST1 = False
-    TEST2 = True
+    TEST2 = False
     TEST3 = False
-
+    TEST4 = True
     if TEST1:
         ncastot = 8
         nelectot = (4, 4)
@@ -263,3 +545,309 @@ if __name__ == '__main__':
             # print("sigma_ci[:10]  =", sigma_ci[:10])
 
 
+    if TEST3:
+        rng = np.random.default_rng(12)
+
+        nkpts = 3
+        ncas = 2
+        norb = nkpts * ncas
+
+        nelec = (1*nkpts, 1*nkpts)
+
+        link_index = None
+        link_indexa, link_indexb = _unpack(norb, nelec, link_index, nkpts)
+
+        eri = (
+            rng.normal(size=(nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas))
+            + 1j * rng.normal(size=(nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas))
+        )
+
+        for kindx in range(nkpts):
+            blocks = gen_k_sector_linkstr_info(
+                link_indexa,
+                link_indexb,
+                nkpts,
+                kindx,
+            )
+
+            sector_size = int(blocks[:, 5].sum())
+
+            fcivec = (
+                rng.normal(size=sector_size)
+                + 1j * rng.normal(size=sector_size)
+            )
+
+            fcivec /= np.linalg.norm(fcivec)
+
+            sigma_ci = contract_2e_k(
+                eri,
+                fcivec,
+                norb,
+                nelec,
+                nkpts,
+                kindx,
+                link_index=None,
+            )
+
+            print("=" * 80)
+            print("target momentum sector kindx =", kindx)
+            print("blocks:")
+            print(blocks)
+            print("sector_size      =", sector_size)
+            print("fcivec shape     =", fcivec.shape)
+            print("sigma_ci shape   =", sigma_ci.shape)
+            print("||fcivec||       =", np.linalg.norm(fcivec))
+            print("||sigma_ci||     =", np.linalg.norm(sigma_ci))
+            print("finite sigma?    =", np.all(np.isfinite(sigma_ci)))
+    
+
+        from pyscf import fci
+
+        from mrh.my_pyscf.pbc.fci import direct_spin1_cplx_opt
+        # from mrh.my_pyscf.pbc.fci.direct_spin1_kfci import contract_2e_k
+        # from mrh.my_pyscf.pbc.fci.direct_spin1_kfci import _unpack
+        # from mrh.my_pyscf.pbc.fci.kcistrings import gen_k_sector_maps
+        # from mrh.my_pyscf.pbc.fci.kcistrings import gen_k_sector_linkstr_info
+
+        def eri_k_to_full(eri_k):
+            nkpts, ncas = eri_k.shape[0], eri_k.shape[-1]
+            norb = nkpts * ncas
+            eri_full = np.zeros((norb, norb, norb, norb), dtype=eri_k.dtype)
+            for kp, kq, kr in np.ndindex(nkpts, nkpts, nkpts):
+                ks = (kp - kq + kr) % nkpts
+                P, Q, R, S = kp * ncas, kq * ncas, kr * ncas, ks * ncas
+                eri_full[P:P + ncas, Q:Q + ncas, R:R + ncas, S:S + ncas] = eri_k[kp, kq, kr]
+            return eri_full
+        
+        def eri_full_to_k(eri_full, nkpts, ncas):
+            ef = eri_full.reshape(nkpts, ncas, nkpts, ncas, nkpts, ncas, nkpts, ncas)
+            eri_k = np.zeros((nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas), dtype=eri_full.dtype)
+            for kp, kq, kr in np.ndindex(nkpts, nkpts, nkpts):
+                ks = (kp - kq + kr) % nkpts
+                eri_k[kp, kq, kr] = ef[kp, :, kq, :, kr, :, ks, :]
+            return eri_k
+      
+        def embed_sector_fcivec_to_full_ci(fcivec_k, blocks, straid_k, strbid_k, 
+                                   nstra_total, nstrb_total):
+            '''
+            In this function, I will create the full CI vector (as zeros) and then only
+            fill in the specific block corresponding to each (ka, kb) sector with the sector-wise CI vector.
+            '''
+            
+            ci_full = np.zeros( (nstra_total, nstrb_total), dtype=fcivec_k.dtype)
+
+            for blk in blocks:
+                ka, kb, nstra, nstrb, offset, size = map(int, blk)
+                block_ka_kb = fcivec_k[offset:offset + size].reshape(nstra, nstrb)
+
+                astrs = straid_k[ka]
+                bstrs = strbid_k[kb]
+
+                ci_full[np.ix_(astrs, bstrs)] = block_ka_kb
+
+            return ci_full
+
+        
+        def extract_sector_from_full_ci(ci_full, blocks, straid_k, strbid_k):
+            '''
+            This function extracts the sector-wise CI vector from the full CI vector.
+            '''
+
+            sector_size = int(blocks[:, 5].sum())
+
+            fcivec_k = np.zeros(sector_size, dtype=ci_full.dtype)
+
+            for blk in blocks:
+                ka, kb, nstra, nstrb, offset, size = map(int, blk)
+            
+                astrs = straid_k[ka]
+                bstrs = strbid_k[kb]
+
+                block = ci_full[np.ix_(astrs, bstrs)]
+
+                fcivec_k[offset:offset + size] = block.reshape(-1)
+
+            return fcivec_k
+    
+
+        def compare_kfci_nkpts_gt1_vs_full_mol(
+            nkpts=3,
+            ncas=3,
+            nelec=(2, 1),
+            target_k=0,
+            seed=12,
+        ):
+            rng = np.random.default_rng(seed)
+
+            norb = nkpts * ncas
+
+            link_index = None
+
+            link_indexa, link_indexb = _unpack(
+                norb,
+                nelec,
+                link_index,
+                nkpts,
+            )
+
+            straid_k, strbid_k, str2tot_a, str2tot_b = gen_k_sector_maps(
+                link_indexa,
+                link_indexb,
+                nkpts,
+            )
+
+            blocks = gen_k_sector_linkstr_info(
+                link_indexa,
+                link_indexb,
+                nkpts,
+                target_k,
+            )
+
+            sector_size = int(blocks[:, 5].sum())
+
+            fcivec_k = (
+                rng.normal(size=sector_size)
+                + 1j * rng.normal(size=sector_size)
+            )
+            fcivec_k /= np.linalg.norm(fcivec_k)
+
+            eri_k = (
+                rng.normal(
+                    size=(nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas)
+                )
+                + 1j * rng.normal(
+                    size=(nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas)
+                )
+            )
+
+            eri_full = eri_k_to_full(eri_k)
+
+            eri_full = 0.5 * (
+                eri_full
+                + eri_full.transpose(2, 3, 0, 1)
+            )
+
+            eri_k = eri_full_to_k(
+                eri_full,
+                nkpts,
+                ncas,
+            )
+
+            eri_full = eri_k_to_full(eri_k)
+
+            nstra_total = fci.cistring.num_strings(norb, nelec[0])
+            nstrb_total = fci.cistring.num_strings(norb, nelec[1])
+
+            ci_full = embed_sector_fcivec_to_full_ci(
+                fcivec_k,
+                blocks,
+                straid_k,
+                strbid_k,
+                nstra_total,
+                nstrb_total,
+            )
+
+            sigma_k = contract_2e_k(
+                eri_k,
+                fcivec_k,
+                norb,
+                nelec,
+                nkpts,
+                target_k,
+                link_index=None,
+            )
+
+            sigma_full = direct_spin1_cplx_opt.contract_2e(
+                eri_full,
+                ci_full,
+                norb,
+                nelec,
+                link_index=None,
+            )
+
+            sigma_ref_k = extract_sector_from_full_ci(
+                sigma_full,
+                blocks,
+                straid_k,
+                strbid_k,
+            )
+
+            diff = sigma_k - sigma_ref_k
+
+            return sigma_k, sigma_ref_k, diff
+    
+
+        import unittest
+
+        class KnownValues(unittest.TestCase):
+
+            def test_contract_2e_k_nkpts_gt1_vs_full_mol(self):
+                test_cases = [
+                    (2, 3, (1, 1)),
+                    (2, 3, (2, 0)),
+                    (2, 3, (0, 2)),
+                    (2, 3, (2, 1)),
+                    (2, 3, (2, 2)),
+                    (3, 2, (1, 1)),
+                    (3, 2, (2, 1)),
+                    (3, 4, (2, 2)),
+                    (4, 2, (1, 1)),
+                    (5, 2, (1, 1)),
+                ]
+
+                for nkpts, ncas, nelec in test_cases:
+                    for target_k in range(nkpts):
+                        with self.subTest(
+                            nkpts=nkpts,
+                            ncas=ncas,
+                            nelec=nelec,
+                            target_k=target_k,
+                        ):
+                            sigma_k, sigma_ref_k, diff = (
+                                compare_kfci_nkpts_gt1_vs_full_mol(
+                                    nkpts=nkpts,
+                                    ncas=ncas,
+                                    nelec=nelec,
+                                    target_k=target_k,
+                                    seed=12,
+                                )
+                            )
+
+                            self.assertEqual(
+                                sigma_k.shape,
+                                sigma_ref_k.shape,
+                            )
+
+                            print("=" * 80)
+                            print(
+                                    f"contract_2e_k failed nkpts>1 full-space "
+                                    f"reference test for "
+                                    f"nkpts={nkpts}, ncas={ncas}, "
+                                    f"nelec={nelec}, target_k={target_k}. "
+                                    f"||diff||={np.linalg.norm(diff)}, "
+                                    f"||ref||={np.linalg.norm(sigma_ref_k)}, "
+                                    f"rel={np.linalg.norm(diff) / max(np.linalg.norm(sigma_ref_k), 1e-14)}, "
+                                    f"max_abs={np.max(np.abs(diff))}"
+                                )
+                            self.assertTrue(
+                                np.allclose(
+                                    sigma_k,
+                                    sigma_ref_k,
+                                    atol=1e-12,
+                                    rtol=1e-12,
+                                ),
+                                msg=(
+                                    f"contract_2e_k failed nkpts>1 full-space "
+                                    f"reference test for "
+                                    f"nkpts={nkpts}, ncas={ncas}, "
+                                    f"nelec={nelec}, target_k={target_k}. "
+                                    f"||diff||={np.linalg.norm(diff)}, "
+                                    f"||ref||={np.linalg.norm(sigma_ref_k)}, "
+                                    f"rel={np.linalg.norm(diff) / max(np.linalg.norm(sigma_ref_k), 1e-14)}, "
+                                    f"max_abs={np.max(np.abs(diff))}"
+                                ),
+                            )
+
+
+        # if __name__ == "__main__":
+        unittest.main()
