@@ -1,6 +1,5 @@
 import numpy as np
 
-
 from pyscf.fci.addons import _unpack_nelec
 from mrh.my_pyscf.pbc.fci import rdm_helper, kcistrings
 
@@ -301,7 +300,6 @@ def get_link_indices_from_global_source(links, src_global):
 
     return order[start:end]
 
-
 AB_A0      = 0
 AB_A1      = 1
 AB_B0      = 2
@@ -452,6 +450,7 @@ def contract_ab_pairs(eri, ci0_block, ci1_blocks, ab_pairs, ka, kb):
         ka1 = row[AB_KA1]
         kb1 = row[AB_KB1]
         ci1_block = ci1_blocks[ka1][kb1]
+
         if ci1_block is None:
             continue
 
@@ -581,33 +580,11 @@ def contract_2e_k(eri, fcivec, norb, nelec, nkpts, target_k, link_index=None):
         
         # # same-spin beta-beta part
         # contract_bb(eri, ci0_blocks, ci1_blocks, links_b, ka, kb)
-        contract_ab_pairs(
-            eri,
-            ci0_blocks[ka][kb],
-            ci1_blocks,
-            ab_pairs,
-            ka,
-            kb,
-        )
+        contract_ab_pairs(eri, ci0_blocks[ka][kb], ci1_blocks, ab_pairs, ka, kb)
 
-        contract_aa_pairs(
-            eri,
-            ci0_blocks,
-            ci1_blocks,
-            aa_pairs,
-            ka,
-            kb,
-        )
+        contract_aa_pairs(eri, ci0_blocks, ci1_blocks, aa_pairs, ka, kb)
 
-        contract_bb_pairs(
-            eri,
-            ci0_blocks,
-            ci1_blocks,
-            bb_pairs,
-            ka,
-            kb,
-        )
-
+        contract_bb_pairs(eri, ci0_blocks, ci1_blocks, bb_pairs, ka, kb)
 
     return sigma_ci
 
