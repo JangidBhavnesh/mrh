@@ -2,6 +2,9 @@
 
 import ctypes
 import numpy as np
+from dataclasses import dataclass
+from collections import defaultdict
+
 from pyscf.fci.cistring import OIndexList, make_strings
 
 from mrh.lib.helper import load_library
@@ -92,10 +95,19 @@ def _count_det_per_k(link_index):
     assert link_index.ndim == 3
     assert link_index.shape[2] >= 5
 
+    nstr = link_index.shape[0]
+    nlink = link_index.shape[1]
+
+    # Zero-link case, e.g. nelec = 0 for one spin sector.
+    # There is still one determinant/string: the vacuum string.
+    # Its momentum sector is K0 = 0.
+    if nlink == 0:
+        return {0: int(nstr)}
+
     K0_values = np.asarray(link_index[:, 0, 4], dtype=np.int32)
     unique_K0, counts = np.unique(K0_values, return_counts=True)
 
-    return {int(kindx): int(ndet_k) 
+    return {int(kindx): int(ndet_k)
             for kindx, ndet_k in zip(unique_K0, counts)}
 
 def gen_k_sector_linkstr_info(link_indexa, link_indexb, nkpts, kindx):
@@ -168,7 +180,18 @@ def _build_sector_map_spin(link_index, nkpts):
     assert link_index.shape[2] == 8
 
     nstr = link_index.shape[0]
-
+    nlink = link_index.shape[1]
+    # Edge case: no excitation links.
+    # This happens, for example, for nelec = 0 in one spin sector.
+    # There is still one valid string: the vacuum string.
+    # Its total momentum is 0.
+    if nlink == 0:
+        str_k = [np.empty(0, dtype=dtype) for _ in range(nkpts)]
+        str_k[0] = np.arange(nstr, dtype=dtype)
+        str_k2tot = -np.ones((nkpts, nstr), dtype=dtype)
+        str_k2tot[0, :nstr] = np.arange(nstr, dtype=dtype)
+        return str_k, str_k2tot
+    
     _str_k = np.asarray(link_index[:, 0, 4], dtype=dtype)
 
     str_k = [np.where(_str_k == k)[0].astype(dtype, copy=False)
@@ -189,6 +212,104 @@ def gen_k_sector_maps(link_indexa, link_indexb, nkpts):
     alpha_by_kindx, alpha_str_k2tot = _build_sector_map_spin(link_indexa, nkpts)
     beta_by_kindx, beta_str_k2tot = _build_sector_map_spin(link_indexb, nkpts)
     return alpha_by_kindx, beta_by_kindx, alpha_str_k2tot, beta_str_k2tot
+
+@dataclass
+class KLink:
+    cre: int              # global creation orbital
+    des: int              # global destruction orbital
+    cre_l: int            # local creation orbital within k_cre
+    des_l: int            # local destruction orbital within k_des
+    str0_global: int      # source string address, global
+    str1_global: int      # target string address, global
+    str0_local: int       # source string local index inside k0 sector
+    str1_local: int       # target string local index inside k1 sector
+    sign: int             # +1 or -1
+    k0: int               # source string momentum
+    k1: int               # target string momentum
+    k_cre: int            # creation momentum
+    k_des: int            # destruction momentum
+    dK: int               # k_cre - k_des mod nkpts
+
+
+def build_k_links_spin(link_index, norb, nkpts, str_k, str_k2tot):
+    '''
+    Build the grouped link lists for a single spin sector, along with the local string index maps.
+    The grouping is done by the source string momentum k0 and the momentum transfer dK.
+    '''
+    # Sanity checks
+    assert link_index.ndim == 3
+    assert link_index.shape[2] == 8
+
+    nstr, nlink, _ = link_index.shape
+    norb_per_k = norb // nkpts
+
+    assert norb_per_k * nkpts == norb
+
+    # links grouped only by starting determinant sector and momentum transfer
+    by_k_dk = [[list() for _ in range(nkpts)] 
+               for _ in range(nkpts)]
+
+    # links grouped by starting determinant sector, local source string, and dK
+    by_k_src_dk = [[[list() for _ in range(nkpts)] 
+                    for _ in range(len(str_k[k]))] 
+                    for k in range(nkpts)]
+
+    # optional lookup by global source string and dK
+    # by_global_src_dk = defaultdict(list)
+
+    for str0_global in range(nstr):
+        for j in range(nlink):
+            row = link_index[str0_global, j]
+            cre = int(row[0])
+            des = int(row[1])
+            str1_global = int(row[2])
+            sign = int(row[3])
+            k0 = int(row[4]) % nkpts
+            k_cre = int(row[5]) % nkpts
+            k_des = int(row[6]) % nkpts
+            dK = int(row[7]) % nkpts
+
+            # Sanity: excitation q -> p changes string momentum by k_p - k_q
+            dK_check = (k_cre - k_des) % nkpts
+            assert dK == dK_check, (f"dK mismatch at str0={str0_global}, link={j}: " 
+                                    f"dK={dK}, but k_cre-k_des={dK_check}")
+
+            # Sanity: target string momentum k1 should be (k0 + dK) % nkpts
+            k1 = (k0 + dK) % nkpts
+
+            cre_l = cre % norb_per_k
+            des_l = des % norb_per_k
+
+            str0_local = int(str_k2tot[k0, str0_global])
+            str1_local = int(str_k2tot[k1, str1_global])
+
+            assert str0_local >= 0 and str1_local >= 0, "Momentum sector mismatch"
+
+            k1_from_table = int(link_index[str1_global, 0, 4]) % nkpts
+            assert k1_from_table == k1, (
+                f"Target string sector mismatch: str0={str0_global}, link={j}, "
+                f"str1={str1_global}, expected k1={k1}, table has {k1_from_table}"
+            )
+
+            # Create the KLink object
+            link = KLink(cre=cre, des=des, cre_l=cre_l, des_l=des_l, str0_global=str0_global, 
+                         str1_global=str1_global, str0_local=str0_local, str1_local=str1_local, 
+                         sign=sign, k0=k0, k1=k1, k_cre=k_cre, k_des=k_des, dK=dK)
+
+            by_k_dk[k0][dK].append(link)
+            by_k_src_dk[k0][str0_local][dK].append(link)
+            # by_global_src_dk[(str0_global, dK)].append(link)
+
+    links_info = {
+        "str_k": str_k,
+        "str_k2tot": str_k2tot,
+        "by_k_dk": by_k_dk,
+        "by_k_src_dk": by_k_src_dk,
+        # "by_global_src_dk": by_global_src_dk,
+        # "norb_per_k": norb_per_k,
+    }
+
+    return links_info
 
 if __name__ == "__main__":
     from pyscf.fci import cistring
