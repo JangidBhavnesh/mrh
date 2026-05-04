@@ -231,7 +231,7 @@ class KLink:
     dK: int               # k_cre - k_des mod nkpts
 
 
-def build_k_links_spin(link_index, norb, nkpts, str_k, str_k2tot):
+def _build_k_links_spin(link_index, norb, nkpts, str_k, str_k2tot):
     '''
     Build the grouped link lists for a single spin sector, along with the local string index maps.
     The grouping is done by the source string momentum k0 and the momentum transfer dK.
@@ -307,6 +307,128 @@ def build_k_links_spin(link_index, norb, nkpts, str_k, str_k2tot):
         "by_k_src_dk": by_k_src_dk,
         # "by_global_src_dk": by_global_src_dk,
         # "norb_per_k": norb_per_k,
+    }
+
+    return links_info
+
+
+L_CRE_L       = 0
+L_DES_L       = 1
+L_STR0_LOCAL  = 2
+L_STR1_LOCAL  = 3
+L_STR0_GLOBAL = 4
+L_STR1_GLOBAL = 5
+L_SIGN        = 6
+L_K0          = 7
+L_K1          = 8
+L_K_CRE       = 9
+L_K_DES       = 10
+L_DK          = 11
+
+NLINK_FIELDS = 12
+
+def build_k_links_spin(link_index, norb, nkpts, str_k, str_k2tot):
+    '''
+    Build the compact link table for a single spin sector, along with the local string index maps.
+    The grouping is done by the source string momentum k0 and the momentum transfer dK.
+    '''
+    # Sanity checks
+    assert link_index.ndim == 3
+    assert link_index.shape[2] == 8
+
+    nstr, nlink, _ = link_index.shape
+    norb_per_k = norb // nkpts
+
+    assert norb_per_k * nkpts == norb
+
+    rows = []
+
+    for str0_global in range(nstr):
+        for j in range(nlink):
+            row = link_index[str0_global, j]
+
+            cre = int(row[0])
+            des = int(row[1])
+            str1_global = int(row[2])
+            sign = int(row[3])
+            k0 = int(row[4]) % nkpts
+            k_cre = int(row[5]) % nkpts
+            k_des = int(row[6]) % nkpts
+            dK = int(row[7]) % nkpts
+
+            # Sanity: excitation q -> p changes string momentum by k_p - k_q
+            dK_check = (k_cre - k_des) % nkpts
+            assert dK == dK_check, (f"dK mismatch at str0={str0_global}, link={j}: "
+                                    f"dK={dK}, but k_cre-k_des={dK_check}")
+
+            # Sanity: target string momentum k1 should be (k0 + dK) % nkpts
+            k1 = (k0 + dK) % nkpts
+
+            cre_l = cre % norb_per_k
+            des_l = des % norb_per_k
+
+            str0_local = int(str_k2tot[k0, str0_global])
+            str1_local = int(str_k2tot[k1, str1_global])
+
+            assert str0_local >= 0 and str1_local >= 0, "Momentum sector mismatch"
+
+            # If the target string has no links, e.g. zero-electron sector,
+            # link_index[str1_global, 0, 4] may be invalid. Only check when nlink > 0.
+            if nlink > 0:
+                k1_from_table = int(link_index[str1_global, 0, 4]) % nkpts
+                assert k1_from_table == k1, (
+                    f"Target string sector mismatch: str0={str0_global}, link={j}, "
+                    f"str1={str1_global}, expected k1={k1}, table has {k1_from_table}"
+                )
+
+            rows.append([
+                cre_l,
+                des_l,
+                str0_local,
+                str1_local,
+                str0_global,
+                str1_global,
+                sign,
+                k0,
+                k1,
+                k_cre,
+                k_des,
+                dK,
+            ])
+
+    if len(rows) == 0:
+        linktab = np.zeros((0, NLINK_FIELDS), dtype=np.int32)
+    else:
+        linktab = np.asarray(rows, dtype=np.int32)
+
+    # Sort links by source sector k0 and momentum transfer dK.
+    if linktab.shape[0] > 0:
+        order = np.lexsort((linktab[:, L_DK], linktab[:, L_K0]))
+        linktab = np.asarray(linktab[order], dtype=np.int32, order="C")
+
+    # offset_k_dk[k, dK] : start index of links with source sector k and momentum transfer dK.
+    # offset_k_dk[k, dK + 1] : end index.
+    offset_k_dk = np.zeros((nkpts, nkpts + 1), dtype=np.int32)
+
+    pos = 0
+    for k in range(nkpts):
+        offset_k_dk[k, 0] = pos
+
+        for dK in range(nkpts):
+            while (
+                pos < linktab.shape[0]
+                and linktab[pos, L_K0] == k
+                and linktab[pos, L_DK] == dK
+            ):
+                pos += 1
+
+            offset_k_dk[k, dK + 1] = pos
+
+    links_info = {
+        "str_k": str_k,
+        "str_k2tot": str_k2tot,
+        "linktab": linktab,
+        "offset_k_dk": offset_k_dk,
     }
 
     return links_info
