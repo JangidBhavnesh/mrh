@@ -536,8 +536,8 @@ def contract_2e_k(eri, fcivec, norb, nelec, nkpts, target_k, link_index=None):
     links_a = build_k_links_spin(link_indexa, norb, nkpts, straid_k, str2tot_a)
     links_b = build_k_links_spin(link_indexb, norb, nkpts, strbid_k, str2tot_b)
     
-    links_a = compact_links_from_object_links(links_a, nkpts)
-    links_b = compact_links_from_object_links(links_b, nkpts)
+    # links_a = compact_links_from_object_links(links_a, nkpts)
+    # links_b = compact_links_from_object_links(links_b, nkpts)
 
     links_a = build_links_by_global_source_array(links_a)
     links_b = build_links_by_global_source_array(links_b)
