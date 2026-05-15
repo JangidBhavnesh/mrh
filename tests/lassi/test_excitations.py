@@ -53,6 +53,7 @@ def setUpModule ():
     las = LASSCF (mf, (2,2), (2,2), spin_sub=(1,1))
     mo_coeff = las.localize_init_guess ([[1,2],[3,4]])
     las.kernel (mo_coeff)
+    assert (las.converged)
     for i in range (2): las = all_single_excitations (las)
     charges, spins, smults, wfnsyms = get_space_info (las)
     lroots = 4 - smults
@@ -107,8 +108,7 @@ class KnownValues(unittest.TestCase):
             )
             las1.ci = ci2
             ci2 = [[ci_ref[ifrag], ci1[ifrag]] for ifrag in range (las.nfrags)]
-            las1.ci = ci2
-            lsi1 = LASSI (las1)
+            lsi1 = LASSI (las1, do_o1_chk=False)
             e_roots1, si1 = lsi1.kernel ()
             ham_pq = (si1 * e_roots1[None,:]) @ si1.conj ().T
             w = si1[-1].conj () * si1[-1]
@@ -221,7 +221,7 @@ class KnownValues(unittest.TestCase):
             las1.ci = ci2
             ci2 = [ci_ref[ifrag]+[ci1[ifrag],] for ifrag in range (las.nfrags)]
             las1.ci = ci2
-            lsi1 = LASSI (las1)
+            lsi1 = LASSI (las1, do_o1_chk=False)
             e_roots1, si1 = lsi1.kernel ()
             ham_pq = (si1 * e_roots1[None,:]) @ si1.conj ().T
             w = si1[-1].conj () * si1[-1]

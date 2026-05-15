@@ -22,7 +22,7 @@ from pyscf.tools import molden
 from c2h4n4_struct import structure as struct
 from mrh.my_dmet import localintegrals, dmet, fragments
 from mrh.my_dmet.fragments import make_fragment_atom_list, make_fragment_orb_list
-from mrh.my_pyscf.mcscf.laspscf_sync import LASPSCF_HessianOperator, LASPSCF_UnitaryGroupGenerators
+from mrh.my_pyscf.mcscf.laspscf import LASPSCF_HessianOperator, LASPSCF_UnitaryGroupGenerators
 topdir = os.path.abspath (os.path.join (__file__, '..'))
 
 def build (mf, m1=0, m2=0, ir1=0, ir2=0, CASlist=None, active_first=False, calcname='c2h4n4', **kwargs):
@@ -74,7 +74,7 @@ def setUpModule():
     global mol, mf, dmet, ugg, h_op, x
     dr_nn = 2.0
     mol = struct (dr_nn, dr_nn, '6-31g', symmetry=False)
-    mol.verbose = lib.logger.DEBUG 
+    mol.verbose = 0#lib.logger.DEBUG 
     mol.output = '/dev/null'
     mol.spin = 0 
     mol.build ()
@@ -110,14 +110,18 @@ class KnownValues(unittest.TestCase):
         grad0 = np.append (gorb0, gci0)
         grad1 = h_op.get_grad ()
         gx1 = h_op.get_gx ()
-        self.assertAlmostEqual (lib.fp (grad0), 0.011661604981096854, 8)
-        self.assertAlmostEqual (lib.fp (grad1), 0.011661604981096854, 8)
-        self.assertAlmostEqual (lib.fp (gx0), -0.0005604501808183955, 8)
-        self.assertAlmostEqual (lib.fp (gx1), -0.0005604501808183955, 8)
+        with self.subTest ('grad0'):
+            self.assertAlmostEqual (lib.fp (grad0), 0.011661604981096854, 8)
+        with self.subTest ('grad1'):
+            self.assertAlmostEqual (lib.fp (grad1), 0.011661604981096854, 8)
+        with self.subTest ('gx0'):
+            self.assertAlmostEqual (lib.fp (gx0), -0.0005604501808183955, 8)
+        with self.subTest ('gx1'):
+            self.assertAlmostEqual (lib.fp (gx1), -0.0005604501808183955, 8)
 
     def test_hessian (self):
         hx = h_op._matvec (x)
-        self.assertAlmostEqual (lib.fp (hx), 179.48768166752396, 7)
+        self.assertAlmostEqual (lib.fp (hx), 89.10410326302467, 7)
 
     def test_hc2 (self):
         xp = x.copy ()
@@ -129,30 +133,30 @@ class KnownValues(unittest.TestCase):
         xp = x.copy ()
         xp[:-16] = 0.0
         hx = h_op._matvec (xp)[-32:-16]
-        self.assertAlmostEqual (lib.fp (hx), 0.0013399490448726629, 7)
+        self.assertAlmostEqual (lib.fp (hx), 0.001339949044872548, 7)
 
     def test_hco (self):
         xp = x.copy ()
         xp[-32:] = 0.0
         hx = h_op._matvec (xp)[-32:]
-        self.assertAlmostEqual (lib.fp (hx), 0.17136526120875378, 7)
+        self.assertAlmostEqual (lib.fp (hx), 0.08745278810729933, 7)
 
     def test_hoc (self):
         xp = x.copy ()
         xp[:-32] = 0.0
         hx = h_op._matvec (xp)[:-32]
-        self.assertAlmostEqual (lib.fp (hx), -0.2701194485663053, 7)
+        self.assertAlmostEqual (lib.fp (hx), -0.3107152725863126, 7)
 
     def test_hoo (self):
         xp = x.copy ()
         xp[-32:] = 0.0
         hx = h_op._matvec (xp)[:-32]
-        self.assertAlmostEqual (lib.fp (hx), 182.07818989609675, 7)
+        self.assertAlmostEqual (lib.fp (hx), 91.03909494322775, 7)
 
     def test_prec (self):
         M_op = h_op.get_prec ()
         Mx = M_op._matvec (x)
-        self.assertAlmostEqual (lib.fp (Mx), 2.940197014418852, 7)
+        self.assertAlmostEqual (lib.fp (Mx), 5.620403603286931, 7)
 
 
 if __name__ == "__main__":

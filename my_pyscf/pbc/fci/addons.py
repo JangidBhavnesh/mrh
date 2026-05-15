@@ -4,14 +4,14 @@ from pyscf.fci import addons, cistring
 # I have added the contract_ss, so I hope I don't need to write the code for these
 # function, rather this should work.
 
-# Should I rename the class calling !? Probably no!.
-
 fix_spin = addons.fix_spin
 fix_spin_ = addons.fix_spin_
 SpinPenaltyFCISolver = addons.SpinPenaltyFCISolver
 
 # Helper function to unpack electrons and active space.
 def _unpack_nelec(nelec, spin=None):
+    if isinstance(nelec, tuple):
+        return nelec[0], nelec[1]
     return addons._unpack_nelec(nelec, spin)
 
 def _unpack(norb, nelec, link_index, spin=None):

@@ -1,11 +1,21 @@
 import ctypes
 import numpy as np
+
+from pyscf import lib
 from pyscf.fci import cistring
 
 from mrh.lib.helper import load_library
 from mrh.my_pyscf.pbc.fci.addons import _unpack, _unpack_nelec
 
 libpbcrdm = load_library('libpbc_fci_rdms')
+
+# Author: Bhavnesh Jangid
+
+# In this file, there are function to compute the spin-separated 1-RDMs and 2-RDMs for a 
+# complex FCI vector.
+## TODO List:
+# 1. Spin-summed excitation operator implementation in backend C code, which would be useful
+#    for computing optimizing the code.
 
 def reorder_rdm(dm1, dm2, inplace=True):
     norb = dm1.shape[0]
@@ -17,7 +27,7 @@ def reorder_rdm(dm1, dm2, inplace=True):
 
 def make_rdm1_spin1(fname, cibra, ciket, norb, nelec, link_index=None):
     '''
-    Wrapper function for backend c function, to compute the spin-separated 1-RDMs.
+    Wrapper function for backend C function, to compute the spin-separated 1-RDMs.
     '''
     assert (cibra is not None and ciket is not None)
     cibra = np.asarray(cibra, order='C')
@@ -41,6 +51,30 @@ def make_rdm1_spin1(fname, cibra, ciket, norb, nelec, link_index=None):
     return rdm1.conj().T
 
 def make_rdm12_spin1(fname, cibra, ciket, norb, nelec, link_index=None, symm=0):
+    '''
+    Wrapper function for backend C function, to compute the spin-separated 1-RDMs and 2-RDMs.
+    args:
+        fname: str, name of the C function to call
+            either 'FCIrdm12kern_a_cplx' or 'FCIrdm12kern_b_cplx' or 'FCIrdm12kern_ab_cplx' 
+             on the spin block of the 2-RDM to be computed
+        cibra: np.ndarray of shape (na*nb, )
+            complex FCI bra vector
+        ciket: np.ndarray of shape (na*nb, )
+            complex FCI ket vector
+        norb: int
+            number of orbitals (ncas * nkpts)
+        nelec: tuple of ints
+            number of alpha and beta electrons (nelecasa, nelecb)
+        link_index: tuple of np.ndarray
+            link indices for alpha and beta strings
+        symm: int
+            symmetry sector to compute the RDMs for, default is 0 (no symmetry)
+    returns:
+        rdm1: np.ndarray of shape (norb, norb)
+            spin-separated 1-RDM (either alpha or beta depending on fname)
+        rdm2: np.ndarray of shape (norb, norb, norb, norb)
+            spin-separated 2-RDM (either alpha-alpha, beta-beta or alpha-beta depending on fname)
+    '''
     assert (cibra is not None and ciket is not None)
     cibra = np.asarray(cibra, order='C')
     ciket = np.asarray(ciket, order='C')
@@ -54,46 +88,73 @@ def make_rdm12_spin1(fname, cibra, ciket, norb, nelec, link_index=None, symm=0):
     rdm1 = np.empty((norb,norb), dtype=np.complex128, order='C')
     rdm2 = np.empty((norb,norb,norb,norb), dtype=np.complex128, order='C')
 
-    libpbcrdm.FCIrdm12_drv_cplx(getattr(libpbcrdm, fname),
-                        rdm1.ctypes.data_as(ctypes.c_void_p),
-                        rdm2.ctypes.data_as(ctypes.c_void_p),
-                        cibra.ctypes.data_as(ctypes.c_void_p),
-                        ciket.ctypes.data_as(ctypes.c_void_p),
-                        ctypes.c_int(norb),
-                        ctypes.c_int(na), ctypes.c_int(nb),
-                        ctypes.c_int(nlinka), ctypes.c_int(nlinkb),
-                        link_indexa.ctypes.data_as(ctypes.c_void_p),
-                        link_indexb.ctypes.data_as(ctypes.c_void_p),
-                        ctypes.c_int(symm))
+    # In case I don't set the one of the OMP_THREADS or MKL_NUM_THREADS env variables to one
+    # there is nested parallelization which slows down the code.
+    with lib.with_omp_threads(1):
+        libpbcrdm.FCIrdm12_drv_cplx(getattr(libpbcrdm, fname),
+                            rdm1.ctypes.data_as(ctypes.c_void_p),
+                            rdm2.ctypes.data_as(ctypes.c_void_p),
+                            cibra.ctypes.data_as(ctypes.c_void_p),
+                            ciket.ctypes.data_as(ctypes.c_void_p),
+                            ctypes.c_int(norb),
+                            ctypes.c_int(na), ctypes.c_int(nb),
+                            ctypes.c_int(nlinka), ctypes.c_int(nlinkb),
+                            link_indexa.ctypes.data_as(ctypes.c_void_p),
+                            link_indexb.ctypes.data_as(ctypes.c_void_p),
+                            ctypes.c_int(symm))
     return rdm1.conj().T, rdm2
 
-def make_rdm1s_cplx(fcivec, norb, nelec, link_index=None):
+def make_rdm1s_py(fcivec, norb, nelec, link_index=None):
+    '''
+    Python implementation of spin-separated 1-RDMs for a complex FCI vector.
+    args:
+        fcivec: np.ndarray of shape (na*nb, )
+            complex FCI vector
+        norb: int
+            number of orbitals (ncas * nkpts)
+        nelec: tuple of ints
+            number of alpha and beta electrons (na, nb)
+        link_index: tuple of np.ndarray
+            link indices for alpha and beta strings
+    returns:
+        rdm1a, rdm1b: np.ndarray of shape (norb, norb)
+            spin-separated 1-RDMs for alpha and beta spins
+    '''
     dtype = fcivec.dtype
     neleca, nelecb = _unpack_nelec(nelec)
-    na = cistring.num_strings(norb, neleca)
-    nb = cistring.num_strings(norb, nelecb)
-    C = np.asarray(fcivec).reshape(na, nb)
-
     link_indexa, link_indexb = _unpack(norb, nelec, link_index)
 
+    na = cistring.num_strings(norb, neleca)
+    nb = cistring.num_strings(norb, nelecb)
+
+    civec = np.asarray(fcivec).reshape(na, nb)
+    
     rdm1a = np.zeros((norb, norb), dtype=dtype)
     rdm1b = np.zeros((norb, norb), dtype=dtype)
 
     for a0, tab in enumerate(link_indexa):
         for p, i, a1, sign in tab:
-            if sign == 0:
-                break
-            rdm1a[p, i] += sign * np.vdot(C[a0, :], C[a1, :])
+            if sign == 0: break
+            rdm1a[p, i] += sign * np.vdot(civec[a0, :], civec[a1, :])
 
     for b0, tab in enumerate(link_indexb):
         for p, i, b1, sign in tab:
-            if sign == 0:
-                break
-            rdm1b[p, i] += sign * np.vdot(C[:, b0], C[:, b1])
+            if sign == 0: break
+            rdm1b[p, i] += sign * np.vdot(civec[:, b0], civec[:, b1])
 
     return (rdm1a, rdm1b)
 
-def make_rdm12s_cplx(fcivec, norb, nelec, link_index=None, reorder=True):
+def make_rdm12s_py(fcivec, norb, nelec, link_index=None, reorder=True):
+    '''
+    Python implementation of spin-separated 1-RDMs and 2-RDMs for a
+    complex FCI vector.
+    See above function for arguments. 
+    Returns:
+        rdm1a, rdm1b: np.ndarray of shape (norb, norb)
+            spin-separated 1-RDMs for alpha and beta spins
+        rdm2aa, rdm2ab, rdm2bb: np.ndarray of shape (norb, norb, norb, norb)
+            spin-separated 2-RDMs for alpha-alpha, alpha-beta and beta-beta spins
+    '''
     
     fcivec /= np.linalg.norm(fcivec)
     na, nb = nelec
@@ -101,6 +162,7 @@ def make_rdm12s_cplx(fcivec, norb, nelec, link_index=None, reorder=True):
     nb_str = cistring.num_strings(norb, nb)
     fcivec = np.asarray(fcivec).reshape(na_str, nb_str)
     link_indexa, link_indexb = _unpack(norb, nelec, link_index)
+    
     # Initializing the arrays:
     dtype = fcivec.dtype
     dm1a = np.zeros((norb, norb), dtype=dtype)
@@ -159,35 +221,8 @@ def make_rdm12s_cplx(fcivec, norb, nelec, link_index=None, reorder=True):
     if reorder:
         dm1a, dm2aa = reorder_rdm(dm1a, dm2aa)
         dm1b, dm2bb = reorder_rdm(dm1b, dm2bb)
-        
-    
-    '''
-    Few Checks:
-    1. Hermiticity
-    2. Traces
-    3. 1-RDM from 2-RDM
-    '''
-    # assert np.max(np.abs(dm2aa - dm2aa.conj().transpose(2,3,0,1))) < 1e-8
-    # assert np.max(np.abs(dm2bb - dm2bb.conj().transpose(2,3,0,1))) < 1e-8
-    # dm1a_from_dm2aa =  np.einsum("pqrq->pr", dm2aa, optimize=True) / (na - 1)
-    # dm1b_from_dm2bb =  np.einsum("pqrq->pr", dm2bb, optimize=True) / (nb - 1)
-    # assert np.max(np.abs(dm1a_from_dm2aa - dm1a.conj().T)) < 1e-8, "1-RDM a diff: {}".format(np.max(np.abs(dm1a_from_dm2aa - dm1a.conj().T)))
-    # assert np.max(np.abs(dm1b_from_dm2bb - dm1b.conj().T)) < 1e-8, "1-RDM b diff: {}".format(np.max(np.abs(dm1b_from_dm2bb - dm1b.conj().T)))
 
     dm2aa = dm2aa.transpose(0, 2, 1, 3).conj()
     dm2bb = dm2bb.transpose(0, 2, 1, 3).conj()
     return (dm1a, dm1b), (dm2aa, dm2ab, dm2bb)
 
-def make_rdm1_cplx(fcivec, norb, nelec, link_index=None):
-    (dm1a, dm1b) = make_rdm1s_cplx(fcivec, norb, nelec, link_index=link_index)
-    rdm1 = dm1a + dm1b
-    return rdm1.conj().T
-
-def make_rdm12_cplx(fcivec, norb, nelec, link_index=None, reorder=True):
-    (dm1a, dm1b), (dm2aa, dm2ab, dm2bb) = \
-        make_rdm12s_cplx(fcivec, norb, nelec, link_index=link_index, reorder=reorder)
-    rdm1 = dm1a + dm1b
-    dm2ba = dm2ab.conj().transpose(1,0,3,2)
-    rdm2 = dm2aa + dm2bb + dm2ab + dm2ba
-    rdm2 = 0.5*(rdm2 + rdm2.conj().transpose(1,0,3,2))
-    return rdm1.conj().T, rdm2

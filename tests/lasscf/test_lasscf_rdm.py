@@ -15,6 +15,7 @@
 
 import copy
 import unittest
+import tempfile
 import numpy as np
 from pyscf import lib, gto, scf
 from mrh.my_pyscf.mcscf.lasscf_o0 import LASSCF as LASSCFRef
@@ -30,9 +31,9 @@ def setUpModule():
         verbose=lib.logger.INFO)
     mf = scf.RHF (mol).run ()
     las_ref = LASSCFRef (mf, (2,2), (2,2), spin_sub=(1,1))
-    las_ref.chkfile = 'lasscf_rdm_ref.chk'
+    las_ref.chkfile = tempfile.NamedTemporaryFile ().name
     las_test = LASSCFTest (mf, (2,2), (2,2), spin_sub=(1,1))
-    las_test.chkfile = 'lasscf_rdm_test.chk'
+    las_test.chkfile = tempfile.NamedTemporaryFile ().name
     mo_loc = las_ref.localize_init_guess (((0,1),(2,3)), mf.mo_coeff)
 
 def tearDownModule():
@@ -42,16 +43,19 @@ def tearDownModule():
 
 class KnownValues(unittest.TestCase):
     def test_etot (self):
-        las_ref.ah_level_shift = 1e-4
+        las_ref.ah_level_shift = 1e-8
         las_ref.max_cycle_macro = 50
-        las_ref.kernel (mo_loc)
-        las_test.kernel (mo_loc)
+        las_ref.kernel ()
+        self.assertTrue (las_ref.converged)
+        las_test.kernel ()
+        self.assertTrue (las_test.converged)
         self.assertAlmostEqual (las_test.e_tot, las_ref.e_tot, 6)
 
     def test_derivs (self):
         las_ref.ah_level_shift = 1e-8
-        las_ref.max_cycle_macro = 3
+        las_ref.max_cycle_macro = 10
         las_ref.kernel (mo_loc, None)
+        self.assertTrue (las_ref.converged)
         ugg_ref = las_ref.get_ugg ()
         hop_ref = las_ref.get_hop (ugg=ugg_ref)
         las_test.casdm1frs = las_ref.states_make_casdm1s_sub ()

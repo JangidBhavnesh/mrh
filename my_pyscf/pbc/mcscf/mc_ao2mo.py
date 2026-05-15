@@ -1,6 +1,7 @@
+import itertools
 import numpy as np
 from functools import reduce
-import itertools
+
 from pyscf import lib
 from pyscf.ao2mo import _ao2mo
 from pyscf.pbc.lib import kpts_helper
@@ -11,7 +12,16 @@ _mo_as_complex = df_ao2mo._mo_as_complex
 _conc_mos = df_ao2mo._conc_mos
 logger = lib.logger
 
-# The 2e integrals transformation to MO basis for the orbital optimization.mk
+# Author: Bhavnesh Jangid
+
+'''
+This file handles the 2e integral transformation required for the orbital optimization for the k-CASSCF.
+There are two options
+1. Disk Method: Will compute the AO2MO transformation using DF integrals and then store the required integrals on the disk.
+        This will be much more memory efficient.
+2. Direct Method: In this case, I will be using the with_df.ao2mo infrastructure to directly compute the required integrals
+    and store them in memory.
+'''
 
 def get_nauxlist(mydf, kpts, nkpts):
     nauxlist = {}
@@ -30,6 +40,7 @@ def _do_ao2mo_direct(kcasscf, mo_kpts, nkpts, ncore, ncas, nmo, level=1):
     nocc = ncore + ncas
     dtype = mo_kpts[0].dtype
     assert len(mo_kpts) == nkpts
+    assert nkpts >= 1
     log = lib.logger.Logger(kcasscf.stdout, kcasscf.verbose)
     t1 = t0 = (logger.process_clock(), logger.perf_counter())
 
@@ -40,44 +51,60 @@ def _do_ao2mo_direct(kcasscf, mo_kpts, nkpts, ncore, ncas, nmo, level=1):
     kconserv = kpts_helper.get_kconserv(cell, kpts)
     for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
         k4 = kconserv[k1, k2, k3]
-        ppaa[k1, k2, k3] = mydf.ao2mo([mo_kpts[k1], mo_kpts[k2], mo_kpts[k3][:, ncore:nocc], mo_kpts[k4][:, ncore:nocc]],
+        mo_coeff_tr = [mo_kpts[k1], mo_kpts[k2], mo_kpts[k3][:, ncore:nocc], mo_kpts[k4][:, ncore:nocc]]
+        ppaa[k1, k2, k3] = 1/nkpts * mydf.ao2mo(mo_coeff_tr,
                           [kpts[i] for i in (k1, k2, k3, k4)], 
                           compact=False).reshape(nmo, nmo, ncas, ncas)
     t1 = log.timer('density fitting ao2mo ppaa', *t0)
 
     for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
         k4 = kconserv[k1, k2, k3]
-        papa[k1, k2, k3] = mydf.ao2mo([mo_kpts[k1], mo_kpts[k2][:, ncore:nocc], mo_kpts[k3], mo_kpts[k4][:, ncore:nocc]],
+        mo_coeff_tr = [mo_kpts[k1], mo_kpts[k2][:, ncore:nocc], mo_kpts[k3], mo_kpts[k4][:, ncore:nocc]]
+        papa[k1, k2, k3] = 1/nkpts * mydf.ao2mo(mo_coeff_tr,
                         [kpts[i] for i in (k1, k2, k3, k4)],
                         compact=False).reshape(nmo, ncas, nmo, ncas)
     t2 = log.timer('density fitting ao2mo papa', *t1)
 
     for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
         k4 = kconserv[k1, k2, k3]
-        paap[k1, k2, k3] = mydf.ao2mo([mo_kpts[k1], mo_kpts[k2][:, ncore:nocc], mo_kpts[k3][:, ncore:nocc], mo_kpts[k4]],
+        mo_coeff_tr = [mo_kpts[k1], mo_kpts[k2][:, ncore:nocc], mo_kpts[k3][:, ncore:nocc], mo_kpts[k4]]
+        paap[k1, k2, k3] = 1/nkpts * mydf.ao2mo(mo_coeff_tr,
                         [kpts[i] for i in (k1, k2, k3, k4)],
                         compact=False).reshape(nmo, ncas, ncas, nmo)
     t3 = log.timer('density fitting ao2mo paap', *t2)
 
     # This is very naive implementation, would require a lot of optimization.
+
     if level == 1:
         if ncore == 0:
             j_pc = np.zeros((nkpts, nmo, ncore), dtype=dtype)
             k_pc = np.zeros((nkpts, nmo, ncore), dtype=dtype)
         else:
+            # Note I need this: kpc_2 and k_pc are two different exchange channels.
+            #  tmp = 4 * eris.k_pc2[k] - 2 * eris.j_pc[k] + 2 * eris.k_pc[k]
             j_pc = np.empty((nkpts, nmo, ncore), dtype=dtype)
             k_pc = np.empty((nkpts, nmo, ncore), dtype=dtype)
             for k in range(nkpts):
                 mo_ppaa = [mo_kpts[k], mo_kpts[k], mo_kpts[k][:, :ncore], mo_kpts[k][:, :ncore]]
                 temp = mydf.ao2mo(mo_ppaa, [kpts[k]]*4, compact=False).reshape(nmo, nmo, ncore, ncore)
-                j_pc[k] = np.einsum('ppjj->pj', temp)
+                j_pc[k] = 1/nkpts * np.einsum('ppjj->pj', temp)
                 mo_papa = [mo_kpts[k], mo_kpts[k][:, :ncore], mo_kpts[k], mo_kpts[k][:, :ncore]]
                 temp = mydf.ao2mo(mo_papa, [kpts[k]]*4, compact=False).reshape(nmo, ncore, nmo, ncore)
-                k_pc[k] = np.einsum('pjpj->pj', temp)
+                k_pc[k] = 1/(3*nkpts) * np.einsum('pjpj->pj', temp)
+                mo_paap = [mo_kpts[k], mo_kpts[k][:, :ncore], mo_kpts[k][:, :ncore], mo_kpts[k]]
+                temp = mydf.ao2mo(mo_paap, [kpts[k]]*4, compact=False).reshape(nmo, ncore, ncore, nmo)
+                k_pc[k] += 2/(3*nkpts) * np.einsum('pjjp->pj', temp).conj()
     else:
         j_pc = k_pc = None
-    log.timer('density fitting ao2mo j_pc, k_pc', *t2)
-    return ppaa, papa, paap, j_pc, k_pc
+    t4 = log.timer('density fitting ao2mo j_pc, k_pc', *t3)
+
+    # Generation of hcore takes a significant amount of time, there is no meaning of generating it for every micro/macro iteration.
+    # so I am generating it once here and storing it as an attribute.
+    hcore = None
+    hcore = kcasscf.get_hcore()
+    assert hcore.shape[0] == nkpts
+    log.timer('hcore generation', *t4)
+    return ppaa, papa, paap, j_pc, k_pc, hcore
 
 def _do_ao2mo_disk(kcasscf, mo_kpts, nkpts, ncore, ncas, nmo, level=1):
     cell = kcasscf._scf.cell
@@ -167,7 +194,7 @@ def _do_ao2mo_disk(kcasscf, mo_kpts, nkpts, ncore, ncas, nmo, level=1):
         zkl_34 = zkl_34.reshape(-1, nmo*ncas)
         sign = grp2[f"{k1}_{k2}"][()]
         lib.dot(zij_12.T, zkl_34, sign, papa, 1)
-        erifile[f"papa/{k1}_{k2}_{k3}"] = papa.reshape(nmo, ncas, nmo, ncas)
+        erifile[f"papa/{k1}_{k2}_{k3}"] = 1/nkpts * papa.reshape(nmo, ncas, nmo, ncas)
 
     papa = zij_12 = zkl_34 = None
     t2 = log.timer('density fitting ao2mo papa', *t1)
@@ -182,7 +209,7 @@ def _do_ao2mo_disk(kcasscf, mo_kpts, nkpts, ncore, ncas, nmo, level=1):
         zkl_34 = zkl_34.reshape(-1, ncas*ncas)
         sign = grp2[f"{k1}_{k2}"][()]
         lib.dot(zij_12.T, zkl_34, sign, ppaa, 1)
-        erifile[f"ppaa/{k1}_{k2}_{k3}"] = ppaa.reshape(nmo, nmo, ncas, ncas)
+        erifile[f"ppaa/{k1}_{k2}_{k3}"] = 1/nkpts * ppaa.reshape(nmo, nmo, ncas, ncas)
 
     ppaa = zij_12 = zkl_34 = None
     t2 = log.timer('density fitting ao2mo ppaa', *t2)
@@ -197,26 +224,34 @@ def _do_ao2mo_disk(kcasscf, mo_kpts, nkpts, ncore, ncas, nmo, level=1):
         zkl_34 = zkl_34.reshape(-1, ncas*nmo)
         sign = grp2[f"{k1}_{k2}"][()]
         lib.dot(zij_12.T, zkl_34, sign, paap, 1)
-        erifile[f"paap/{k1}_{k2}_{k3}"] = paap.reshape(nmo, ncas, ncas, nmo)
+        erifile[f"paap/{k1}_{k2}_{k3}"] = 1/nkpts * paap.reshape(nmo, ncas, ncas, nmo)
     paap = zij_12 = zkl_34 = None
     t3 = log.timer('density fitting ao2mo paap', *t2)
+
     if level == 1:
         j_pc_kpts = np.zeros((nkpts, nmo, ncore), dtype=dtype)
         k_pc_kpts = np.zeros((nkpts, nmo, ncore), dtype=dtype)
         for k in range(nkpts):
             zij = grp[f"{k}_{k}"][()]
             bufd = np.einsum('pii->pi', zij)
-            j_pc_kpts[k] = np.einsum('pi,pj->ij', bufd, bufd[:,:ncore])
-            k_cp = np.einsum('kij,kij->ij', zij[:,:ncore], zij[:,:ncore])
+            j_pc_kpts[k] = 1/nkpts * np.einsum('pi,pj->ij', bufd, bufd[:,:ncore])
+            k_cp = 1.0/(3.0*nkpts) *np.einsum('kij,kij->ij', zij[:,:ncore], zij[:,:ncore]) 
+            k_cp += 2.0/(3.0*nkpts) * np.einsum('kij,kji->ij', zij[:,:ncore], zij[:, :, :ncore])
             k_pc_kpts[k] = k_cp.conj().T
         
         bufd = zij =  k_cp = None
     else:
         j_pc_kpts = None
         k_pc_kpts = None
-    log.timer('density fitting ao2mo j_pc and k_pc', *t3)
+    t4 = log.timer('density fitting ao2mo j_pc and k_pc', *t3)
     fxpp.close()
-    return erifile, j_pc_kpts, k_pc_kpts
+
+    hcore = None
+    hcore = kcasscf.get_hcore()
+    assert hcore.shape[0] == nkpts
+    log.timer('hcore generation', *t4)
+
+    return erifile, j_pc_kpts, k_pc_kpts, hcore
 
 def _mem_usage(nkpts, ncore, ncas, nmo):
     basic = nkpts**3 * nmo**2 * ncas**2 * 16 / 1e6
@@ -256,6 +291,7 @@ class _ERIS:
         self.ppaa_kpts = None
         self.papa_kpts = None
         self.paap_kpts = None
+
         log = lib.logger.Logger(kcasscf.stdout, kcasscf.verbose)
         cell = kcasscf._scf.cell
         kpts = kcasscf._scf.kpts
@@ -285,11 +321,11 @@ class _ERIS:
               mem_incore, mem_now, kcasscf.max_memory)
         if (method == 'direct' and mem_now + mem_incore < 0.9 * kcasscf.max_memory):
             log.debug('Using direct ERI transformation.')
-            self.ppaa_kpts, self.papa_kpts, self.paap_kpts, self.j_pc, self.k_pc = _do_ao2mo_direct(kcasscf, mo_kpts, nkpts, ncore, ncas, nmo, level=level)
+            self.ppaa_kpts, self.papa_kpts, self.paap_kpts, self.j_pc, self.k_pc, self.hcore = _do_ao2mo_direct(kcasscf, mo_kpts, nkpts, ncore, ncas, nmo, level=level)
             t1 = log.timer('direct ao2mo', *t1)
         else:
             log.debug('Using disk ERI transformation.')
-            self.erifile, self.j_pc, self.k_pc = _do_ao2mo_disk(kcasscf, mo_kpts, nkpts, ncore, ncas, nmo, level=level)
+            self.erifile, self.j_pc, self.k_pc, self.hcore = _do_ao2mo_disk(kcasscf, mo_kpts, nkpts, ncore, ncas, nmo, level=level)
             t1 = log.timer('disk ao2mo', *t1)
         # To access the ppaa and papa integrals: I am bifurcating the code based on whether 
         # we are using disk or direct method. If we are using direct method, 
@@ -300,7 +336,6 @@ class _ERIS:
         self.ppaa = lambda k1, k2, k3: self.get_ppaa(k1, k2, k3)
         self.papa = lambda k1, k2, k3: self.get_papa(k1, k2, k3)
         self.paap = lambda k1, k2, k3: self.get_paap(k1, k2, k3)
-
         log.timer('Total ERI transformation', *t0)
 
     @staticmethod
@@ -348,7 +383,7 @@ if __name__ == "__main__":
     cell.build()
 
     t0 = (lib.logger.process_clock(), lib.logger.perf_counter())
-    kmesh = [2, 1, 1]
+    kmesh = [2, 1, 2]
     kpts = cell.make_kpts(kmesh)
     
     kmf = scf.KRHF(cell, kpts).density_fit()
