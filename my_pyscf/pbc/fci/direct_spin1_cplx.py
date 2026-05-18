@@ -1,26 +1,3 @@
-#!/usr/bin/env python
-# Copyright 2014-2020 The PySCF Developers. All Rights Reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-#
-# Author: Qiming Sun <osirpt.sun@gmail.com>
-#
-
-'''
-Trying to implement the FCI solver with complex Hamiltonian but with alpha-beta
-degeneracy.
-'''
-
 import warnings
 import ctypes
 import numpy as np
@@ -36,10 +13,15 @@ from mrh.my_pyscf.pbc.fci import spin_op
 logger = lib.logger
 libfci = direct_spin1.libfci
 
-# Some global variables
+# Some global variables used in this file.
 HDIAG_IMAG_TOL = 1e-3
 IMAG_NOISE = 1e-12
 HERMI_THRESH = 1e-6
+
+# Author: Bhavnesh Jangid
+
+# TODO: 
+# 1. Need to implement spin-summed 2-RDM computation in backend C function.
 
 def get_init_guess_cplx(norb, nelec, nroots, hdiag):
     '''
@@ -181,10 +163,8 @@ def absorb_h1e(h1e, eri, norb, nelec, fac=1):
         h2e = eri.astype(dtype=np.result_type(h1e, eri), copy=True)
     
     J = np.einsum('jiik->jk', h2e)
-    # J = 0.5 * (J + J.conj().T)
     f1e = h1e - J * .5
     f1e = f1e * (1./(nelec+1e-100))
-    # f1e = 0.5 * (f1e + f1e.conj().T)
     for k in range(norb):
         h2e[k,k,:,:] += f1e
         h2e[:,:,k,k] += f1e
@@ -291,8 +271,9 @@ def make_hdiag(h1e, eri, norb, nelec, compress=False):
     return hdiag
 
 def make_rdm1s(fcivec, norb, nelec, link_index=None):
-    make_rdm1s.__doc__ = direct_spin1.make_rdm1s.__doc__
-    neleca, nelecb = _unpack_nelec(nelec)
+    make_rdm1s.__doc__ = direct_spin1.make_rdm1s.__doc__ + '''
+    Compute the spin-separated 1-RDMs for a complex FCI vector using the backend C function.
+    '''
     link_index = _unpack(norb, nelec, link_index)
     rdm1a = rdm_helper.make_rdm1_spin1('FCImake_rdm1a_cplx', fcivec, fcivec,
                                 norb, nelec, link_index)
@@ -301,13 +282,17 @@ def make_rdm1s(fcivec, norb, nelec, link_index=None):
     return (rdm1a, rdm1b)
 
 def make_rdm1(fcivec, norb, nelec, link_index=None):
-    make_rdm1.__doc__ = direct_spin1.make_rdm1.__doc__
+    make_rdm1.__doc__ = direct_spin1.make_rdm1.__doc__ + '''
+    Spin-summed 1-RDM for a complex FCI vector.
+    '''
     rdm1a, rdm1b = make_rdm1s(fcivec, norb, nelec, link_index)
     rdm1 = rdm1a + rdm1b
     return rdm1.conj().T
 
 def make_rdm12s(fcivec, norb, nelec, link_index=None, reorder=True):
-    make_rdm12s.__doc__ = direct_spin1.make_rdm12s.__doc__
+    make_rdm12s.__doc__ = direct_spin1.make_rdm12s.__doc__ + '''
+    Compute the spin-separated 1-RDMs and 2-RDMs for a complex FCI vector using the backend C function.
+    '''
     dm1a, dm2aa = rdm_helper.make_rdm12_spin1('FCIrdm12kern_a_cplx', fcivec, fcivec,
                                        norb, nelec, link_index, 1)
     dm1b, dm2bb = rdm_helper.make_rdm12_spin1('FCIrdm12kern_b_cplx', fcivec, fcivec,
@@ -318,34 +303,51 @@ def make_rdm12s(fcivec, norb, nelec, link_index=None, reorder=True):
         dm1a, dm2aa = rdm_helper.reorder_rdm(dm1a, dm2aa, inplace=True)
         dm1b, dm2bb = rdm_helper.reorder_rdm(dm1b, dm2bb, inplace=True)
     
-    return (dm1a, dm1b), (dm2aa, dm2ab, dm2bb)
+    return (dm1a.T, dm1b.T), (dm2aa, dm2ab, dm2bb)
 
 def make_rdm12(fcivec, norb, nelec, link_index=None, reorder=True):
-    make_rdm12.__doc__ = direct_spin1.make_rdm12.__doc__
-    # TODO: Need to implement this in backend C code.
-    # dm1, dm2 = rdm_helper.make_rdm12_spin1('FCIrdm12kern_sf_cplx', fcivec, fcivec,
-    #                                 norb, nelec, link_index, 1)
-    # if reorder:
-    #    dm1, dm2 = rdm_helper.reorder_rdm(dm1, dm2, inplace=True)
-    dm1, dm2 = rdm_helper.make_rdm12_cplx(fcivec, norb, nelec, link_index, 1,)
-    return dm1, dm2
-
-def make_rdm1_py(fcivec, norb, nelec, link_index=None):
-    rdm1 = rdm_helper.make_rdm1_cplx(fcivec, norb, nelec, link_index)
-    return rdm1
+    make_rdm12.__doc__ = direct_spin1.make_rdm12.__doc__ + '''
+    Compute the spin-summed 1-RDM and 2-RDM for a complex FCI vector using 
+    the backend C function.
+    '''
+    (dm1a, dm1b), (dm2aa, dm2ab, dm2bb) = \
+        make_rdm12s(fcivec, norb, nelec, link_index=link_index, reorder=reorder)
+    rdm1 = dm1a + dm1b
+    rdm2 = dm2aa + dm2bb + dm2ab + dm2ab.transpose(2, 3, 0, 1)
+    return rdm1.conj().T, rdm2
 
 def make_rdm1s_py(fcivec, norb, nelec, link_index=None):
-    rdm1a, rdm1b = rdm_helper.make_rdm1s_cplx(fcivec, norb, nelec, link_index)
+    '''
+    Python implementation of spin-separated 1-RDMs for a complex FCI vector.
+    '''
+    rdm1a, rdm1b = rdm_helper.make_rdm1s_py(fcivec, norb, nelec, link_index)
     return rdm1a, rdm1b
 
+def make_rdm1_py(fcivec, norb, nelec, link_index=None):
+    '''
+    Python implementation of spin-summed 1-RDM for a complex FCI vector.
+    '''
+    rdm1a, rdm1b = make_rdm1s_py(fcivec, norb, nelec, link_index)
+    rdm1 = rdm1a + rdm1b
+    return rdm1.conj().T
+
 def make_rdm12s_py(fcivec, norb, nelec, link_index=None, reorder=True):
+    '''
+    Python implementation of spin-separated 1-RDMs and 2-RDMs for a complex FCI vector.
+    '''
     (dm1a, dm1b), (dm2aa, dm2ab, dm2bb) = \
-        rdm_helper.make_rdm12s_cplx(fcivec, norb, nelec, link_index, reorder)
+        rdm_helper.make_rdm12s_py(fcivec, norb, nelec, link_index=link_index, reorder=reorder)
     return (dm1a, dm1b), (dm2aa, dm2ab, dm2bb)
 
 def make_rdm12_py(fcivec, norb, nelec, link_index=None, reorder=True):
-    dm1, dm2 = rdm_helper.make_rdm12_cplx(fcivec, norb, nelec, link_index, reorder)
-    return dm1, dm2
+    '''
+    Python implementation of spin-summed 1-RDM and 2-RDM for a complex FCI vector.
+    '''
+    (dm1a, dm1b), (dm2aa, dm2ab, dm2bb) = \
+        make_rdm12s_py(fcivec, norb, nelec, link_index=link_index, reorder=reorder)
+    rdm1 = dm1a + dm1b
+    rdm2 = dm2aa + dm2bb + dm2ab + dm2ab.transpose(2, 3, 0, 1)
+    return rdm1.conj().T, rdm2
 
 def _make_diag_precond(hdiag, level_shift=1e-3):
     '''
@@ -547,6 +549,9 @@ def kernel_ms1(fci, h1e, eri, norb, nelec, ci0=None, link_index=None,
     return e+ecore, c
 
 class FCISolver(direct_spin1.FCISolver):
+    '''
+    Complex-valued FCI solver.
+    '''
     def __init__(self, *args, **kwargs):
         direct_spin1.FCISolver.__init__(self, *args, **kwargs)
         self.davidson_only = True
@@ -585,7 +590,6 @@ class FCISolver(direct_spin1.FCISolver):
                orbsym=None, wfnsym=None, ecore=0, **kwargs):
         link_indexa, link_indexb = _unpack(norb, nelec, None)
 
-        # TODO: write the kernel_ms1 to avoid any warnings.
         e, c = kernel_ms1(self, h1e, eri, norb, nelec, ci0,
                           (link_indexa,link_indexb), tol=tol, 
                           lindep=lindep, max_cycle=max_cycle, max_space=max_space,

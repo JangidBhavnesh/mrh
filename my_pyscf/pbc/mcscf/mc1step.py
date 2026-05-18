@@ -19,21 +19,15 @@ logger = lib.logger
 
 # Author: Bhavnesh Jangid
 
-'''
-#TODOs:
-1. Normalize the 2e integrals in mc_ao2mo generation only.
-2. 
-'''
-
 def _get_casdm2_kpts(casdm2, mo_phase1, klabel):
     '''
     Compute the 2RDM for a given k-point configuration.
     '''
     k1, k2, k3, k4 = klabel
-    dm2_k = np.einsum('iP, jQ, PQRS, kR, lS->ijkl', 
+    dm2_k = np.einsum('iP,jQ,PQRS,kR,lS->ijkl', 
                         mo_phase1[k1].conj(), mo_phase1[k2], 
                         casdm2, 
-                        mo_phase1[k3].conj(), mo_phase1[k4])
+                        mo_phase1[k3].conj(), mo_phase1[k4], optimize=True)
     return dm2_k
 
 class hdm2Handler:
@@ -70,7 +64,6 @@ class hdm2Handler:
 
     def get_pmmp(self, k1, k2, k3):
         return self._get("hdm2_pmmp", k1, k2, k3)
-
 
 def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
     '''
@@ -152,7 +145,6 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
     ncastot = nkpts*ncas
 
     kconserv = kpts_helper.get_kconserv(cell, kpts)
-
     log = logger.new_logger(mc, mc.verbose)
 
     if log.verbose >= logger.DEBUG:
@@ -165,13 +157,13 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
     dm1 = np.zeros((nkpts, nmo, nmo), dtype=casdm1.dtype)
     casdm1_kpts = np.zeros((nkpts, ncas, ncas), dtype=dtype)
     idx = np.arange(ncore)
-    
+
     for k in range(nkpts):
         dm1[k][idx, idx] = 2.0
         casdm1_k = reduce(np.dot, (mo_phase[k], casdm1, mo_phase[k].conj().T))
         dm1[k][ncore:nocc, ncore:nocc] = casdm1_k
         casdm1_kpts[k] = casdm1_k
-    
+
     casdm2_kpts = np.zeros((nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas), dtype=dtype)
 
     for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
@@ -202,47 +194,33 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
     # equals to momentum of the output entity.
     # I think we should not loop over nmo, because it will be solved for 
     # a given k-point, means the number of orbitals would be way small than total system. 
-    # To remove the loop over nmo, as done in the molecular code, I have first converted 
-    # that (molecular) code without for loop, matched it with loop.
-    # That code is:
-    # ppaa = eris.ppaa
-    # papa = eris.papa
-    # vhf_a = numpy.einsum('pquv,uv->pq', ppaa, casdm1)
-    # vhf_a -= 0.5*numpy.einsum('puqv,uv->pq', papa, casdm1)
-    # jtmp = lib.dot(ppaa.reshape(nmo*nmo,-1), casdm2.reshape(ncas*ncas,-1))
-    # jtmp = jtmp.reshape(nmo,nmo,ncas,ncas) # nmo, nmo, ncas, ncas
-    # g_dm2 = numpy.einsum('puuv->pv', jtmp[:, ncore:nocc])
-
+ 
     for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
         k4 = kconserv[k1, k2, k3]
         ppaa = eris.ppaa(k1, k2, k3) # (k1, k2, k3, k4)
 
         if (k1 == k2) and (k3==k4):
-            vhf_a[k1] += np.einsum('pquv,uv->pq', ppaa, casdm1_kpts[k3]) # (k1,k1)
+            vhf_a[k1] += np.einsum('pquv,vu->pq', ppaa, casdm1_kpts[k3]) # (k1,k1)
 
         if (k1 == k4) and (k2 == k3):
             paap = eris.paap(k1, k2, k3) # (k1, k2, k3, k4)
             vhf_a[k1] -= 0.5 * np.einsum('puvq,uv->pq', paap, casdm1_kpts[k2]) # (k1,k1)
             
-        # dm2_blk = casdm2_kpts[k1, k2, k3]   # (k1, k2, k3, k4)
-        # jtmp = np.einsum('pqvw,tuvw->pqut', ppaa[:, ncore:nocc, :, :], dm2_blk)
-        # g_dm2[k1] += np.einsum('puuv->pv', jtmp)
+        dm2_blk = casdm2_kpts[k1, k2, k3]   # (k1, k2, k3, k4)
+        jtmp = np.einsum('pqvw,tuvw->pqut', ppaa[:, ncore:nocc, :, :], dm2_blk)
+        g_dm2[k1] += np.einsum('puuv->pv', jtmp)
 
-        # TODO: Optimize it.
-        for kv in range(nkpts):
-            kw = kconserv[k1, k2, kv]
-            if k1==k4 and k2==k3:
-                ppaa = eris.ppaa(k1, k2, kv)
-                dm2_blk = casdm2_kpts[k1, k2, kv]
-                g_dm2[k1] += np.einsum('puvw,tuvw->pt', ppaa[:, ncore:nocc, :, :], dm2_blk)
-               
     ppaa = dm2_blk = paap = jtmp = None
     
-    # Now assemble the pieces and construct the gradient.    
-    hcore = mc.get_hcore() # (nkpts, nao, nao)
-    
+    # Now assemble the pieces and construct the gradient.
+    if getattr(eris, 'hcore', None) is not None:
+        hcore = eris.hcore
+    else:  
+        hcore = mc.get_hcore() # (nkpts, nao, nao)
+
     vhf_ca = np.array([eris.vhf_c[k] + vhf_a[k] 
                        for k in range(nkpts)], dtype=dtype) # (nkpts, nmo, nmo) (block orbital basis)
+
     h1e_mo = np.array([reduce(np.dot, (mo_coeff[k].conj().T, hcore[k], mo_coeff[k])) 
                        for k in range(nkpts)], dtype=dtype) # (nkpts, nmo, nmo) (block orbital MO basis)
     hcore = None
@@ -250,7 +228,7 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
     g = np.zeros((nkpts,nmo,nmo), dtype=dtype)
     for k in range(nkpts):
         g[k][:,:ncore] = 2.0 * (h1e_mo[k][:,:ncore] + vhf_ca[k][:,:ncore])
-        g[k][:,ncore:nocc] = np.dot(h1e_mo[k][:, ncore:nocc] + eris.vhf_c[k][:, ncore:nocc], casdm1_kpts[k])
+        g[k][:,ncore:nocc] = np.dot(h1e_mo[k][:, ncore:nocc] + eris.vhf_c[k][:, ncore:nocc], casdm1_kpts[k].conj().T)
         g[k][:,ncore:nocc] += g_dm2[k]
 
     # Step-2: Gradient update function
@@ -290,15 +268,19 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
 
         # Now compute the vj and vk for the core and active density matrices separately, 
         # then contract with the mo1 to get the vhf in the mo1 basis.
-        vj_k, vk_k = mc._scf.get_jk(cell, dm_kpts=dm_core_kpts, hermi=1, 
-                                    with_j=True, with_k=True, kpts=kpts, exxdiv=None)
+        # vj_k, vk_k = mc._scf.get_jk(cell, dm_kpts=dm_core_kpts, hermi=1, 
+        #                             with_j=True, with_k=True, kpts=kpts, exxdiv=None)
+        vj_k, vk_k = mc.get_jk(cell, dm_kpts=dm_core_kpts, hermi=1,
+                               with_j=True, with_k=True, kpts=kpts, exxdiv=None)
 
         vhf_c = np.array([reduce(
             np.dot, (mo1[k].conj().T, vj_k[k]-vk_k[k]*0.5, mo1[k][:,:nocc])) 
             for k in range(nkpts)], dtype=dtype)
         
-        vj_k, vk_k = mc._scf.get_jk(cell, dm_kpts=dm_act_kpts, hermi=1, 
-                                    kpts=kpts, with_j=True, with_k=True,exxdiv=None)
+        # vj_k, vk_k = mc._scf.get_jk(cell, dm_kpts=dm_act_kpts, hermi=1, 
+        #                             kpts=kpts, with_j=True, with_k=True,exxdiv=None)
+        vj_k, vk_k = mc.get_jk(cell, dm_kpts=dm_act_kpts, hermi=1, 
+                               kpts=kpts, with_j=True, with_k=True,exxdiv=None)
         vhf_a = np.array([reduce(
             np.dot, (mo1[k].conj().T, vj_k[k]-vk_k[k]*0.5, mo1[k][:,:nocc])) 
             for k in range(nkpts)], dtype=dtype)
@@ -314,14 +296,6 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
         # 2e part of the gradient update.
         # These objects would be insanly huge. Instead of creating them and storing, I think I should 
         # compute them on the fly whenever they are required.
-        # Benchmarked on the molecular code.
-        # ppaa = eris.ppaa
-        # papa = eris.papa
-        # p1aa = numpy.einsum('pr, tq, rquv-> ptuv', u.T, ua.T, ppaa)
-        # paa1 = numpy.einsum('pr, ruvq, qt -> puvt', u.T, papa.transpose(0,1,3,2), ra)
-        # p1aa += paa1
-        # p1aa += paa1.transpose(0,1,3,2)
-        # g[:, :ncore:nocc] += np.einsum('puwx, wxuv->pu', p1aa, casdm2)
         for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
             k4 = kconserv[k1, k2, k3]
             ppaa = eris.ppaa(k1, k2, k3)
@@ -344,25 +318,12 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
         return np.hstack([mc.pack_uniq_var(g[k] - g[k].conj().T) for k in range(nkpts)])    
 
     # Step-3: Hessian diagonal
-    # This code is benchmarked on the molecular code.
-    # ppaa = eris.ppaa
-    # papa = eris.papa
-    # jtmp = lib.dot(ppaa.reshape(nmo*nmo,-1), casdm2.reshape(ncas*ncas,-1))
-    # jtmp = jtmp.reshape(nmo,nmo,ncas,ncas) # nmo, nmo, ncas, ncas
-    # ktmp = lib.dot(papa.transpose(0,2,1,3).reshape(nmo*nmo,-1), dm2tmp) # nmo, nmo, ncas, ncas
-    # hdm2 = (ktmp.reshape(nmo,nmo,ncas,ncas)+jtmp).transpose(0,2,1,3) # nmo, ncas, nmo, ncas
-    # jkcaa  = 6.0 * numpy.einsum('iuiv,uv->iu', papa[:nocc, :, :nocc, :], casdm1)
-    # jkcaa -= 2.0 * numpy.einsum('iiuv,uv->iu',ppaa[:nocc, :nocc, :, :], casdm1)
-
     hdm2file = lib.H5TmpFile()
     hdm2 = hdm2Handler(hdm2file)
 
     hdm2file.require_group("hdm2_ppaa")
     hdm2file.require_group("hdm2_papa")
     hdm2file.require_group("hdm2_pmmp")
-    # hdm2_papa = np.zeros((nkpts, nkpts, nkpts, nmo, ncas, nmo, ncas), dtype=dtype)
-    # hdm2_ppaa = np.zeros((nkpts, nkpts, nkpts, nmo, ncas, nmo, ncas), dtype=dtype)
-    # hdm2_pmmp = np.zeros((nkpts, nkpts, nkpts, nmo, ncas, nmo, ncas), dtype=dtype)
 
     jkcaa = np.zeros((nkpts, nocc, ncas), dtype=dtype)
     for k in range(nkpts):
@@ -374,8 +335,7 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
         jkcaa[k] += (2.0) * np.einsum('pupv,uv->pv',papa,casdm1_kpts[k],optimize=True)
 
     for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
-        k4 = kconserv[k1,k2,k3]
-        # hdm2: K1-term: Debugged  
+        k4 = kconserv[k1,k2,k3] 
         # # pwqx(+-+-) uwvx(+-+-) - > puqv (+-+-)
         term = np.zeros((nmo, ncas, nmo, ncas), dtype=dtype)
         for kw in range(nkpts):
@@ -443,8 +403,6 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
         tmp = -eris.vhf_c[k][ncore:nocc,ncore:nocc] * casdm1_kpts[k]
         hdiag[k][ncore:nocc,ncore:nocc] += tmp + tmp.conj().T
     
-        # TODO: Remember to divide the eris.j_pc and eris.k_pc by nkpts, 
-        # because they are summed over the k-points in the eris generation.
         # tmp = 4 * eris.k_pc2[k] - 2 * eris.j_pc[k] + 2 * eris.k_pc[k]
         tmp = 6 * eris.k_pc[k] - 2 * eris.j_pc[k]
         hdiag[k][ncore:,:ncore] += tmp[ncore:]
@@ -513,22 +471,28 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
 
     return g_orb, gorb_update, h_op, h_diag
 
-#TODO: make mo_coeff as tagged array then mo_phase can be added to it.
-# Currently, plugging all the orbitals together, like done for the kHF.
-# More optimum would be do the CIAH separately for each k-point.
+
 def rotate_orb_cc(casscf, mo_coeff, mo_phase, fcivec, fcasdm1, fcasdm2,
                   eris, x0_guess=None, conv_tol_grad=1e-4, max_stepsize=None,
                   verbose=None):
+    '''
+    I need to duplicate this function because:
+    1. The input argument is different from the molecular code, 
+    2. I need to pass the gen_g_hop function as well.
+    3. Preconditioner is different, albeit just the datatype changes.
+    4. In future: this function would be heavily changed due to the k-CIAH implementation.
+    '''
+
     log = logger.new_logger(casscf, verbose)
     if max_stepsize is None: max_stepsize = casscf.max_stepsize
     t3m = (logger.process_clock(), logger.perf_counter())
-    u = 1 #[1,]*casscf.nkpts
+    u = 1
     g_orb, gorb_update, h_op, h_diag = \
         gen_g_hop(casscf, mo_coeff, mo_phase, u, fcasdm1(), fcasdm2(), eris)
     g_kf = g_orb
-    norm_gkf = norm_gorb = np.linalg.norm(g_orb) #np.array([np.linalg.norm(g_orb_) for g_orb_ in g_orb], dtype=g_orb.dtype)
-    log.debug('    |g|=%5.3g', np.mean(norm_gorb)) # Mean norm of the orbital gradient
-    # log.debug('    max|g|=%5.3g', np.max(norm_gorb)) # Max norm of the orbital gradient (Should print the k-pt as well)
+    norm_gkf = norm_gorb = np.linalg.norm(g_orb)
+    log.debug('    |g|=%5.3g', np.mean(norm_gorb))
+    
     t3m = log.timer('gen h_op', *t3m)
     
     if norm_gorb < conv_tol_grad * 0.3:
@@ -536,23 +500,10 @@ def rotate_orb_cc(casscf, mo_coeff, mo_phase, fcivec, fcasdm1, fcasdm2,
         yield u, g_orb, 1, x0_guess
         return
 
-    # This is preconditioner for orbital optimization using iterative solver.
-    # This preconditioner is defined when CIAH would be solved for each k-point separately.
-    # There is preprint on k-CIAH, once that is published and accepted in the main pyscf repo.
-    # I will modify the orbital optimization acc to that.
-    # def precond(x, e):
-    #     hdiagd = np.zeros_like(h_diag)
-    #     assert len(x) == len(h_diag)
-    #     for k in range(casscf.nkpts):
-    #         hdiagd[k] = h_diag[k] - (e - casscf.ah_level_shift)
-    #         hdiagd[k][abs(hdiagd[k]) < 1e-8] = 1e-8
-    #         x[k] /= hdiagd[k]
-    #         norm_x = np.linalg.norm(x[k])
-    #         x[k] *= 1/norm_x # Be careful about this. (I mean it can be zero as well.)
-    #     hdiagd = None
-    #     return x
-
     def precond(x, e):
+        '''
+        Preconditioner for the orbital optimization CIAH 
+        '''
         assert x.shape == h_diag.shape
         x = x.copy()
         hdiagd = h_diag.real - (e - casscf.ah_level_shift)
@@ -573,16 +524,14 @@ def rotate_orb_cc(casscf, mo_coeff, mo_phase, fcivec, fcasdm1, fcasdm2,
     
     g_op = lambda: g_orb
     
-    problem_size = np.array([np.array(g_orb_).size for g_orb_ in g_orb])
-    assert problem_size.sum() == problem_size[0] * len(g_orb)
-    problem_size = problem_size.sum()
+    assert g_orb.ndim == 1
+    problem_size = g_orb.size
 
     for ah_end, ihop, w, dxi, hdxi, residual, seig \
         in ciah.davidson_cc(h_op, g_op, precond, x0_guess,
                             tol=casscf.ah_conv_tol, max_cycle=casscf.ah_max_cycle,
                             lindep=casscf.ah_lindep, verbose=log):
-    
-        norm_residual = np.mean([np.linalg.norm(residual_) for residual_ in residual])
+        norm_residual = np.linalg.norm(residual)
         if (ah_end or ihop == casscf.ah_max_cycle or 
             ((norm_residual < casscf.ah_start_tol) and 
              (ihop >= casscf.ah_start_cycle)) or (seig < casscf.ah_lindep)):
@@ -599,9 +548,9 @@ def rotate_orb_cc(casscf, mo_coeff, mo_phase, fcivec, fcasdm1, fcasdm2,
             
             g_orb = g_orb + hdxi
             dr = dr + dxi
-            norm_gorb = np.linalg.norm(g_orb) #np.mean([np.linalg.norm(g_orb_) for g_orb_ in g_orb])
-            norm_dxi = np.linalg.norm(dxi)  # np.mean([np.linalg.norm(dxi_) for dxi_ in dxi])
-            norm_dr = np.linalg.norm(dr) # np.mean([np.linalg.norm(dr_) for dr_ in dr])
+            norm_gorb = np.linalg.norm(g_orb)
+            norm_dxi = np.linalg.norm(dxi)
+            norm_dr = np.linalg.norm(dr)
 
             # These errors are mean-values across the k-points.
             log.debug('    imic %2d(%2d)  |g[o]|=%5.3g  |dxi|=%5.3g  '
@@ -651,11 +600,10 @@ def rotate_orb_cc(casscf, mo_coeff, mo_phase, fcivec, fcasdm1, fcasdm2,
                 t3m = log.timer('gen h_op', *t3m)
                 g_orb = g_kf = g_kf1
                 norm_gorb = norm_gkf = norm_gkf1
-                dr = [np.zeros_like(dr_) for dr_ in dr]
+                dr = np.zeros_like(dr)
     
     u = casscf.update_rotate_matrix(dr, u)
     yield u, g_kf, ihop+jkcount, dxi
-
 
 def kernel(casscf, mo_coeff, mo_phase, tol=1e-7, conv_tol_grad=None,
            ci0=None, callback=None, verbose=logger.NOTE, dump_chk=True):
@@ -713,7 +661,6 @@ def kernel(casscf, mo_coeff, mo_phase, tol=1e-7, conv_tol_grad=None,
     casdm1_prev = casdm1_last = casdm1
     t3m = t2m = log.timer('CAS DM', *t1m)
     imacro = 0
-    dr0 = None
     while not conv and imacro < casscf.max_cycle_macro:
         imacro += 1
         max_cycle_micro = casscf.micro_cycle_scheduler(locals())
@@ -725,6 +672,7 @@ def kernel(casscf, mo_coeff, mo_phase, tol=1e-7, conv_tol_grad=None,
         for u, g_orb, njk, r0 in rota:
             imicro += 1
             norm_gorb = np.linalg.norm(g_orb)
+
             if imicro == 1:
                 norm_gorb0 = norm_gorb
             norm_t = np.linalg.norm(u - np.eye(nkpts*nmo))
@@ -841,67 +789,20 @@ def kernel(casscf, mo_coeff, mo_phase, tol=1e-7, conv_tol_grad=None,
     log.timer('1-step CASSCF', *cput0)
     return conv, e_tot, e_cas, fcivec, mo, mo_energy
 
-
-# I needed to make a decision here, I could have inherited from bothe pbccasci and mc1step.CASSCF from
-# molecular code. But for safety reasons and my inexperience of OOP, I will just inherit from pbccasci.CASBase.
-# Look at the description of the attr and other functions.
-class PBCCASSCF(casci.PBCCASBASE):
-
-    __doc__ = molCASSCF.__doc__
-
-    # I didn't want to do this, but I don't know if there is any other way to directly use these options
-    # from the molecular code.
-    max_stepsize = getattr(__config__, 'pbc_mcscf_mc1step_CASSCF_max_stepsize', .02)
-    max_cycle_macro = getattr(__config__, 'pbc_mcscf_mc1step_CASSCF_max_cycle_macro', 50)
-    max_cycle_micro = getattr(__config__, 'pbc_mcscf_mc1step_CASSCF_max_cycle_micro', 4)
-    conv_tol = getattr(__config__, 'pbc_mcscf_mc1step_CASSCF_conv_tol', 1e-7)
-    conv_tol_grad = getattr(__config__, 'pbc_mcscf_mc1step_CASSCF_conv_tol_grad', None)
-    ah_level_shift = getattr(__config__, 'pbc_mcscf_mc1step_CASSCF_ah_level_shift', 1e-8)
-    ah_conv_tol = getattr(__config__, 'pbc_mcscf_mc1step_CASSCF_ah_conv_tol', 1e-12)
-    ah_max_cycle = getattr(__config__, 'pbc_mcscf_mc1step_CASSCF_ah_max_cycle', 30)
-    ah_lindep = getattr(__config__, 'pbc_mcscf_mc1step_CASSCF_ah_lindep', 1e-14)
-    ah_start_tol = getattr(__config__, 'pbc_mcscf_mc1step_CASSCF_ah_start_tol', 2.5)
-    ah_start_cycle = getattr(__config__, 'pbc_mcscf_mc1step_CASSCF_ah_start_cycle', 3)
-    ah_grad_trust_region = getattr(__config__, 'pbc_mcscf_mc1step_CASSCF_ah_grad_trust_region', 3.0)
-
-    internal_rotation = getattr(__config__, 'pbc_mcscf_mc1step_CASSCF_internal_rotation', False)
-    ci_response_space = getattr(__config__, 'pbc_mcscf_mc1step_CASSCF_ci_response_space', 4)
-    ci_grad_trust_region = getattr(__config__, 'pbc_mcscf_mc1step_CASSCF_ci_grad_trust_region', 3.0)
-    with_dep4 = getattr(__config__, 'pbc_mcscf_mc1step_CASSCF_with_dep4', False)
-    chk_ci = getattr(__config__, 'pbc_mcscf_mc1step_CASSCF_chk_ci', False)
-    kf_interval = getattr(__config__, 'pbc_mcscf_mc1step_CASSCF_kf_interval', 4)
-    kf_trust_region = getattr(__config__, 'pbc_mcscf_mc1step_CASSCF_kf_trust_region', 3.0)
-
-    ao2mo_level = getattr(__config__, 'pbc_mcscf_mc1step_CASSCF_ao2mo_level', 2)
-    natorb = getattr(__config__, 'pbc_mcscf_mc1step_CASSCF_natorb', False)
-    canonicalization = getattr(__config__, 'pbc_mcscf_mc1step_CASSCF_canonicalization', True)
-    sorting_mo_energy = getattr(__config__, 'pbc_mcscf_mc1step_CASSCF_sorting_mo_energy', False)
-    scale_restoration = getattr(__config__, 'pbc_mcscf_mc1step_CASSCF_scale_restoration', 0.5)
-    small_rot_tol = getattr(__config__, 'pbc_mcscf_mc1step_CASSCF_small_rot_tol', 0.01)
-    extrasym = None
-    callback = None
-
-    _keys = {
-        'max_stepsize', 'max_cycle_macro', 'max_cycle_micro', 'conv_tol',
-        'conv_tol_grad', 'ah_level_shift', 'ah_conv_tol', 'ah_max_cycle',
-        'ah_lindep', 'ah_start_tol', 'ah_start_cycle', 'ah_grad_trust_region',
-        'internal_rotation', 'ci_response_space', 'ci_grad_trust_region',
-        'with_dep4', 'chk_ci', 'kf_interval', 'kf_trust_region',
-        'fcisolver_max_cycle', 'fcisolver_conv_tol', 'natorb',
-        'canonicalization', 'sorting_mo_energy', 'scale_restoration',
-        'small_rot_tol', 'extrasym', 'callback',
-        'frozen', 'chkfile', 'fcisolver', 'e_tot', 'e_cas', 'ci', 'mo_coeff',
-        'mo_energy', 'converged',
-    }
-
+# MRO order: PBCCASSCF -> casci.PBCCASBASE -> molCASSCF
+# I didn't initialize the molCASSCF because it will initialize the molCASCI 
+# and that would set the different FCIsolver but I think this is fine, because I am setting
+# all the parameter of molCASSCF in the PBCCASSCF __init__ function.
+ 
+class PBCCASSCF(casci.PBCCASBASE, molCASSCF):
     def __init__(self, kmf, ncas=0, nelecas=0, ncore=None, frozen=None):
-        casci.PBCCASBASE.__init__(self, kmf, ncas, nelecas, ncore)
+        casci.PBCCASBASE.__init__(self, kmf, ncas=ncas, nelecas=nelecas, ncore=ncore)
         self.frozen = frozen
         self.chkfile = self._scf.chkfile
         self.fcisolver.max_cycle = getattr(__config__,
-                                           'pbc_mcscf_mc1step_CASSCF_fcisolver_max_cycle', 50)
+                                            'pbc_mcscf_mc1step_CASSCF_fcisolver_max_cycle', 50)
         self.fcisolver.conv_tol = getattr(__config__,
-                                          'pbc_mcscf_mc1step_CASSCF_fcisolver_conv_tol', 1e-8)
+                                           'pbc_mcscf_mc1step_CASSCF_fcisolver_conv_tol', 1e-8)
         self.e_tot = None
         self.e_cas = None
         self.ci = None
@@ -963,7 +864,6 @@ class PBCCASSCF(casci.PBCCASBASE):
 
         mo_phase = get_mo_coeff_k2R(self._scf, mo_coeff, self.ncore, self.ncas, kmesh=self.kmesh)[-1]
 
-        # print('Start 1-step CASSCF optimization')
         self.converged, self.e_tot, self.e_cas, self.ci, \
                 self.mo_coeff, self.mo_energy = \
                 _kern(self, mo_coeff, mo_phase,
@@ -996,8 +896,7 @@ class PBCCASSCF(casci.PBCCASBASE):
             e_cas = e_cas[0]
 
         if envs is not None and log.verbose >= logger.INFO:
-            log.debug('CAS space CI energy = %#.15g', e_cas)
-
+            log.debug('CAS space CI energy = %#.15g', e_cas.real)
             if getattr(self.fcisolver, 'spin_square', None):
                 try:
                     norb = self.nkpts * self.ncas
@@ -1116,7 +1015,9 @@ class PBCCASSCF(casci.PBCCASBASE):
         mo_k = np.array(mo_coeff).copy() # (nkpts, nao, nmo)
 
         def _get_jk_core_or_act(dm_k):
-            vj, vk = self._scf.get_jk(cell, dm_k, kpt=kpts, hermi=1, with_j=True,
+            # vj, vk = self._scf.get_jk(cell, dm_k, kpt=kpts, hermi=1, with_j=True,
+            #                      with_k=True, exxdiv=None)
+            vj, vk = self.get_jk(cell, dm_k, kpts=kpts, hermi=1, with_j=True,
                                  with_k=True, exxdiv=None)
             return vj, vk
         
@@ -1157,7 +1058,10 @@ class PBCCASSCF(casci.PBCCASBASE):
         # u = np.array([np.eye(nmo, dtype=dtype) for u_k in u], dtype=dtype) # (nkpts, nmo, nmo)
         rmat = np.array([umat - np.eye(nmo, dtype=dtype) for umat in u], dtype=dtype) # (nkpts, nmo, nmo)
 
-        hcore = self.get_hcore()
+        if getattr(eris, 'hcore', None) is not None:
+            hcore = eris.hcore
+        else:
+            hcore = self.get_hcore()
         ddm = np.empty((nkpts, nmo, nmo), dtype=dtype)
 
         h1e_mo = np.empty((nkpts, nmo, nmo), dtype=dtype)
@@ -1173,9 +1077,11 @@ class PBCCASSCF(casci.PBCCASBASE):
            
             dm_core = np.array([np.dot(mo1[k][:,:ncore], mo1[k][:,:ncore].conj().T) * 2.0
                                  for k in range(nkpts)])
-            vj, vk = self._scf.get_jk(self._scf.cell, dm_core, kpt=kpts, with_j=True,
+            # vj, vk = self._scf.get_jk(self._scf.cell, dm_core, kpt=kpts, with_j=True,
+            #                      with_k=True, exxdiv=None)
+            vj, vk = self.get_jk(self._scf.cell, dm_core, kpts=kpts, with_j=True,
                                  with_k=True, exxdiv=None)
-
+            
             mo_phase1 = get_mo_coeff_k2R(self._scf, mo1, ncore, ncas, kmesh=self.kmesh)[-1]
 
             # h1e for active space.
@@ -1238,7 +1144,7 @@ class PBCCASSCF(casci.PBCCASBASE):
             aaaa_R = _convert_to_R_space(aaaa)
             
             aa11_R = aa11_R + aa11_R.transpose(2,3,0,1) - aaaa_R
-            _sym_check_eri(aa11_R)
+            # _sym_check_eri(aa11_R)
 
             a1a1 = np.zeros_like(aaaa)
             for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
@@ -1258,7 +1164,7 @@ class PBCCASSCF(casci.PBCCASBASE):
 
             a1a1_R = a1a1_R + a1a1_R.transpose(0, 1, 3, 2).conj()
             a1a1_R = a1a1_R - a1a1_R.transpose(2, 3, 0, 1).conj()
-            _sym_check_eri(a1a1_R)
+            # _sym_check_eri(a1a1_R)
 
             # Combine the J and K type integrals
             h2_R = aa11_R + a1a1_R
@@ -1266,7 +1172,6 @@ class PBCCASSCF(casci.PBCCASBASE):
     
         ecore = np.sum([np.einsum('pq,pq->', h1e_mo[k] + eris.vhf_c[k], ddm[k]) 
                         for k in range(nkpts)])
-        # ecore += self.energy_nuc() * nkpts
 
         # Remember, the e_cas was divided by nkpts in the casci step.
         ci1, g = self.solve_approx_ci(h1_R, h2_R, fcivec, ecore, e_cas*nkpts, envs)
@@ -1302,7 +1207,11 @@ class PBCCASSCF(casci.PBCCASBASE):
         else: tol = None
 
         if getattr(self.fcisolver, 'approx_kernel', None):
-            raise NotImplementedError('approx_kernel is not tested/implemented for direct_spin1_cplx')
+            fn = self.fcisolver.approx_kernel
+            e, ci1 = fn(h1, h2, ncastot, nelecastot, ecore=ecore, ci0=ci0,
+                        tol=tol, max_memory=self.max_memory)
+            return ci1, None
+        
         elif not (getattr(self.fcisolver, 'contract_2e', None) and 
                   getattr(self.fcisolver, 'absorb_h1e', None)):
             raise NotImplementedError('direct kernel is not tested/implemented for direct_spin1_cplx')
@@ -1452,37 +1361,6 @@ class PBCCASSCF(casci.PBCCASBASE):
     max_stepsize_scheduler = molCASSCF.max_stepsize_scheduler
     ah_scheduler = molCASSCF.ah_scheduler
 
-    # I don't know, whether these can be imported or assigned directly from the molecular code
-    # but I will just write them here for now. I will try to import them later.
-
-    @property
-    def max_orb_stepsize(self):
-        return self.max_stepsize
-    
-    @max_orb_stepsize.setter
-    def max_orb_stepsize(self, x):
-        sys.stderr.write('WARN: Attribute "max_orb_stepsize" was replaced by "max_stepsize"\n')
-        self.max_stepsize = x
-    
-    @property
-    def ci_update_dep(self):
-        return self.with_dep4
-    
-    @ci_update_dep.setter
-    def ci_update_dep(self, x):
-        sys.stderr.write('WARN: Attribute .ci_update_dep was replaced by .with_dep4 since PySCF v1.1.\n')
-        self.with_dep4 = x == 4
-
-    grad_update_dep = ci_update_dep
-
-    @property
-    def max_cycle(self):
-        return self.max_cycle_macro
-    
-    @max_cycle.setter
-    def max_cycle(self, x):
-        self.max_cycle_macro = x
-
     def approx_hessian(self, *args, **kwargs):
         raise NotImplementedError('Approximate Hessian is not implemented for PBC-CASSCF yet')
     
@@ -1505,7 +1383,6 @@ class PBCCASSCF(casci.PBCCASBASE):
 CASSCF = PBCCASSCF
 
 def expmat(a):
-    # Should import this.
     return scipy.linalg.expm(a)
 
 def block_diag_to_kblocks(mat, nkpts, nmo):
@@ -1539,7 +1416,10 @@ def _fake_h_for_fast_casci(casscf, mo, mo_phase, eris):
     core_dm = [np.dot(mo_core[k], mo_core[k].conj().T) * 2 
                for k in range(nkpts)]
     
-    hcore = casscf.get_hcore()
+    if getattr(eris, 'hcore', None) is None:
+        hcore = casscf.get_hcore()
+    else:
+        hcore = eris.hcore
     energy_core = nkpts * casscf.energy_nuc() # Remember energy would be divided by nkpts in the end.
     energy_core += sum([np.einsum('ij,ji', core_dm[k], hcore[k]) 
                         for k in range(nkpts)])

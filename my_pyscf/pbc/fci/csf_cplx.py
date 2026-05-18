@@ -13,6 +13,7 @@ from pyscf.csf_fci.csfstring import count_all_csfs
 
 from mrh.my_pyscf.pbc.fci import direct_spin1_cplx
 from mrh.my_pyscf.pbc.fci import direct_spin1_cplx_opt
+from mrh.my_pyscf.pbc.fci import direct_spin0_cplx
 
 
 # Author: Bhavnesh Jangid
@@ -77,7 +78,7 @@ def get_init_guess(norb, nelec, nroots, hdiag_csf, transformer):
     return ciout
 
 def make_hdiag_det (fci, h1e, eri, norb, nelec):
-    '''
+    r'''
     hdiag = <\psi_I|H_real + i*H_imag|\psi_I> = <\psi_I|H_real|\psi_I> + i*<\psi_I|H_imag|\psi_I>.
     For the Hermitian Hamiltonian, the diagoan elements are real. Still the output array would be
     complex to avoid any datatype bug in any other part of the code.
@@ -332,8 +333,8 @@ def pspace(fci, h1e, eri, norb, nelec, transformer,
     h0 = h0real.astype(h1e.dtype)
     h0.real = h0real
     h0.imag = _build_h0tril(h1e_a.imag, h1e_b.imag, g2e_aa.imag, g2e_ab.imag, g2e_bb.imag)
+
     # Note, imaginary part of the Hamiltonian will be anti-hermitian.
-    # print("Is it antihermitian:", np.allclose(h0.imag, -h0.imag.conj().T)) # True
     h0real = None
 
     # Fill the diagonal elements.
@@ -642,6 +643,8 @@ class cplxCSFFCISolver:
         self.cell = cell
         self.smult = smult
         self.transformer = None
+        self.stdout = cell.stdout
+        self.max_memory = cell.max_memory
         super().__init__ (**args)
 
     def make_hdiag_csf(self, h1e, eri, norb, nelec, hdiag_det=None, smult=None, max_memory=None):
@@ -669,11 +672,11 @@ class cplxCSFFCISolver:
         if hasattr(eris, 'h1e_s'):
             hc_real = direct_uhf.contract_1e ([eris.h1e_s.real, -eris.h1e_s.real], fcivec.real, norb, nelec, link_index)
             hc_real -= direct_uhf.contract_1e ([eris.h1e_s.imag, -eris.h1e_s.imag], fcivec.imag, norb, nelec, link_index)
-            hc.real += hc_real
+            hc.real += hc_real.ravel() if hc.ndim == 1 else hc_real.reshape(hc.shape)
             hc_real = None
             hc_imag = direct_uhf.contract_1e ([eris.h1e_s.real, -eris.h1e_s.real], fcivec.imag, norb, nelec, link_index)
             hc_imag += direct_uhf.contract_1e ([eris.h1e_s.imag, -eris.h1e_s.imag], fcivec.real, norb, nelec, link_index)
-            hc.imag += hc_imag
+            hc.imag += hc_imag.ravel() if hc.ndim == 1 else hc_imag.reshape(hc.shape)
             hc_imag = None
         return hc
     
@@ -686,34 +689,59 @@ class cplxCSFFCISolver:
         return pspace (self, h1e, eri, norb, nelec, self.transformer, hdiag_det=hdiag_det,
                        hdiag_csf=hdiag_csf, npsp=npsp, max_memory=max_memory)
 
-# Good chance to learn Inheritance, and MRO Method:
-class FCISolver(cplxCSFFCISolver, direct_spin1_cplx_opt.FCISolver):
+
+class ComplexCSFFCIKernelMixin:
     '''
-    Complex FCI in CSFSolver. 
+    Shared CSF wrapper logic for complex FCI solvers.
     '''
+
     def get_init_guess(self, norb, nelec, nroots, hdiag_csf, **kwargs):
         '''
         Get the initial guess for the FCI calculation in the CSF basis.
         '''
         self.norb = norb
         self.nelec = nelec
-        self.check_transformer_cache ()
-        return get_init_guess (norb, nelec, nroots, hdiag_csf, self.transformer)
-        
+        self.check_transformer_cache()
+        return get_init_guess(norb, nelec, nroots, hdiag_csf, self.transformer)
+
     def kernel(self, h1e, eri, norb, nelec, ci0=None, **kwargs):
         self.norb = norb
         self.nelec = nelec
         self.smult = kwargs.pop('smult', self.smult)
-        self.check_transformer_cache ()
-        self.log_transformer_cache (lib.logger.DEBUG)
 
-        e, c = kernel (self, h1e, eri, norb, nelec, smult=self.smult,
-                       idx_sym=None, ci0=ci0, transformer=self.transformer,
-                       **kwargs)
+        self.check_transformer_cache()
+        self.log_transformer_cache(lib.logger.DEBUG)
+
+        e, c = kernel(
+            self, h1e, eri, norb, nelec,
+            smult=self.smult,
+            idx_sym=None,
+            ci0=ci0,
+            transformer=self.transformer,
+            **kwargs
+        )
 
         self.eci, self.ci = e, c
         return e, c
 
     check_transformer_cache = realFCISolver.check_transformer_cache
 
- 
+
+class FCISolver(
+    ComplexCSFFCIKernelMixin,
+    cplxCSFFCISolver,
+    direct_spin1_cplx_opt.FCISolver,):
+    '''
+    direct_spin1 FCI in CSF basis.
+    '''
+    pass
+
+class FCISolverSpin0(
+    ComplexCSFFCIKernelMixin,
+    cplxCSFFCISolver,
+    direct_spin0_cplx.FCISolver,
+):
+    '''
+    direct_spin0 FCI in CSF basis.
+    '''
+    pass
