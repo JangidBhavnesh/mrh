@@ -169,7 +169,8 @@ def get_rootspace_central_moment (las, space_weights, n=1):
     return c2, m2, s2
 
 
-def _print_states (log, iroot, space_weights, state_coeffs, lroots, print_all_but=1e-8):
+def _print_states (log, iroot, space_weights, state_coeffs, lroots, print_all_but=1e-8,
+                   max_print=100):
     nstates = state_coeffs.shape[1]
     space_coeffs = np.sqrt (space_weights)
     nfrags = len (lroots)
@@ -196,6 +197,7 @@ def _print_states (log, iroot, space_weights, state_coeffs, lroots, print_all_bu
         log.info (fmt_str1.format (lbl_str, *state_coeffs[iprod]))
         running_weight -= state_weights[iprod]
         if running_weight < print_all_but: break
+        if max_print >= 0 and ix >= max_print: break
     if ix+1<nprods:
         log.info ("Remaining %d ENVs in rootspace %d have combined average weight = %e",
                   nprods-ix-1, iroot, running_weight)
@@ -204,7 +206,7 @@ def _print_states (log, iroot, space_weights, state_coeffs, lroots, print_all_bu
     return
 
 def analyze (las, si, ci=None, state=0, print_all_but=1e-8, lbasis='primitive', ncsf=10,
-             return_metrics=False, do_natorb=True):
+             return_metrics=False, do_natorb=True, max_print=100):
     '''Print out analysis of LASSI result in terms of average quantum numbers
     and density matrix analyses of the lroots in each rootspace
 
@@ -233,6 +235,10 @@ def analyze (las, si, ci=None, state=0, print_all_but=1e-8, lbasis='primitive', 
         do_natorb: logical
             If True, include a natural-orbital analysis (which is sometimes very
             slow due to poor optimization of LASSI op_o1 RDM build functions)
+        max_print: integer
+            Maximum number of rootspaces and CSFs to print the wfn for.
+            Set to a negative number to print everything.
+            
 
     Returns:
         ci1: list of list of ndarray
@@ -244,13 +250,13 @@ def analyze (las, si, ci=None, state=0, print_all_but=1e-8, lbasis='primitive', 
             Average weight in each rootspace
         navg: ndarray of shape (nroots, nfrags); optional
             Expectation value of the principal quantum number of each fragment in each rootspace
-            If print_all_but >= 0, some rows may be omitted (set to -1)
+            If print_all_but >= 0 or max_print >= 0, some rows may be omitted (set to -1)
         maxw: ndarray of shape (nroots, nfrags); optional
             Value of the maximum weight on any one eigenstate for each fragment in each rootspace
-            If print_all_but >= 0, some rows may be omitted (set to -1)
+            If print_all_but >= 0 or max_print >= 0, some rows may be omitted (set to -1)
         entr: ndarray of shape (nroots, nfrags); optional
             Von Neumann entropy of each fragment, considering each rootspace separately
-            If print_all_but >= 0, some rows may be omitted (set to -1)
+            If print_all_but >= 0 or max_print >=, some rows may be omitted (set to -1)
     '''
     analyze_moments (las, si, ci=ci, do_natorb=do_natorb, state=state)
     if 'prim' in lbasis.lower (): lbasis = 'primitive'
@@ -315,7 +321,7 @@ def analyze (las, si, ci=None, state=0, print_all_but=1e-8, lbasis='primitive', 
         si1[idx_space[iroot],:] = np.sqrt (space_weights[iroot]) * coeffs[:,:]
         log.info ("Wave function(s) in rootspace %d in local %s basis:", iroot, lbasis)
         _print_states (log, iroot, space_weights[iroot,states], coeffs[:,states], lroots[iroot],
-                       print_all_but=print_all_but)
+                       print_all_but=print_all_but, max_print=max_print)
         if ncsf:
             for ifrag, ci in enumerate (ci_f):
                 log.info (("Leading %d CSFs of %d local %s basis functions for fragment "
@@ -323,14 +329,15 @@ def analyze (las, si, ci=None, state=0, print_all_but=1e-8, lbasis='primitive', 
                 analyze_basis (las, ci=ci, space=iroot, frag=ifrag, npr=ncsf)
         running_weight -= avg_weights[iroot]
         if running_weight < print_all_but: break
+        if max_print >= 0 and ix >= max_print: break
 
     if ix+1<las.nroots:
         log.info ("Remaining %d rootspaces have combined weight = %e",
                   las.nroots-ix-1, running_weight)
         if return_metrics:
             log.warn (("Not all rootspaces examined because their weights are too small. Metrics "
-                       "for omitted rootspaces are set to -1. Set print_all_but=-1 to ensure all "
-                       "rootspaces are examined."))
+                       "for omitted rootspaces are set to -1. Set print_all_but=-1 and "
+                       "max_print=-1 to ensure all rootspaces are examined."))
     else:
         log.info ("All %d rootspaces accounted for", las.nroots)
 
