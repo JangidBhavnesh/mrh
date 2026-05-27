@@ -12,10 +12,9 @@ def make_casdm1s(filename, i):
     """
     This function stores the rdm1s for the given state 'i' in a tempfile
     """
-    with h5py.File(filename, 'r') as f:
-        rdm1s_key = f'rdm1s_{i}'
-        rdm1s = f[rdm1s_key][:]
-        rdm1s = np.array(rdm1s)
+    rdm1s_key = f'rdm1s_{i}'
+    rdm1s = filename[rdm1s_key][:]
+    rdm1s = np.array(rdm1s)
     return rdm1s
 
 
@@ -23,10 +22,9 @@ def make_casdm2s(filename, i):
     """
     This function stores the rdm2s for the given state 'i' in a tempfile
     """
-    with h5py.File(filename, 'r') as f:
-        rdm2s_key = f'rdm2s_{i}'
-        rdm2s = f[rdm2s_key][:]
-        rdm2s = np.array(rdm2s)
+    rdm2s_key = f'rdm2s_{i}'
+    rdm2s = filename[rdm2s_key][:]
+    rdm2s = np.array(rdm2s)
     return rdm2s
 
 
@@ -96,7 +94,6 @@ def get_mcpdft_child_class(mc, ot, DoLASSI=False, states=None, **kwargs):
 
         if DoLASSI:
             _mc_class.DoLASSI = True
-            _mc_class.rdmstmpfile = tempfile.NamedTemporaryFile(dir=lib.param.TMPDIR)
 
             def analyze(self, state=0, **kwargs):
                 log = lib.logger.new_logger(self, self.verbose)
@@ -146,26 +143,24 @@ def get_mcpdft_child_class(mc, ot, DoLASSI=False, states=None, **kwargs):
                 log.debug('_store_rdms: looping over %d states at a time of %d total', len(self.states),
                           nblk)
 
-                rdmstmpfile = self.rdmstmpfile
-                with h5py.File(rdmstmpfile, 'a') as f:
-                    for i in range(0, len(self.states), nblk):
-                        j = min(i + nblk, len(self.states))
+                for i in range(0, len(self.states), nblk):
+                    j = min(i + nblk, len(self.states))
 
-                        rdm1s, rdm2s = lassi.root_make_rdm12s(self, self.ci, self.si,
-                                                              state=self.states[i:j])
+                    rdm1s, rdm2s = lassi.root_make_rdm12s(self, self.ci, self.si,
+                                                          state=self.states[i:j])
 
-                        if len(self.states[i:j]) == 1:
-                            rdm1s = [rdm1s]
-                            rdm2s = [rdm2s]
+                    if len(self.states[i:j]) == 1:
+                        rdm1s = [rdm1s]
+                        rdm2s = [rdm2s]
 
-                        for k in range(i, j):
-                            stateno = self.states[k]
-                            rdm1s_dname = f'rdm1s_{stateno}'
-                            f.create_dataset(rdm1s_dname, data=rdm1s[k])
-                            rdm2s_dname = f'rdm2s_{stateno}'
-                            f.create_dataset(rdm2s_dname, data=rdm2s[k])
+                    for k in range(i, j):
+                        stateno = self.states[k]
+                        rdm1s_dname = f'rdm1s_{stateno}'
+                        self.rdmstmpfile.create_dataset(rdm1s_dname, data=rdm1s[k])
+                        rdm2s_dname = f'rdm2s_{stateno}'
+                        self.rdmstmpfile.create_dataset(rdm2s_dname, data=rdm2s[k])
 
-                        rdm1s = rdm2s = None
+                    rdm1s = rdm2s = None
 
             def make_one_casdm1s(self, ci=None, state=0, **kwargs):
                 rdmstmpfile = self.rdmstmpfile
@@ -197,6 +192,7 @@ def get_mcpdft_child_class(mc, ot, DoLASSI=False, states=None, **kwargs):
                     else:
                         self.fcisolver.nroots = len(self.states)
 
+                    self.rdmstmpfile = lib.H5TmpFile ()
                     self._store_rdms()
                 else:
                     self.e_mcscf, self.e_cas, self.ci, self.mo_coeff, self.mo_energy = \
@@ -205,6 +201,10 @@ def get_mcpdft_child_class(mc, ot, DoLASSI=False, states=None, **kwargs):
 
             if self.DoLASSI:
                 self.e_mcscf = self.e_roots[self.states]  # To be consistent with PySCF
+
+        def __del__(self):
+            if callable (getattr (self.rdmstmpfile, 'close', None)):
+                self.rdmstmpfile.close ()
 
     pdft = PDFT(mc._scf, mc.ncas_sub, mc.nelecas_sub, my_ot=ot, **kwargs)
     _keys = pdft._keys.copy()
