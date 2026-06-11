@@ -169,7 +169,6 @@ class TranslationSymm:
         nk = np.prod(kmesh)
         assert len(kpts) == nk, "Number of k-points should match the product of kmesh dimensions."
         cell = self.cell
-        dtype = np.complex128
 
         norb_per_k = cell.nao_nr()
         trans_cart = self.lattice_cart(T_index)

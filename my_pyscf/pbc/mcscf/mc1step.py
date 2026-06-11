@@ -306,7 +306,7 @@ def gen_g_hop(mc, mo_coeff, mo_phase, u, casdm1, casdm2, eris):
             ra4 = (u[k4] - np.eye(nmo, dtype=dtype))[:, ncore:nocc]
             p1aa = np.einsum('pr,tq,rquv->ptuv', u[k1].conj().T, ua.T, ppaa, optimize=True)
             pa1a = np.einsum('pr,ruqv,qt->putv', u[k1].conj().T, papa, ra3.conj(), optimize=True)
-            paa1 = np.einsum('pr,rvuq,qt->pvtu', u[k1].conj().T, paap, ra4, optimize=True)
+            paa1 = np.einsum('pr,rvuq,qt->pvut', u[k1].conj().T, paap, ra4, optimize=True)
             p1aa = p1aa + pa1a + paa1
 
             dm2_k = _get_casdm2_kpts(casdm2, mo_phase1, (k1, k2, k3, k4))
