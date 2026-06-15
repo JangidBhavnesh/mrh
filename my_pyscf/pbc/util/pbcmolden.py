@@ -34,7 +34,7 @@ def print_molden(kmf, mo_coeff, kmesh, filename, only_occ=False, only_virt=False
     elif only_virt:
         mo_coeff_R = mo_coeff_R[:,nocc:]
 
-    molden.from_mo(scell, filename, mo_coeff_R)
+    molden.from_mo(scell, filename, mo_coeff_R.real)
 
     return None
 
@@ -59,6 +59,6 @@ def print_molden_only_as(kmf, mo_coeff, kmesh, filename, ncas, ncore):
 
     from pyscf.tools import molden
     scell, _, mo_coeff_R =  get_mo_coeff_k2R(kmf, mo_coeff, ncore, ncas, kmesh=kmesh)[:2]
-    molden.from_mo(scell, filename, mo_coeff_R)
+    molden.from_mo(scell, filename, mo_coeff_R.real)
 
     return None
