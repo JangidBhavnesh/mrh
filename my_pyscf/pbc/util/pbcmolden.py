@@ -27,7 +27,7 @@ def print_molden(kmf, mo_coeff, kmesh, filename, only_occ=False, only_virt=False
     ncore = 0
     assert np.prod(kmesh) == len(kmf.kpts), "kmesh and number of kpts in kmf do not match"
 
-    scell, _, mo_coeff_R =  get_mo_coeff_k2R(kmf, mo_coeff, ncore, nocc, kmesh=kmesh)[:2]
+    scell, _, mo_coeff_R =  get_mo_coeff_k2R(kmf, mo_coeff, ncore, nocc, kmesh=kmesh)[:3]
 
     if only_occ:
         mo_coeff_R = mo_coeff_R[:,:nocc]
@@ -58,7 +58,33 @@ def print_molden_only_as(kmf, mo_coeff, kmesh, filename, ncas, ncore):
     '''
 
     from pyscf.tools import molden
-    scell, _, mo_coeff_R =  get_mo_coeff_k2R(kmf, mo_coeff, ncore, ncas, kmesh=kmesh)[:2]
+    scell, _, mo_coeff_R =  get_mo_coeff_k2R(kmf, mo_coeff, ncore, ncas, kmesh=kmesh)[:3]
+    
     molden.from_mo(scell, filename, mo_coeff_R.real)
 
+    return None
+
+def print_molden_natorbs(kmc, kmesh, filename):
+    '''
+    Print natural orbitals in Molden format.
+    args:
+        kmc: k-CASSCF object
+            k-CASSCF object containing the natural orbitals.
+        kmesh: tuple
+            k-point mesh for the calculation.
+        filename: str
+            name of the output molden file.
+    '''
+    from pyscf.tools import molden
+    scell, _, mo_coeff_R =  get_mo_coeff_k2R(kmc._scf, kmc.mo_coeff, 0, kmc.ncas, kmesh=kmesh)[:3]
+    
+    nkpts = np.prod(kmesh)
+    ncastot = kmc.ncas * nkpts
+    nelecastot = (kmc.nelecas[0] * nkpts, kmc.nelecas[1] * nkpts)
+    dm1 = kmc.fcisolver.make_rdm1(kmc.ci, ncastot, nelecastot)
+    noon, natorb = np.linalg.eigh(dm1)
+    idx = np.argsort(noon)[::-1]
+    natorb = natorb[:, idx]
+    mo_coeff_R = mo_coeff_R @ natorb
+    molden.from_mo(scell, filename, mo_coeff_R.real, occ=noon[idx])
     return None
