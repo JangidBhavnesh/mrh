@@ -2205,7 +2205,8 @@ class LASCINoSymm (casci.CASCI):
         svals = svals[idx]
         k = len (idx)
         mo_occ1[:k] = mo_occ1[:k][idx]
-        k1 = len (mo_lvecs[:,:k])
+        # k1 = len (mo_lvecs[:,:k])
+        k1 = mo_lvecs[:,:k].shape[1]
         if k1 != k:
             log.warn ("Fewer AOs than MOs! Did you indicate the correct atoms?")
         mo_lvecs[:,:k] = mo_lvecs[:,:k][:,idx[:k1]]
