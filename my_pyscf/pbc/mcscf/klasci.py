@@ -20,7 +20,6 @@ from mrh.my_pyscf.pbc.mcscf import casci
 3. Implement the LASSI algorithm
 '''
 
-
 def kLASCI(kmf, ncas, nelecas, ncore=None, kmesh=None, kpts=None):
     '''
     Wrapper function for k-LASCI. 
@@ -63,7 +62,7 @@ def kLASCI(kmf, ncas, nelecas, ncore=None, kmesh=None, kpts=None):
 
     return klas
 
-class LASCINoSymm(casci.CASCI, LASCINoSymm):
+class LASCINoSymm(casci.PBCCASCI, LASCINoSymm):
     '''
     Localized active space CI (LASCI) class for periodic systems without 
     point group symmetry.
@@ -87,7 +86,7 @@ class LASCINoSymm(casci.CASCI, LASCINoSymm):
     '''
     def __init__(self, kmf, ncas, nelecas, ncore=None, spin_sub=None, 
                  kmesh=None, kpts=None):
-        super().__init__()
+        casci.PBCCASCI.__init__(self, kmf, ncas, nelecas, ncore=ncore)
         self.kmf = kmf
         self.ncas = ncas
         self.nelecas = nelecas
