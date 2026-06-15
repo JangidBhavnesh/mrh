@@ -2,6 +2,8 @@
 from pyscf.pbc import scf, dft
 from mrh.my_pyscf.pbc.mcscf import casci
 from mrh.my_pyscf.pbc.mcscf import mc1step
+from mrh.my_pyscf.pbc.mcscf.klasci import kLASCI
+
 
 def CASCI(kmf, ncas, nelecas, ncore=None):
     assert isinstance(kmf, scf.hf.SCF),  "CASCI only works with periodic SCF objects"
@@ -26,3 +28,4 @@ def CASSCF(kmf, ncas, nelecas, ncore=None):
     kmc = mc1step.CASSCF(kmf, ncas, nelecas, ncore)
     return kmc
 
+KLASCI = kLASCI
