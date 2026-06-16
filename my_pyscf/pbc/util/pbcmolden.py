@@ -56,16 +56,8 @@ def print_molden_only_as(kmf, mo_coeff, kmesh, filename, ncas, ncore):
         ncore: int
             number of core orbitals per unit cell
     '''
-
-    from pyscf.tools import molden
     scell, _, mo_coeff_R =  get_mo_coeff_k2R(kmf, mo_coeff, ncore, ncas, kmesh=kmesh)[:3]
-    
-    np.set_printoptions(precision=4, suppress=True)
-    print(mo_coeff_R.real)
-    print(mo_coeff_R.imag)
-    exit()
     molden.from_mo(scell, filename, mo_coeff_R.real)
-
     return None
 
 def print_molden_natorbs(kmc, kmesh, filename):
@@ -79,9 +71,8 @@ def print_molden_natorbs(kmc, kmesh, filename):
         filename: str
             name of the output molden file.
     '''
-    from pyscf.tools import molden
-    scell, _, mo_coeff_R =  get_mo_coeff_k2R(kmc._scf, kmc.mo_coeff, kmc.ncore, kmc.ncas, kmesh=kmesh)[:3]
-    
+    scell, _, mo_coeff_R =  get_mo_coeff_k2R(kmc._scf, kmc.mo_coeff, kmc.ncore, 
+                                             kmc.ncas, kmesh=kmesh)[:3]
     nkpts = np.prod(kmesh)
     ncastot = kmc.ncas * nkpts
     nelecastot = (kmc.nelecas[0] * nkpts, kmc.nelecas[1] * nkpts)
