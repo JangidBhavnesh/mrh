@@ -60,6 +60,10 @@ def print_molden_only_as(kmf, mo_coeff, kmesh, filename, ncas, ncore):
     from pyscf.tools import molden
     scell, _, mo_coeff_R =  get_mo_coeff_k2R(kmf, mo_coeff, ncore, ncas, kmesh=kmesh)[:3]
     
+    np.set_printoptions(precision=4, suppress=True)
+    print(mo_coeff_R.real)
+    print(mo_coeff_R.imag)
+    exit()
     molden.from_mo(scell, filename, mo_coeff_R.real)
 
     return None
@@ -76,7 +80,7 @@ def print_molden_natorbs(kmc, kmesh, filename):
             name of the output molden file.
     '''
     from pyscf.tools import molden
-    scell, _, mo_coeff_R =  get_mo_coeff_k2R(kmc._scf, kmc.mo_coeff, 0, kmc.ncas, kmesh=kmesh)[:3]
+    scell, _, mo_coeff_R =  get_mo_coeff_k2R(kmc._scf, kmc.mo_coeff, kmc.ncore, kmc.ncas, kmesh=kmesh)[:3]
     
     nkpts = np.prod(kmesh)
     ncastot = kmc.ncas * nkpts
@@ -87,4 +91,22 @@ def print_molden_natorbs(kmc, kmesh, filename):
     natorb = natorb[:, idx]
     mo_coeff_R = mo_coeff_R @ natorb
     molden.from_mo(scell, filename, mo_coeff_R.real, occ=noon[idx])
+    return None
+
+def print_molden_wannier(wannier_orb, cell, kmesh, filename, occ=None):
+    '''
+    Print Wannier orbitals in Molden format.
+    args:
+        wannier_orb: np.ndarray (ncell*nao, nwann)
+            Wannier orbital coefficients in real space.
+        cell: pyscf.pbc.Cell
+            Cell object containing the lattice information.
+        kmesh: tuple
+            k-point mesh for the calculation.
+        filename: str
+            name of the output molden file.
+    '''
+    from pyscf.pbc.tools.pbc import super_cell
+    scell = super_cell(cell, kmesh)
+    molden.from_mo(scell, filename, wannier_orb.real, occ=occ)
     return None
