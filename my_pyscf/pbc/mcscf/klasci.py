@@ -2,13 +2,15 @@
 
 import numpy as np
 import scipy.linalg
+from functools import reduce
 
 from pyscf import lib
 from pyscf.pbc import scf, dft, df
-
+from pyscf.pbc.lib import kpts_helper
 
 from mrh.my_pyscf.mcscf.lasci import LASCINoSymm
 from mrh.my_pyscf.pbc.mcscf import casci
+from mrh.my_pyscf.pbc.util.transym import TranslationSymm, get_wannier_orbs
 
 # Author: Bhavnesh Jangid
 
@@ -62,7 +64,132 @@ def kLASCI(kmf, ncas, nelecas, ncore=None, kmesh=None, kpts=None):
 
     return klas
 
-class LASCINoSymm(casci.PBCCASCI, LASCINoSymm):
+@lib.with_doc(casci.h1e_for_cas.__doc__)
+def h1e_for_cas(mc, mo_coeff=None, ncas=None, ncore=None):
+    # The difference between this function and one defined in pbc.mcscf.casci is that here 
+    # we are constructing the h1e in the Wannier basis, which is different from the k-space MO basis 
+    # used in standard PBCASCI.
+
+    if mo_coeff is None: mo_coeff = mc.mo_coeff
+    if ncas is None: ncas = mc.ncas
+    if ncore is None: ncore = mc.ncore
+    
+    cell = mc.cell
+    nao = cell.nao_nr()
+    kpts = mc._scf.kpts
+    kmesh = mc.kmesh
+    dtype = mo_coeff[0].dtype
+    nkpts = mc.nkpts
+
+    mo_core_kpts = [mo[:, :ncore] for mo in mo_coeff]
+    mo_act_kpts = [mo[:, ncore:ncore+ncas] for mo in mo_coeff]
+
+    h1ao_k = mc.get_hcore().astype(dtype)
+
+    # Remember, I am multiplying by nkpts here because total energy would be divided by nkpts later.
+    ecore = mc.energy_nuc() * nkpts
+    if ncore == 0:
+        corevhf_kpts = 0
+    else:
+        coredm_kpts = np.asarray([2.0 * (mo_core_kpts[k] @ mo_core_kpts[k].conj().T) 
+                                  for k in range(nkpts)], dtype=dtype)
+        # corevhf_kpts = mc._scf.get_veff(cell, coredm_kpts, hermi=1)
+        corevhf_kpts = mc.get_veff(cell, coredm_kpts, hermi=1, kpts=mc._scf.kpts)
+        fock = h1ao_k + 0.5 * corevhf_kpts
+        ecore += sum(np.einsum('ij,ji', coredm_kpts[k], fock[k]) for k in range(nkpts))
+        fock = None  # Free memory
+
+    h1ao_k += corevhf_kpts
+
+    # Fourier transform h1ao_k to real space to get h1ao_R, which is the one we will use 
+    # for constructing the effective 1e Hamiltonian in the Wannier basis.
+    ts = TranslationSymm(cell, kmesh)
+    R_indices = ts.lattice_indices(kmesh)
+    R_cart = np.array([ts.lattice_cart(R) for R in R_indices])
+    ncell = len(R_indices)
+
+    assert nkpts == ncell
+    assert np.prod(kmesh) == nkpts
+
+    h1ao_R = np.zeros((ncell, nao, ncell, nao), dtype=dtype)
+
+    for ik, k in enumerate(kpts):
+        hk = h1ao_k[ik]
+        for iR, Rv in enumerate(R_cart):
+            for iS, Sv in enumerate(R_cart):
+                phase = np.exp(1j * np.dot(k, Rv - Sv))
+                h1ao_R[iR, :, iS, :] += phase * hk
+
+    h1ao_R /= nkpts
+    h1ao_R = h1ao_R.reshape(nkpts*nao, nkpts*nao)
+
+    wannier_orb, R_indices_check = get_wannier_orbs(mc._scf, kmesh, mo_act_kpts)[:2]
+    wannier_orb = wannier_orb.reshape(nkpts*nao, nkpts*ncas)
+
+    # Sanity check to make sure that the R indices from TranslationSymm and get_wannier_orbs match.
+    assert np.array_equal(R_indices, R_indices_check), "Something is wrong."
+    
+    # Transform h1ao_R to the Wannier basis.
+    h1eff_R = reduce(np.dot, (wannier_orb.conj().T, h1ao_R, wannier_orb))
+
+    return h1eff_R, ecore
+
+def h2e_for_cas(mc, mo_coeff=None):
+    '''
+    AO2MO Transformation of the 2e integrals in the Wannier basis for k-LASCI.
+    The way we do this is by first transforming the 2e integrals from k-space MO basis to 
+    real space MO basis, and then transforming it to the Wannier basis using the wannier 
+    orbital coefficients.
+    args:
+        mc: PBCCASCI object
+            periodic CASCI object
+        mo_coeff: list/np.ndarray (nkpts, nao, nmo)
+            MO coefficients for each k-point. If None, it will be taken from the 
+            PBCCASCI object.
+    returns:
+        h2eff_R: ndarray (nkpts*ncas, nkpts*ncas, nkpts*ncas, nkpts*ncas)
+            2e integrals in the Wannier basis in real space.
+    '''
+    kmf = mc._scf
+    cell = kmf.cell
+    ncore = mc.ncore
+    ncas = mc.ncas
+    nkpts = mc.nkpts
+    kpts = kmf.kpts
+    kmesh = mc.kmesh
+
+    kconserv = kpts_helper.get_kconserv(cell, kpts)
+    
+    if mo_coeff is None:
+        mo_coeff = mc.mo_coeff
+    
+    # Do the ao2mo transformation in the k-space MO basis first to get eri_k, 
+    # which is in the k-space MO basis.
+    mo_act_kpts = np.array([mo_coeff[i][:, ncore:ncore+ncas] for i in range(nkpts)])
+    eri_k = kmf.with_df.ao2mo_7d(mo_act_kpts, kpts=kpts)
+    
+    # Get the mo phase for the active space orbitals
+    mo_phase = get_wannier_orbs(kmf, kmesh, mo_act_kpts)[-1]
+    mo_ks = mo_phase[kconserv]
+
+    # This einsum looks very scary but it is just the transformation of the eris from 
+    # k-space mo to r-space mo.
+    eris = np.einsum('auR,bvS,abcuvwt,cwT,abctU->RSTU',
+                        mo_phase.conj(), mo_phase, eri_k, mo_phase.conj(), mo_ks, optimize=True)
+    eris *= 1.0/nkpts
+    
+    assert eris.shape == (nkpts*ncas, nkpts*ncas, nkpts*ncas, nkpts*ncas)
+    return eris
+    
+class _PBCCASCIForLAS(casci.PBCCASCI):
+    '''
+    Child class of PBCCASCI for k-LASCI. Basically the way the h1e and h2e
+    integrals are constructed in the k-LASCI is different from the standard PBCASCI.
+    '''
+    get_h1eff = h1e_for_cas
+    get_h2eff = h2e_for_cas
+
+class LASCINoSymm(_PBCCASCIForLAS, LASCINoSymm):
     '''
     Localized active space CI (LASCI) class for periodic systems without 
     point group symmetry.
@@ -94,3 +221,5 @@ class LASCINoSymm(casci.PBCCASCI, LASCINoSymm):
         self.spin_sub = spin_sub
         self.kmesh = kmesh
         self.kpts = kpts
+
+
