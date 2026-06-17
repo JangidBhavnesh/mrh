@@ -297,6 +297,71 @@ def localize_kmf_mo_coeff(kmf, mo0):
     print('Orthogonality check passed!')
     return mo_coeff_loc, umat
 
+def localize_mo_coeff(kmc, mo0, target_aos=None):
+    '''
+    Localizing the active space orbitals.
+    args:
+        kmc: mcscf object
+            instance of the pbc.mcscf
+        mo0: np.ndarray or list (nkpts, nao, nmo)
+            kmc mo_coeff or the AVAS mo_coeff
+    return:
+        lo_coeff: localized mo_coeff.
+    '''
+    kmf = kmc._scf
+    cell = kmf.cell
+    kpts = kmf.kpts
+    ovlp = kmf.get_ovlp(kpts=kpts)
+    ncas = kmc.ncas
+    nactocc = sum(kmc.nelecas) // 2 + sum(kmc.nelecas) % 2
+    ncore = kmc.ncore
+
+    lo_coeff = meta_lowdin_orbitals(cell, ovlp)
+
+    mo_coeff = np.array([c.copy() for c in mo0])
+    mo_coeff_loc = []
+    umat = []
+
+    def _project(mo_coeff_k, lo_coeff_k, ovlp_k):
+        norb = mo_coeff_k.shape[1]
+        assert norb <= lo_coeff_k.shape[1], f"Less AOs then MOs"
+
+        pmat = ((mo_coeff_k.conj().T @ ovlp_k) @ lo_coeff_k)[:norb, :norb]
+        pinv = pmat.conj().T @ pmat
+        pinv = lowdin_sym(pinv)
+        umat_k = pmat @ pinv
+
+        # Localize the block orbitals
+        mo_k = mo_coeff_k @ umat_k
+
+        return mo_k, umat_k
+        
+    for k in range(len(kpts)):
+        # Don't change the core orbitals
+        mo_core = mo_coeff[k][:, :ncore]
+        umat_core = np.eye(ncore)
+
+        # Project the occupied space in the active space
+        lo_coeff_k = lo_coeff[k]
+        ovlp_k = ovlp[k]
+        mo_coeff_k = mo_coeff[k][:, ncore:ncore+nactocc]
+        mo_act_occ, umat_act_occ = _project(mo_coeff_k, lo_coeff_k, ovlp_k)
+        
+        # project the empty space in the active space
+        mo_coeff_k = mo_coeff[k][:, ncore+nactocc:ncore+ncas]
+        mo_act_vir, umat_act_vir = _project(mo_coeff_k, lo_coeff_k, ovlp_k)
+
+        # Don't change the rest of the virtual orbitals
+        mo_vir = mo_coeff[k][:, ncore+ncas:]
+        umat_vir = np.eye(mo_vir.shape[1])
+        mo_coeff_loc.append(np.hstack((mo_core, mo_act_occ, mo_act_vir, mo_vir)))
+        umat.append(scipy.linalg.block_diag(umat_core, umat_act_occ, umat_act_vir, umat_vir))
+
+    # Check the orthogonality of the localized orbitals.
+    orthogonality_check(mo_coeff_loc, ovlp)
+    print('Wannierization done, Orthogonality check passed!')
+    return mo_coeff_loc, umat
+
 def get_wannier_orbs(kmf, kmesh, mo_loc_k):
     '''
     Building the Wannier orbitals:
@@ -583,8 +648,6 @@ def unpack_wannier_orb(wannier_orb_packed, cell, kmesh, ref_cell=0,
         T = S - ref_R
         for iR, R in enumerate(R_indices):
             # W[R, mu, S, n] = W[R - T, mu, ref_cell, n]
-            #
-            # since T = S - ref_R,
             # R_ref = R - S + ref_R
             R_ref = ts.mod_index(R - T, kmesh)
             iR_ref = R_to_i[R_ref]
@@ -595,7 +658,7 @@ def unpack_wannier_orb(wannier_orb_packed, cell, kmesh, ref_cell=0,
 
 
 if __name__ == "__main__":
-    from pyscf.pbc import gto as pgto
+    from pyscf.pbc import gto as pgto, scf
 
     cell = pgto.Cell()
     cell.atom = '''
@@ -612,10 +675,19 @@ if __name__ == "__main__":
     cell.build()
 
     print("Checking translation symmetry in k-space and real-space representations...")    
-    kmesh = [10, 1, 1]
+    kmesh = [5, 1, 1]
     T_index = (1, 0, 0)
 
     kpts = cell.make_kpts(kmesh, wrap_around=True)
+
+    kmf = scf.KRHF(cell, kpts=kpts).density_fit(auxbasis='def2-svp-jkfit')
+    kmf.max_cycle=1000
+    kmf.exxdiv = None
+    kmf.conv_tol = 1e-10
+    kmf.kernel()
+
+    from mrh.my_pyscf.pbc.mcscf import avas
+    mo_coeff = avas.kernel(kmf, ['H 1s'], minao=cell.basis)[2]
 
     ts = TranslationSymm(cell, kmesh)
 
@@ -631,3 +703,22 @@ if __name__ == "__main__":
     rel = err / max(np.max(np.abs(trans_r)), 1e-14)
     print(f"max abs err = {err:.3e}")
     print(f"max rel err = {rel:.3e}")
+
+    ts = TranslationSymm(cell, kmesh)
+
+    lo_coeff = localize_kmf_mo_coeff(kmf, mo_coeff)[0]
+
+    wannier_orb, R_indices = get_wannier_orbs(kmf, kmesh, lo_coeff)[:2]
+    check_wannier_translation(ts, wannier_orb, R_indices)
+
+    # # Orthogonality check for the Wannier orbitals in packed form.
+    # wannier_orb = make_wannier_matrix(wannier_orb)
+    # ovlp_k = kmf.get_ovlp(kpts=kpts)
+    # ovlp_bvk = make_ovlp_mat_in_wannier_basis(kmf, kmesh)
+    # orthogonality_check(wannier_orb, ovlp_bvk)
+    # print('Orthogonality check passed! for wannier orbitals')
+
+    wannier_packed = pack_wannier_orb(wannier_orb, ref_cell=0)
+    wannier_unpacked = unpack_wannier_orb(wannier_packed, cell, kmesh, ref_cell=0)
+    assert np.allclose(wannier_orb, wannier_unpacked), "Wannier unpacking failed, something went wrong in the packing/unpacking functions."
+    print("Wannier packing/unpacking check passed!")
