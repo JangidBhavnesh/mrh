@@ -204,10 +204,6 @@ class TranslationSymm:
 
         return transmat
 
-
-
-
-
 def orthogonality_check(mo_coeff, ovlp, tol=1e-8):
     '''
     Orthoganlity check for given set of the mo_coeff.
@@ -231,13 +227,14 @@ def lowdin_sym(s, tol=1e-15):
     idx = e > tol
     return np.dot(v[:,idx]/np.sqrt(e[idx]), v[:,idx].conj().T)
 
-def meta_lowdin_orbitals(ovlp):
+def meta_lowdin_orbitals(cell, ovlp):
     '''
     Get the meta-lowdin orthogonalized orbitals.
     '''
     from pyscf import lo
+    nkpts = len(ovlp)
     lo_coeff = np.array([lo.orth.orth_ao(cell, 'meta-lowdin', s=ovlp[k]) 
-                        for k in range(len(kpts))])
+                        for k in range(nkpts)])
     # Check the orthogonality of the lowdin orbitals.
     orthogonality_check(lo_coeff, ovlp)
     return lo_coeff
@@ -245,7 +242,7 @@ def meta_lowdin_orbitals(ovlp):
 def localize_kmf_mo_coeff(kmf, mo0):
     '''
     Rotates the kmf.mo_coeff occupied and virtual orbitals
-    in local basis.
+    in local orthonormal meta-lowdin basis.
     args:
         kmf: mean-field
             instance of the pbc.scf
@@ -254,9 +251,10 @@ def localize_kmf_mo_coeff(kmf, mo0):
     return:
         lo_coeff: localized mo_coeff.
     '''
-
+    cell = kmf.cell
+    kpts = kmf.kpts
     ovlp = kmf.get_ovlp(kpts=kpts)
-    lo_coeff = meta_lowdin_orbitals(ovlp)
+    lo_coeff = meta_lowdin_orbitals(cell, ovlp)
 
     mo_coeff = np.array([c.copy() for c in mo0])
     mo_coeff_loc = []
@@ -294,6 +292,7 @@ def localize_kmf_mo_coeff(kmf, mo0):
         mo_coeff_loc.append(np.hstack((mo_k_occ, mo_k_vir)))
         umat.append(scipy.linalg.block_diag(umat_k_occ, umat_k_vir))
 
+    # Check the orthogonality of the localized orbitals.
     orthogonality_check(mo_coeff_loc, ovlp)
     print('Orthogonality check passed!')
     return mo_coeff_loc, umat
@@ -353,7 +352,7 @@ def check_wannier_translation(ts, W, R_indices, T_index=(1, 0, 0), tol=1e-8):
     """
     Check W[R+T, mu, S+T, n] = W[R, mu, S, n].
     """
-
+    kmesh = ts.kmesh
     R_to_i = ts.index_map(R_indices)
     T_index = np.asarray(T_index, dtype=int)
 
@@ -531,7 +530,8 @@ def pack_wannier_orb(wannier_orb, ref_cell=0):
     wannier_orb = wannier_orb.reshape(ncell*nao, nwann)
     return wannier_orb
 
-def unpack_wannier_orb(wannier_orb_packed, cell, kmesh, ref_cell=0, make_wannier_mat=False):
+def unpack_wannier_orb(wannier_orb_packed, cell, kmesh, ref_cell=0, 
+                       make_wannier_mat=False):
     '''
     Convert W[R, mu, n] to W[R, mu, S, n], by copying the packed block to all S blocks.
     This is the inverse operation of pack_wannier_orb.
