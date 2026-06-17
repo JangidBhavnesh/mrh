@@ -22,7 +22,7 @@ from mrh.my_pyscf.pbc.util.transym import TranslationSymm, get_wannier_orbs
 3. Implement the LASSI algorithm
 '''
 
-def kLASCI(kmf, ncas, nelecas, ncore=None, kmesh=None, kpts=None):
+def kLASCI(kmf, ncas, nelecas, ncore=None, spin_mult=None, kmesh=None, kpts=None):
     '''
     Wrapper function for k-LASCI. 
     args:
@@ -34,6 +34,10 @@ def kLASCI(kmf, ncas, nelecas, ncore=None, kmesh=None, kpts=None):
             number of active electrons per unit cell
         ncore: int, optional
             number of core orbitals per unit cell
+        spin_mult: int, optional (2S + 1)
+            spin multiplicity of the active space in the unit cell.
+            If not provided, it will be automatically determined based 
+            on the number of active electrons.
         kmesh: tuple, optional
             k-point mesh for the calculation.
         kpts: array_like, optional
@@ -60,7 +64,7 @@ def kLASCI(kmf, ncas, nelecas, ncore=None, kmesh=None, kpts=None):
     assert isinstance(kmf.with_df, df.df.GDF), \
         "k-LASCI only works with GDF density fitting object"
 
-    klas = LASCINoSymm(kmf, ncas, nelecas, ncore, kmesh, kpts)
+    klas = PBCLASCINoSymm(kmf, ncas, nelecas, ncore=ncore, spin_mult=spin_mult, kmesh=kmesh, kpts=kpts)
 
     return klas
 
@@ -189,7 +193,7 @@ class _PBCCASCIForLAS(casci.PBCCASCI):
     get_h1eff = h1e_for_cas
     get_h2eff = h2e_for_cas
 
-class LASCINoSymm(_PBCCASCIForLAS, LASCINoSymm):
+class PBCLASCINoSymm(_PBCCASCIForLAS, LASCINoSymm):
     '''
     Localized active space CI (LASCI) class for periodic systems without 
     point group symmetry.
@@ -200,7 +204,7 @@ class LASCINoSymm(_PBCCASCIForLAS, LASCINoSymm):
             number of active orbitals per unit cell
         nelecas: int/tuple
             number of active electrons per unit cell
-        spin_sub: int, optional (2S + 1)
+        spin_mult: int, optional (2S + 1)
             spin multiplicity of the active space in the unit cell.
             If not provided, it will be automatically determined based 
             on the number of active electrons.
@@ -211,15 +215,33 @@ class LASCINoSymm(_PBCCASCIForLAS, LASCINoSymm):
         kpts: array_like, optional
             k-points for the calculation.
     '''
-    def __init__(self, kmf, ncas, nelecas, ncore=None, spin_sub=None, 
+    def __init__(self, kmf, ncas, nelecas, ncore=None, spin_mult=None, 
                  kmesh=None, kpts=None):
-        casci.PBCCASCI.__init__(self, kmf, ncas, nelecas, ncore=ncore)
-        self.kmf = kmf
+        self.spin_mult = spin_mult
+        self.kmesh = kmesh
+        self.kpts = kpts if kpts is not None else kmf.kpts
+        nkpts = len(self.kpts)
+        if kmesh is not None:
+            assert nkpts == np.prod(kmesh), "kmesh and kpts do not match."
+        self.ncas_sub = nkpts * (ncas,)
+        if isinstance(nelecas, int):
+            self.nelecas_sub = nkpts * (nelecas,)
+        elif isinstance(nelecas, tuple) and len(nelecas) == 2:
+            self.nelecas_sub = nkpts * (nelecas,)
+        self.spin_sub = spin_mult * nkpts if spin_mult is not None else None
+        self.nroots = 1
+
+        # Initialize the parent classes.
+        _PBCCASCIForLAS.__init__(self, kmf, ncas, nelecas, ncore=ncore)
+        LASCINoSymm.__init__(self, kmf, ncas=self.ncas_sub, nelecas=self.nelecas_sub, ncore=ncore, spin_sub=self.spin_sub)
+        
+        # Making sure this is for an unit cell, not summed over multiple unit cells.
         self.ncas = ncas
         self.nelecas = nelecas
-        self.ncore = ncore
-        self.spin_sub = spin_sub
-        self.kmesh = kmesh
-        self.kpts = kpts
 
-
+        # the total active space should be stored as ncastot, nelecstot
+        self.ncastot = sum(self.ncas_sub)
+        if isinstance(self.nelecas_sub[0], int):
+            self.nelecstot = sum(self.nelecas_sub)
+        else:
+            self.nelecstot = tuple(map(sum, zip(*self.nelecas_sub)))
