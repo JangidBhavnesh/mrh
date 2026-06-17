@@ -9,8 +9,11 @@ from pyscf.pbc import scf, dft, df
 from pyscf.pbc.lib import kpts_helper
 
 from mrh.my_pyscf.mcscf.lasci import LASCINoSymm
+from mrh.my_pyscf.mcscf.addons import state_average_n_mix, get_h1e_zipped_fcisolver
+
 from mrh.my_pyscf.pbc.mcscf import casci
 from mrh.my_pyscf.pbc.util.transym import TranslationSymm, get_wannier_orbs
+from mrh.my_pyscf.pbc.fci import csf_solver
 
 # Author: Bhavnesh Jangid
 
@@ -162,6 +165,8 @@ def h2e_for_cas(mc, mo_coeff=None):
     kpts = kmf.kpts
     kmesh = mc.kmesh
 
+    assert kmesh is not None
+
     kconserv = kpts_helper.get_kconserv(cell, kpts)
     
     if mo_coeff is None:
@@ -245,3 +250,14 @@ class PBCLASCINoSymm(_PBCCASCIForLAS, LASCINoSymm):
             self.nelecstot = sum(self.nelecas_sub)
         else:
             self.nelecstot = tuple(map(sum, zip(*self.nelecas_sub)))
+
+    def _init_fcibox(self, smult, nelec):
+        '''
+        Initialize a FCI box for a given spin multiplicity and electron count.
+        This has to replaced from the standard LASCI implementation.
+        '''
+        solver = csf_solver(self.cell, smult)
+        solver.spin = nelec[0] - nelec[1]
+        return get_h1e_zipped_fcisolver(state_average_n_mix(self, [solver], [1.0]).fcisolver)
+    
+    
