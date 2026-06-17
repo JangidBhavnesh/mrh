@@ -295,7 +295,7 @@ def localize_kmf_mo_coeff(kmf, mo0):
     # Check the orthogonality of the localized orbitals.
     orthogonality_check(mo_coeff_loc, ovlp)
     print('Orthogonality check passed!')
-    return mo_coeff_loc, umat
+    return np.array(mo_coeff_loc), np.array(umat)
 
 def localize_mo_coeff(kmc, mo0, target_aos=None):
     '''
@@ -360,7 +360,7 @@ def localize_mo_coeff(kmc, mo0, target_aos=None):
     # Check the orthogonality of the localized orbitals.
     orthogonality_check(mo_coeff_loc, ovlp)
     print('Wannierization done, Orthogonality check passed!')
-    return mo_coeff_loc, umat
+    return np.array(mo_coeff_loc), np.array(umat)
 
 def get_wannier_orbs(kmf, kmesh, mo_loc_k):
     '''
