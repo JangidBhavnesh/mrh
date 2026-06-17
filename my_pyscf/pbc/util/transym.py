@@ -312,15 +312,21 @@ def get_wannier_orbs(kmf, kmesh, mo_loc_k):
             Array of k-points in reciprocal space.
         mo_loc_k: list of np.ndarray (nkpts, nao, norb)
             Localized mo_coeff for each k-point.
+            norb can be nmo or just the ncas.
     returns:
         wannier_orb : ndarray W[R, mu, S, n] (ncell, nao, ncell, nwann)
             Wannier orbitals in real space.
         R_indices : ndarray
             BvK cell indices.
+        mo_phase : ndarray (nkpts, nwann, ncell*nwann)
+            Projection of the Wannier orbitals onto the k-space localized orbitals:
+                mo_phase[k, m, S*nwann+n] = < C_loc(k,m) | W[S,n] >
     '''
     cell = kmf.cell
     kpts = kmf.kpts
-    dtype = mo_loc_k[0].dtype
+
+    # Use complex dtype because the Fourier phase is complex.
+    dtype = np.result_type(mo_loc_k[0].dtype, np.complex128)
 
     ts = TranslationSymm(cell, kmesh)
     nkpts = len(kpts)
@@ -333,6 +339,8 @@ def get_wannier_orbs(kmf, kmesh, mo_loc_k):
     nao = mo_loc_k[0].shape[0]
     nwann = mo_loc_k[0].shape[1]
 
+    mo_loc_k = np.asarray(mo_loc_k, dtype=dtype)
+
     wannier_orb = np.zeros((ncell, nao, ncell, nwann), dtype=dtype)
 
     R_cart = np.array([ts.lattice_cart(R) for R in R_indices])
@@ -341,12 +349,26 @@ def get_wannier_orbs(kmf, kmesh, mo_loc_k):
         Ck = mo_loc_k[ik]
         for iR, Rv in enumerate(R_cart):
             for iS, Sv in enumerate(R_cart):
-                phase = np.exp(1j * np.dot(k, Rv - Sv))
-                wannier_orb[iR, :, iS, :] += phase * Ck
+                phase_RS = np.exp(1j * np.dot(k, Rv - Sv))
+                wannier_orb[iR, :, iS, :] += phase_RS * Ck
 
     wannier_orb /= nkpts
 
-    return wannier_orb, R_indices
+    mo_coeff_R = wannier_orb.reshape(ncell*nao, ncell*nwann)
+
+    phase_Rk = np.zeros((ncell, nkpts), dtype=dtype)
+    for ik, k in enumerate(kpts):
+        for iR, Rv in enumerate(R_cart):
+            phase_Rk[iR, ik] = np.exp(1j * np.dot(k, Rv)) / np.sqrt(nkpts)
+
+    s_k = np.asarray(kmf.get_ovlp(kpts=kpts), dtype=dtype)
+    s_k_g = np.einsum('kuv,Rk->kuRv', s_k, phase_Rk.conj())
+    s_k_g = s_k_g.reshape(nkpts, nao, ncell*nao)
+
+    mo_phase = np.einsum('kum,kui->kmi',mo_loc_k.conj(),
+                         np.dot(s_k_g, mo_coeff_R),optimize=True)
+
+    return wannier_orb, R_indices, mo_phase
 
 def check_wannier_translation(ts, W, R_indices, T_index=(1, 0, 0), tol=1e-8):
     """
