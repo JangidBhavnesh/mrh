@@ -7,8 +7,8 @@ from pyscf.scf.addons import canonical_orth_
 from pyscf.fci import cistring
 from pyscf.mcscf.addons import state_average as state_average_mcscf
 
-from mrh.my_pyscf.fci.csf import CSFFCISolver
-from mrh.my_pyscf.mcscf.productstate import ProductStateFCISolver as molProductStateFCISolver
+from mrh.my_pyscf.pbc.fci.csf_cplx import cplxCSFFCISolver as CSFFCISolver
+from mrh.my_pyscf.mcscf.productstate import ProductStateFCISolver as molProductStateFCISolver, state_average_fcisolver
 
 class PBCProductStateFCISolver (molProductStateFCISolver):
 
@@ -17,7 +17,7 @@ class PBCProductStateFCISolver (molProductStateFCISolver):
             serialfrag=False, **kwargs):
         log = self.log
         converged = False
-        e_sigma = 0
+        e_sigma = 0.0
         e = [0 for n in norb_f]
         ci1 = ci0
         log.info ('Entering product-state fixed-point CI iteration')
@@ -27,12 +27,13 @@ class PBCProductStateFCISolver (molProductStateFCISolver):
             # linear dependencies and can't populate all CI vectors for all fragments.
             h1eff, h0eff, ci0 = self.project_hfrag (h1, h2, ci0, norb_f, nelec_f,
                 ecore=ecore, **kwargs)
+
             grad = self._get_grad (h1eff, h2, ci0, norb_f, nelec_f, **kwargs)
             grad_max = np.amax (np.abs (grad))
             solvers_converged = [np.all (np.asarray (s.converged)) for s in self.fcisolvers]
             nconv = sum ([int (c) for c in solvers_converged])
             log.info ('Cycle %d: max grad = %e ; sigma = %e ; %d/%d fragment CI solvers converged',
-                      it, grad_max, e_sigma, nconv, len (self.fcisolvers))
+                      it, grad_max, e_sigma.real, nconv, len (self.fcisolvers))
             log.debug ('e vector = {}'.format (e))
             if nconv<len(self.fcisolvers): log.debug ('unconverged fragment CI solvers: {}'.format (
                 list(np.where (np.logical_not (solvers_converged))[0])))
@@ -121,7 +122,7 @@ class PBCProductStateFCISolver (molProductStateFCISolver):
             neleca, nelecb = nelec
             na = cistring.num_strings (no, neleca)
             nb = cistring.num_strings (no, nelecb)
-            zguess = np.zeros ((snroots,na,nb))
+            zguess = np.zeros ((snroots,na,nb), dtype=np.complex128)
             cguess = np.asarray (ci0[ix]).reshape (-1,na,nb)
             ngroots = min (zguess.shape[0], cguess.shape[0])
             zguess[:ngroots,:,:] = cguess[:ngroots,:,:]
@@ -179,6 +180,7 @@ class PBCProductStateFCISolver (molProductStateFCISolver):
         zipper = [h0eff, h1eff, ci0, norb_f, nelec_f, self.fcisolvers, ni, nj]
         e1 = [e for e in e0]
         ci1 = [c for c in ci0]
+
         for ifrag, (h0e, h1e, c, no, ne, solver, i, j) in enumerate (zip (*zipper)):
             if serialfrag and it % nfrag != ifrag: continue
             h2e = h2[i:j,i:j,i:j,i:j]
@@ -202,14 +204,20 @@ class PBCProductStateFCISolver (molProductStateFCISolver):
             nroots = solver.nroots
             h2e = h2[i:j,i:j,i:j,i:j]
             h2e = solver.absorb_h1e (h1e, h2e, no, nelec, 0.5)
-            if nroots==1: c=c[None,:]
+            if nroots==1: c=c[None,:] # nroots, na, nb
             hc = [solver.contract_2e (h2e, col, no, nelec) for col in c]
             c, hc = np.asarray (c), np.asarray (hc)
             chc = np.dot (np.asarray (c).reshape (nroots,-1).conj (),
                           np.asarray (hc).reshape (nroots,-1).T)
             hc = hc - np.tensordot (chc, c, axes=1)
             if isinstance (solver, CSFFCISolver):
-                hc = solver.transformer.vec_det2csf (hc, normalize=False)
+                #hc = solver.transformer.vec_det2csf (hc, normalize=False)
+                creal = solver.transformer.vec_det2csf (hc.real, order='C', normalize=False)
+                cimag = solver.transformer.vec_det2csf (hc.imag, order='C', normalize=False)
+                cout = creal.astype(h1e.dtype)
+                cout.real = creal
+                cout.imag = cimag
+                hc = cout
             # External degrees of freedom: not weighted, because I want
             # to converge all of the roots even if they don't contribute
             # to the mean field
@@ -232,10 +240,17 @@ class PBCProductStateFCISolver (molProductStateFCISolver):
                         + 0.5*np.tensordot (h2, dm2, axes=4))
         return energy_tot
 
-    def project_hfrag (self, h1, h2, ci, norb_f, nelec_f, ecore=0, dm1s=None, dm2=None, **kwargs):
-        if dm1s is None: dm1s = np.stack (self.make_rdm1s (ci, norb_f, nelec_f), axis=0)
-        if h1.ndim < 3: h1 = np.stack ([h1,h1], axis=0)
-        if dm2 is None: dm2 = self.make_rdm2 (ci, norb_f, nelec_f)
+    def project_hfrag (self, h1, h2, ci, norb_f, nelec_f, 
+                       ecore=0, dm1s=None, dm2=None, **kwargs):
+        '''
+        Project the h1e and h2e on the fragment space.
+        '''
+        if dm1s is None:
+            dm1s = np.stack (self.make_rdm1s (ci, norb_f, nelec_f), axis=0)
+        if h1.ndim < 3:
+            h1 = np.stack ([h1,h1], axis=0)
+        if dm2 is None:
+            dm2 = self.make_rdm2 (ci, norb_f, nelec_f)
         energy_tot = (ecore + np.tensordot (h1, dm1s, axes=3)
                         + 0.5*np.tensordot (h2, dm2, axes=4))
         v1  = np.tensordot (dm1s, h2, axes=2)
@@ -267,12 +282,12 @@ class PBCProductStateFCISolver (molProductStateFCISolver):
               + 0.5*np.tensordot (h2_i, dm2_i, axes=4))
             h0eff.append (e_i)
         return h1eff, h0eff, ci
-        # A child class will modify ci in this function
 
     def make_rdm1s (self, ci, norb_f, nelec_f, **kwargs):
+        dtype = np.array(ci).dtype
         norb = sum (norb_f)
-        dm1a = np.zeros ((norb, norb))
-        dm1b = np.zeros ((norb, norb))
+        dm1a = np.zeros ((norb, norb), dtype=dtype)
+        dm1b = np.zeros ((norb, norb), dtype=dtype)
         nj = np.cumsum (norb_f)
         ni = nj - norb_f
         for ix, (i, j, c, no, ne, s) in enumerate (zip (ni, nj, ci, norb_f, nelec_f, self.fcisolvers)):
@@ -297,8 +312,9 @@ class PBCProductStateFCISolver (molProductStateFCISolver):
         return dm1a + dm1b
 
     def make_rdm2 (self, ci, norb_f, nelec_f, **kwargs):
+        dtype = np.array(ci).dtype
         norb = sum (norb_f)
-        dm2 = np.zeros ([norb,]*4)
+        dm2 = np.zeros ([norb,]*4, dtype=dtype)
         nj = np.cumsum (norb_f)
         ni = nj - norb_f
         dm1a, dm1b = self.make_rdm1s (ci, norb_f, nelec_f, **kwargs)
@@ -318,11 +334,6 @@ class PBCProductStateFCISolver (molProductStateFCISolver):
             dm2[k:l,i:j,i:j,k:l] = -d2.transpose (2,0,1,3)
         return dm2
 
-def state_average_fcisolver (solver, weights=(.5,.5), wfnsym=None):
-    # hoo boy this is real dumb
-    dummy = type ("dummy",(object,),{"_keys":set()}) ()
-    dummy.fcisolver = solver
-    return state_average_mcscf (dummy, weights=weights, wfnsym=wfnsym).fcisolver
 
 class ImpureProductStateFCISolver (PBCProductStateFCISolver):
     r'''Minimize the energy of an impure state:
