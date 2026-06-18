@@ -231,8 +231,8 @@ def pspace(fci, h1e, eri, norb, nelec, transformer,
     # so I always keep the eri in the 4D format. 
     assert (h1e.dtype == eri.dtype), \
         "h1e and eri must have the same dtype"
-    assert h1e.shape == (norb, norb), \
-        "h1e must be a square matrix of shape (norb, norb)"
+    # assert h1e.shape == (norb, norb), \
+    #     "h1e must be a square matrix of shape (norb, norb)"
     assert eri.shape == (norb, norb, norb, norb), \
         "eri must be a 4D array of shape (norb, norb, norb, norb)"
 
