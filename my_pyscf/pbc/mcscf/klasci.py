@@ -178,8 +178,10 @@ def h2e_for_cas(mc, mo_coeff=None):
     # Do the ao2mo transformation in the k-space MO basis first to get eri_k, 
     # which is in the k-space MO basis.
     mo_act_kpts = np.array([mo_coeff[i][:, ncore:ncore+ncas] for i in range(nkpts)])
-    eri_k = kmf.with_df.ao2mo_7d(mo_act_kpts, kpts=kpts)
-    
+
+    #eri_k = kmf.with_df.ao2mo_7d(mo_act_kpts, kpts=kpts)
+    from mrh.my_pyscf.pbc.df.df_ao2mo import ao2mo_7d
+    eri_k = ao2mo_7d(kmf.with_df, mo_act_kpts, kpts=kpts)
     # Get the mo phase for the active space orbitals
     mo_phase = get_wannier_orbs(kmf, kmesh, mo_act_kpts)[-1]
     mo_ks = mo_phase[kconserv]
