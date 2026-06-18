@@ -12,9 +12,9 @@ from pyscf.pbc.lib import kpts_helper
 from mrh.my_pyscf.mcscf import lasci as mollasci
 from mrh.my_pyscf.mcscf.lasci import LASCINoSymm
 from mrh.my_pyscf.mcscf.addons import state_average_n_mix, get_h1e_zipped_fcisolver
-from mrh.my_pyscf.mcscf.productstate import ImpureProductStateFCISolver
 
 from mrh.my_pyscf.pbc.mcscf import casci
+from mrh.my_pyscf.pbc.mcscf.productstate import ImpureProductStateFCISolver
 from mrh.my_pyscf.pbc.util.transym import TranslationSymm, get_wannier_orbs
 from mrh.my_pyscf.pbc.fci import csf_solver
 
@@ -345,8 +345,8 @@ def kernel (las, mo_coeff=None, ci0=None, lroots=None, lweights=None, verbose=0,
             any ([any ([c2 is None for c2 in c1]) for c1 in ci0])):
         ci0 = las.get_init_guess_ci (mo_coeff, ci0=ci0, eri_cas=eri_cas)
 
-    e_cas = np.empty (las.nroots)
-    e_states = np.empty (las.nroots)
+    e_cas = np.empty (las.nroots, dtype=h1eff.dtype)
+    e_states = np.empty (las.nroots, dtype=h1eff.dtype)
     ci1 = [[None for c2 in c1] for c1 in ci0]
     converged = []
     t = (lib.logger.process_clock(), lib.logger.perf_counter())
@@ -555,10 +555,13 @@ class PBCLASCINoSymm(casci.PBCCASCI, LASCINoSymm):
     @lib.with_doc(kernel.__doc__)
     def kernel (self, mo_coeff=None, ci0=None, lroots=None, lweights=None, verbose=None,
                assert_no_dupes=False, _dry_run=False):
+        nkpts = len(self.kpts)
         if mo_coeff is None:
             mo_coeff=self.mo_coeff
         else:
             self.mo_coeff = mo_coeff
+        assert nkpts == mo_coeff.shape[0]
+
         if ci0 is None: ci0 = self.ci
         if verbose is None: verbose = self.verbose
         converged, e_tot, e_states, e_cas, e_lexc, ci = kernel (
@@ -567,13 +570,31 @@ class PBCLASCINoSymm(casci.PBCCASCI, LASCINoSymm):
         if _dry_run: return
         self.converged, self.ci = converged, ci
         self.e_tot, self.e_states, self.e_cas, self.e_lexc = e_tot, e_states, e_cas, e_lexc
+        self.e_tot /= nkpts
         if mo_coeff is self.mo_coeff:
-            self.dump_chk ()
+            pass
+            # self.dump_chk ()
         elif getattr (self, 'chkfile', None) is not None:
             lib.logger.warn (self, 'orbitals changed; chkfile not dumped!')
         self._finalize (method='LASCI')
         return self.converged, self.e_tot, self.e_states, self.e_cas, e_lexc, self.ci
 
+    def _finalize(self, method='LASCI'):
+        log = lib.logger.new_logger (self, self.verbose)
+        nroots_prt = len (self.e_states)
+        if self.verbose <= lib.logger.INFO:
+            nroots_prt = min (nroots_prt, 100)
+        if nroots_prt < len (self.e_states):
+            log.info (("Printing a maximum of 100 state energies;"
+                    " increase self.verbose to see them all"))
+        if nroots_prt > 1:
+            log.info ("%s state-average energy = %.15g", method, self.e_tot)
+            for i, e in enumerate (self.e_states[:nroots_prt]):
+                log.info ("%s state %d energy = %.15g", method, i, e)
+        else:
+            log.info ("%s energy = %.15g", method, self.e_tot.real)
+        return
+    
     def get_mo_slice (self, idx, mo):
         '''
         Get the molecular orbital slice for a given fragment.
