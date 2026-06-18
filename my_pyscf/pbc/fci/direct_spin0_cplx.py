@@ -64,7 +64,8 @@ def contract_2e_spin0(eri, fcivec, norb, nelec, link_index=None):
             )
     out_CI = out_CI.reshape(na, na)
     out_CI = out_CI + out_CI.T
-    return out_CI.ravel().view(direct_spin1.FCIvector)
+    # return out_CI.ravel().view(direct_spin1.FCIvector)
+    return out_CI.view(direct_spin1.FCIvector)  
 
 class FCISolver(direct_spin1_cplx_FCISolver):
 
