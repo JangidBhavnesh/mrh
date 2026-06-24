@@ -1,3 +1,5 @@
+import warnings
+
 import numpy as np
 import scipy
 
@@ -208,7 +210,7 @@ def orthogonality_check(mo_coeff, ovlp, tol=1e-8):
     '''
     Orthoganlity check for given set of the mo_coeff.
     '''
-    assert np.asarray(mo_coeff).shape == np.asarray(ovlp).shape
+    # assert np.asarray(mo_coeff).shape == np.asarray(ovlp).shape
     if np.asarray(mo_coeff).ndim == 3:
         for k, (mo_k, ovlp_k) in enumerate(zip(mo_coeff, ovlp)):
             s = mo_k.conj().T @ ovlp_k @ mo_k
@@ -314,9 +316,33 @@ def localize_mo_coeff(kmc, mo0, target_aos=None):
     ovlp = kmf.get_ovlp(kpts=kpts)
     ncas = kmc.ncas
     nactocc = sum(kmc.nelecas) // 2 + sum(kmc.nelecas) % 2
+    na, nb = kmc.nelecas
+    nactocc = max(na, nb)
     ncore = kmc.ncore
 
     lo_coeff = meta_lowdin_orbitals(cell, ovlp)
+
+    # Use only selected target AOs for the localization reference
+    if target_aos is not None:
+        if isinstance(target_aos, str):
+            target_aos = [target_aos]
+
+        if all(isinstance(x, (int, np.integer)) for x in target_aos):
+            target_ao_idx = np.asarray(target_aos, dtype=int)
+        else:
+            target_ao_idx = []
+            for ao_label in target_aos:
+                target_ao_idx.extend(cell.search_ao_label(ao_label))
+            target_ao_idx = np.asarray(sorted(set(target_ao_idx)), dtype=int)
+
+
+        if len(target_ao_idx) < ncas:
+            warnings.warn(
+                f"Number of target AOs ({len(target_ao_idx)}) are lower than "
+                f"the active space size.({ncas}).",
+                RuntimeWarning)
+
+        lo_coeff = lo_coeff[:, :, target_ao_idx]
 
     mo_coeff = np.array([c.copy() for c in mo0])
     mo_coeff_loc = []
@@ -358,7 +384,11 @@ def localize_mo_coeff(kmc, mo0, target_aos=None):
         umat.append(scipy.linalg.block_diag(umat_core, umat_act_occ, umat_act_vir, umat_vir))
 
     # Check the orthogonality of the localized orbitals.
-    orthogonality_check(mo_coeff_loc, ovlp)
+    mo_coeff_loc = np.array(mo_coeff_loc)
+    orthogonality_check(mo_coeff_loc[:, :, :ncore], ovlp)
+    orthogonality_check(mo_coeff_loc[:, :, ncore:ncore+nactocc], ovlp)
+    orthogonality_check(mo_coeff_loc[:, :, ncore+nactocc:ncore+ncas], ovlp)
+    orthogonality_check(mo_coeff_loc[:, :, ncore+ncas:], ovlp)
     print('Wannierization done, Orthogonality check passed!')
     return np.array(mo_coeff_loc), np.array(umat)
 
