@@ -373,21 +373,26 @@ def localize_mo_coeff(kmc, mo0, target_aos=None):
         mo_coeff_k = mo_coeff[k][:, ncore:ncore+nactocc]
         mo_act_occ, umat_act_occ = _project(mo_coeff_k, lo_coeff_k, ovlp_k)
         
-        # project the empty space in the active space
-        mo_coeff_k = mo_coeff[k][:, ncore+nactocc:ncore+ncas]
-        mo_act_vir, umat_act_vir = _project(mo_coeff_k, lo_coeff_k, ovlp_k)
-
         # Don't change the rest of the virtual orbitals
         mo_vir = mo_coeff[k][:, ncore+ncas:]
         umat_vir = np.eye(mo_vir.shape[1])
-        mo_coeff_loc.append(np.hstack((mo_core, mo_act_occ, mo_act_vir, mo_vir)))
-        umat.append(scipy.linalg.block_diag(umat_core, umat_act_occ, umat_act_vir, umat_vir))
+
+        if nactocc < ncas:
+            # project the empty space in the active space
+            mo_coeff_k = mo_coeff[k][:, ncore+nactocc:ncore+ncas]
+            mo_act_vir, umat_act_vir = _project(mo_coeff_k, lo_coeff_k, ovlp_k)
+            mo_coeff_loc.append(np.hstack((mo_core, mo_act_occ, mo_act_vir, mo_vir)))
+            umat.append(scipy.linalg.block_diag(umat_core, umat_act_occ, umat_act_vir, umat_vir))
+        else:
+            mo_coeff_loc.append(np.hstack((mo_core, mo_act_occ, mo_vir)))
+            umat.append(scipy.linalg.block_diag(umat_core, umat_act_occ, umat_vir))
 
     # Check the orthogonality of the localized orbitals.
     mo_coeff_loc = np.array(mo_coeff_loc)
     orthogonality_check(mo_coeff_loc[:, :, :ncore], ovlp)
     orthogonality_check(mo_coeff_loc[:, :, ncore:ncore+nactocc], ovlp)
-    orthogonality_check(mo_coeff_loc[:, :, ncore+nactocc:ncore+ncas], ovlp)
+    if nactocc < ncas:
+        orthogonality_check(mo_coeff_loc[:, :, ncore+nactocc:ncore+ncas], ovlp)
     orthogonality_check(mo_coeff_loc[:, :, ncore+ncas:], ovlp)
     print('Wannierization done, Orthogonality check passed!')
     return np.array(mo_coeff_loc), np.array(umat)
