@@ -667,11 +667,13 @@ class PBCLASCINoSymm(casci.PBCCASCI, LASCINoSymm):
         assert rdm1s_ao_k.shape == (2, nkpts, nao, nao), \
             f"Shape mismatch: {rdm1s_ao_k.shape} != (2, {nkpts}, {nao}, {nao})"
 
+        if not include_core:
+            coreelec = self.ncore * 2
         ovlp = self._scf.get_ovlp(kpts=self.kpts)
         rdm1 = rdm1s_ao_k.sum (0)
         nelecref = self._scf.cell.nelectron
-        nelecdiff = [np.trace(ovlp[k] @ rdm1[k]).real - nelecref 
-                     for k in range(nkpts)]
+        nelecdiff = [np.trace(ovlp[k] @ rdm1[k]).real + coreelec - nelecref 
+                    for k in range(nkpts)]
         if any(abs(diff) > 1e-6 for diff in nelecdiff):
             raise ValueError(f"Number of electrons mismatch for k-points: {nelecdiff}")
         return rdm1s_ao_k
