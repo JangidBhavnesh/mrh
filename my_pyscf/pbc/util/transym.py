@@ -299,7 +299,7 @@ def localize_kmf_mo_coeff(kmf, mo0):
     print('Orthogonality check passed!')
     return np.array(mo_coeff_loc), np.array(umat)
 
-def localize_mo_coeff(kmc, mo0, target_aos=None):
+def localize_mo_coeff(kmc, mo0, target_aos=None, occ_no=None):
     '''
     Localizing the active space orbitals.
     args:
@@ -316,7 +316,10 @@ def localize_mo_coeff(kmc, mo0, target_aos=None):
     ovlp = kmf.get_ovlp(kpts=kpts)
     ncas = kmc.ncas
     nactocc = sum(kmc.nelecas) // 2 + sum(kmc.nelecas) % 2
-    na, nb = kmc.nelecas
+    if occ_no is not None:
+        na, nb = occ_no
+    else:
+        na, nb = kmc.nelecas
     nactocc = max(na, nb)
     ncore = kmc.ncore
 
