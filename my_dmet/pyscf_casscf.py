@@ -94,7 +94,7 @@ def solve (frag, guess_1RDM, chempot_imp):
     mf = fix_my_RHF_for_nonsinglet_env (mf, frag.impham_OEI_S)
     mf.__dict__.update (frag.mf_attr)
     if guess_orbs_av: mf.max_cycle = 2
-    mf.scf (guess_1RDM)
+    mf.scf (np.asarray (guess_1RDM))
     if (not mf.converged) and (not guess_orbs_av):
         if np.any (np.abs (frag.impham_OEI_S) > 1e-8) and mol.spin != 0:
             raise NotImplementedError('Gradient and Hessian fixes for nonsinglet environment of Newton-descent ROHF algorithm')
@@ -114,7 +114,7 @@ def solve (frag, guess_1RDM, chempot_imp):
             mf.get_ovlp = lambda *args: np.eye(frag.norbs_imp)
             mf._eri = ao2mo.restore(8, frag.impham_TEI, frag.norbs_imp)
             mf = fix_my_RHF_for_nonsinglet_env (mf, frag.impham_OEI_S)
-            mf.scf (guess_1RDM)
+            mf.scf (np.asarray (guess_1RDM))
             if not mf.converged:
                 mf = mf.newton ()
                 mf.kernel ()

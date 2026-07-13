@@ -74,6 +74,9 @@ class KnownValues(unittest.TestCase):
         ncore = cell.nelectron // 2
         mo_coeff = avas.kernel(kmf, ['H 1s'], minao=cell.basis)[2]
         dm = [2.0*mo_coeff[:, :ncore] @ mo_coeff[:, :ncore].conj().T]
+        dm = np.asarray (dm)
+        # this is required to be an array since at least 
+        # PySCF v2.13.1 <= 0a892409c19bca7034a3ee3e96b31ae69ca2611c <= v2.14.0
         e_mf_avas = kmf.energy_tot(dm=dm)
         self.assertAlmostEqual(e_kmf, e_mf_avas, places=7)
 
@@ -98,6 +101,9 @@ class KnownValues(unittest.TestCase):
         veff_rotated = kmf.get_veff(dm_kpts_avas)
         e_kmf_kpts_avas = [np.einsum('ij,ji->', hcore[k] + 0.5*veff_rotated[k], dm_kpts_avas[k]) 
                               for k in range(nkpts)]
+        dm_kpts_avas = np.asarray (dm_kpts_avas)
+        # this is required to be an array since at least 
+        # PySCF v2.13.1 <= 0a892409c19bca7034a3ee3e96b31ae69ca2611c <= v2.14.0
         e_mf_avas = kmf.energy_tot(dm=dm_kpts_avas)
 
         e_kmf_kpts_avas = np.array(e_kmf_kpts_avas)

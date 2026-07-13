@@ -68,7 +68,7 @@ class localintegrals:
             self.fullRDM_ao = self.fullRDM_ao[0] + self.fullRDM_ao[1]
         else:
             self.fullSDM_ao = np.zeros_like (self.fullRDM_ao)
-        self.fullJK_ao    = self.get_veff_ao (dm=self.fullRDM_ao, dm_last=0, vhf_last=0, hermi=1) #Last 3 numbers: dm_last, vhf_last, hermi
+        self.fullJK_ao    = self.get_veff_ao (dm=self.fullRDM_ao, dm_last=None, vhf_last=0, hermi=1) #Last 3 numbers: dm_last, vhf_last, hermi
         if self.fullJK_ao.ndim == 3:
             self.fullJK_ao = self.fullJK_ao[0] 
             # Because I gave it a spin-summed 1-RDM, the two spins for JK will necessarily be identical
@@ -129,7 +129,7 @@ class localintegrals:
         self.frozenDM_mo  = np.array( the_mf.mo_occ, copy=True )
         self.frozenDM_mo[ self.active==1 ] = 0 # Only the frozen MO occupancies nonzero
         self.frozenDM_ao  = np.dot(np.dot( the_mf.mo_coeff, np.diag( self.frozenDM_mo )), the_mf.mo_coeff.T )
-        self.frozenJK_ao  = self.get_veff_ao (self.frozenDM_ao, 0, 0, 1 ) #Last 3 numbers: dm_last, vhf_last, hermi
+        self.frozenJK_ao  = self.get_veff_ao (self.frozenDM_ao, None, 0, 1 ) #Last 3 numbers: dm_last, vhf_last, hermi
         if self.frozenJK_ao.ndim == 3:
             self.frozenJK_ao = self.frozenJK_ao[0]
             # Because I gave it a spin-summed 1-RDM, the two spins for JK will necessarily be identical
@@ -258,7 +258,7 @@ class localintegrals:
             DMloc must be the spin-summed density matrix
         '''
         DM_ao = represent_operator_in_basis (DMloc, self.ao2loc.T )
-        JK_ao = self.get_veff_ao (DM_ao, 0, 0, 1) #Last 3 numbers: dm_last, vhf_last, hermi
+        JK_ao = self.get_veff_ao (DM_ao, None, 0, 1) #Last 3 numbers: dm_last, vhf_last, hermi
         if JK_ao.ndim == 3:
             JK_ao = JK_ao[0]
         JK_loc = represent_operator_in_basis (JK_ao, self.ao2loc )
