@@ -87,7 +87,7 @@ def make_lpdft_ham_(mc, mo_coeff=None, ci=None, ot=None):
     qn_lbls = ['neleca', 'nelecb', 'irrep']
     for it, (las1, sym, indices, indexed) in enumerate(iterate_subspace_blocks(mc, ci, statesym)):
         idx_space, idx_prod = indices
-        ci_blk, nelec_blk = indexed
+        ci_blk, nelec_blk = indexed[:2]
         idx_allprods.extend(list(np.where(idx_prod)[0]))
         lib.logger.info(mc, 'Build + diag H matrix L-PDFT-LASSI symmetry block %d\n'
                         + '{} = {}\n'.format(qn_lbls, sym)
@@ -95,7 +95,7 @@ def make_lpdft_ham_(mc, mo_coeff=None, ci=None, ot=None):
                         np.count_nonzero(idx_space),
                         np.count_nonzero(idx_prod))
 
-        ham_blk, s2_blk, ovlp_blk = op_o1.ham(mc, h1, h2, ci_blk, nelec_blk)
+        ham_blk, s2_blk, ovlp_blk = op_o1.ham(mc, h1, h2, ci_blk, nelec_blk)[:3]
         diag_idx = np.diag_indices_from(ham_blk)
         ham_blk[diag_idx] += h0 + cas_hyb * mc.e_roots
 
@@ -255,13 +255,15 @@ class _LPDFT(mcpdft.MultiStateMCPDFTSolver):
             self.e_tot, self.e_mcscf, self.e_cas, self.ci,
             self.mo_coeff, self.mo_energy)
 
-    def get_lpdft_hcore_only(self, casdm1s_0, hyb=1.0):
+    def get_lpdft_hcore_only(self, casdm1s_0, hyb=1.0, mo_coeff=None, 
+                             ncore=None, ncas=None):
         '''
         Returns the lpdft hcore AO integrals weighted by the
         hybridization factor. Excludes the MC-SCF (wfn) component.
         '''
 
-        dm1s = _dms.casdm1s_to_dm1s(self, casdm1s=casdm1s_0)
+        dm1s = _dms.casdm1s_to_dm1s(self, casdm1s=casdm1s_0, mo_coeff=mo_coeff, 
+                                    ncore=ncore, ncas=ncas)
         dm1 = dm1s[0] + dm1s[1]
         v_j = self._scf.get_j(dm=dm1)
         return hyb * self.get_hcore() + self.veff1 + hyb * v_j
