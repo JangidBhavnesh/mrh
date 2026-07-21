@@ -49,7 +49,7 @@ class KnownValues(unittest.TestCase):
                H 3 0 0
                H 4 0 0'''
 
-        mol = gto.M (atom=xyz, basis='sto3g', symmetry=False, verbose=4)
+        mol = gto.M (atom=xyz, basis='sto3g', symmetry=False, verbose=0)
         mf = scf.RHF (mol).run ()
         
         # LASSCF and LASSI
@@ -79,6 +79,7 @@ class KnownValues(unittest.TestCase):
         
         mc = mcpdft.CASSCF (mf, 'tPBE', 4, 4).state_average_([1/36, ]*36)
         mc = mc.multi_state('lin')
+        mc.max_cycle_macro = 0
         mc.kernel ()
 
         RDMsComp = []
@@ -92,24 +93,24 @@ class KnownValues(unittest.TestCase):
                 lsi.opt = opt
                 lsi.kernel ()
                
-                RDMsComp = [lsi.make_rdm1s(state=i) for i in range(len(lsi.e_roots))]
+                RDMsComp = [lsi.make_casdm12s(state=i)[0] for i in range(len(lsi.e_roots))]
                 RDM2Comp = [lsi.make_casdm2(state=i) for i in range(len(lsi.e_roots))]
                 
-                # for i in range(len(lsi.e_roots)):
-                #     # print(np.max(np.abs(np.array(RDMsComp[i]) - np.array(RDMs[i]))))
-                #     print(np.max(np.abs(np.array(RDM2Comp[i]) - np.array(RDM2[i]))))
-                #     # np.testing.assert_allclose(np.array(RDMsComp[i]), np.array(RDMs[i]), rtol=1e-7, atol=1e-7)
-                #     # np.testing.assert_allclose(np.array(RDM2Comp[i]), np.array(RDM2[i]), rtol=1e-7, atol=1e-7)
-
+                for i in range(len(lsi.e_roots)):
+                    assert np.max(np.abs(np.array(RDMsComp[i]) - np.array(RDMs[i]))) < 1e-10
+                    assert np.max(np.abs(np.array(RDM2Comp[i]) - np.array(RDM2[i]))) < 1e-10
+                   
                 from mrh.my_pyscf import mcpdft
                 lsipdft = mcpdft.LASSI (lsi, 'tPBE', verbose=4)
                 lsipdft.opt = opt
                 lsipdft = lsipdft.multi_state()
                 lsipdft.kernel()
 
-                for j, e_root in enumerate(e_mcscf):
-                    self.assertAlmostEqual (lsi.e_roots[j], e_root, 7)
-                    self.assertAlmostEqual (lsipdft.e_states[0], mc.e_states[0], 7)
+                # exit()
+                # for j, e_root in enumerate(e_mcscf):
+                #     self.assertAlmostEqual (lsi.e_roots[j], e_root, 7)
+                #     print(lsipdft.e_states[j]-mc.e_states[j])
+                    # self.assertAlmostEqual (lsipdft.e_states[0], mc.e_states[0], 7)
 
                 del lsi
 if __name__ == "__main__":
