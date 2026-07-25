@@ -54,6 +54,15 @@
 #define SS_S       10
 #define NSS_FIELDS 11
 
+#define LINK_CRE    0
+#define LINK_DES    1
+#define LINK_TARGET 2
+#define LINK_SIGN   3
+#define LINK_K_CRE  5
+#define LINK_K_DES  6
+#define LINK_DK     7
+#define NLINK_FIELDS 8
+
 typedef struct {
         int dst_offset;
         int entry0;
@@ -293,6 +302,121 @@ static int make_block_tables(int nkpts, int nblocks, int *blocks,
         *p_block_nb = block_nb;
         *p_ndet = ndet;
         return 0;
+}
+
+void FCIcontract_1e_k(double complex *h1e,
+                      double complex *ci0,
+                      double complex *ci1,
+                      int nkpts, int ncas,
+                      int nblocks, int *blocks,
+                      int *linka, int nstra, int nlinka,
+                      int *linkb, int nstrb, int nlinkb,
+                      int *stra_ids, int *stra_offsets,
+                      int *strb_ids, int *strb_offsets,
+                      int *str2tot_a, int *str2tot_b)
+{
+        int ndet = 0;
+
+        for (int iblk = 0; iblk < nblocks; iblk++) {
+                int *blk = blocks + iblk * 6;
+                int offset = blk[BLOCK_OFFSET];
+                int size = blk[BLOCK_SIZE];
+                if (offset + size > ndet) {
+                        ndet = offset + size;
+                }
+        }
+
+        zset0(ci1, (size_t)ndet);
+
+#pragma omp parallel for schedule(dynamic) default(none) \
+        shared(h1e, ci0, ci1, nkpts, ncas, nblocks, blocks, \
+               linka, nstra, nlinka, linkb, nstrb, nlinkb, \
+               stra_ids, stra_offsets, strb_ids, strb_offsets, \
+               str2tot_a, str2tot_b)
+        for (int iblk = 0; iblk < nblocks; iblk++) {
+                int *blk = blocks + iblk * 6;
+                int ka = blk[BLOCK_KA];
+                int kb = blk[BLOCK_KB];
+                int na = blk[BLOCK_NA];
+                int nb = blk[BLOCK_NB];
+                int offset = blk[BLOCK_OFFSET];
+
+                for (int ia0 = 0; ia0 < na; ia0++) {
+                        int astr0 = stra_ids[stra_offsets[ka] + ia0];
+
+                        for (int ilink = 0; ilink < nlinka; ilink++) {
+                                int *link = linka + (astr0 * nlinka + ilink)
+                                        * NLINK_FIELDS;
+                                int k_cre = link[LINK_K_CRE] % nkpts;
+                                int k_des = link[LINK_K_DES] % nkpts;
+                                int dk = link[LINK_DK] % nkpts;
+
+                                if (k_cre != k_des || dk != 0) {
+                                        continue;
+                                }
+
+                                int astr1 = link[LINK_TARGET];
+                                if (astr1 < 0 || astr1 >= nstra) {
+                                        continue;
+                                }
+
+                                int ia1 = str2tot_a[ka * nstra + astr1];
+                                if (ia1 < 0) {
+                                        continue;
+                                }
+
+                                int p = link[LINK_CRE] % ncas;
+                                int q = link[LINK_DES] % ncas;
+                                double sign = (double)link[LINK_SIGN];
+                                double complex hpq =
+                                        h1e[(k_cre * ncas + p) * ncas + q];
+
+                                for (int ib = 0; ib < nb; ib++) {
+                                        ci1[offset + ia1 * nb + ib] +=
+                                                sign * hpq *
+                                                ci0[offset + ia0 * nb + ib];
+                                }
+                        }
+                }
+
+                for (int ib0 = 0; ib0 < nb; ib0++) {
+                        int bstr0 = strb_ids[strb_offsets[kb] + ib0];
+
+                        for (int ilink = 0; ilink < nlinkb; ilink++) {
+                                int *link = linkb + (bstr0 * nlinkb + ilink)
+                                        * NLINK_FIELDS;
+                                int k_cre = link[LINK_K_CRE] % nkpts;
+                                int k_des = link[LINK_K_DES] % nkpts;
+                                int dk = link[LINK_DK] % nkpts;
+
+                                if (k_cre != k_des || dk != 0) {
+                                        continue;
+                                }
+
+                                int bstr1 = link[LINK_TARGET];
+                                if (bstr1 < 0 || bstr1 >= nstrb) {
+                                        continue;
+                                }
+
+                                int ib1 = str2tot_b[kb * nstrb + bstr1];
+                                if (ib1 < 0) {
+                                        continue;
+                                }
+
+                                int p = link[LINK_CRE] % ncas;
+                                int q = link[LINK_DES] % ncas;
+                                double sign = (double)link[LINK_SIGN];
+                                double complex hpq =
+                                        h1e[(k_cre * ncas + p) * ncas + q];
+
+                                for (int ia = 0; ia < na; ia++) {
+                                        ci1[offset + ia * nb + ib1] +=
+                                                sign * hpq *
+                                                ci0[offset + ia * nb + ib0];
+                                }
+                        }
+                }
+        }
 }
 
 static void contract_ab_scalar(double complex *eri,
