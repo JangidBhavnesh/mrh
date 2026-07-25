@@ -63,25 +63,6 @@ def _load_k_contract_lib():
             ctypes.c_void_p,
         ]
         libpbcfci_k.FCIcontract_1e_k.restype = None
-        contract_2e_k_args = [
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_int,
-            ctypes.c_int,
-            ctypes.c_int,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-        ]
-        libpbcfci_k.FCIcontract_2e_k.argtypes = contract_2e_k_args
-        libpbcfci_k.FCIcontract_2e_k.restype = None
-        libpbcfci_k.FCIcontract_2e_k_zgemm.argtypes = contract_2e_k_args
-        libpbcfci_k.FCIcontract_2e_k_zgemm.restype = None
         libpbcfci_k.FCIcontract_2e_k_zgemm_ab_struct.argtypes = [
             ctypes.c_void_p,
             ctypes.c_void_p,
@@ -758,78 +739,58 @@ def _contract_2e_k_c_kernel(kernel_name, eri, fcivec, norb, nelec, nkpts,
     assert eri.shape == (nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas)
 
     libpbcfci = _load_k_contract_lib()
-    if kernel_name == "FCIcontract_2e_k_zgemm":
-        kernel = libpbcfci.FCIcontract_2e_k_zgemm_ab_struct
-    else:
-        kernel = getattr(libpbcfci, kernel_name)
+    if kernel_name != "FCIcontract_2e_k_zgemm":
+        raise ValueError("Only the zgemm k-FCI 2e C kernel is available")
+    kernel = libpbcfci.FCIcontract_2e_k_zgemm_ab_struct
     with lib.with_omp_threads(contract_2e_threads):
-        if kernel_name == "FCIcontract_2e_k_zgemm":
-            kernel(
-                eri.ctypes.data_as(ctypes.c_void_p),
-                fcivec.ctypes.data_as(ctypes.c_void_p),
-                sigma_ci.ctypes.data_as(ctypes.c_void_p),
-                ctypes.c_int(nkpts),
-                ctypes.c_int(ncas),
-                ctypes.c_int(contract_map.blocks.shape[0]),
-                contract_map.blocks.ctypes.data_as(ctypes.c_void_p),
-                contract_map.ab_group_tab.ctypes.data_as(ctypes.c_void_p),
-                contract_map.ab_group_offsets.ctypes.data_as(ctypes.c_void_p),
-                contract_map.ab_src_addr.ctypes.data_as(ctypes.c_void_p),
-                contract_map.ab_dst_addr.ctypes.data_as(ctypes.c_void_p),
-                contract_map.ab_sign.ctypes.data_as(ctypes.c_void_p),
-                contract_map.ab_eri_idx_ab.ctypes.data_as(ctypes.c_void_p),
-                contract_map.ab_eri_idx_ba.ctypes.data_as(ctypes.c_void_p),
-                ctypes.c_int(contract_map.ab_src_addr.size),
-                contract_map.aa_group_tab.ctypes.data_as(ctypes.c_void_p),
-                contract_map.aa_group_offsets.ctypes.data_as(ctypes.c_void_p),
-                contract_map.aa_src_addr.ctypes.data_as(ctypes.c_void_p),
-                contract_map.aa_dst_addr.ctypes.data_as(ctypes.c_void_p),
-                contract_map.aa_sign.ctypes.data_as(ctypes.c_void_p),
-                contract_map.aa_eri_idx.ctypes.data_as(ctypes.c_void_p),
-                contract_map.bb_group_tab.ctypes.data_as(ctypes.c_void_p),
-                contract_map.bb_group_offsets.ctypes.data_as(ctypes.c_void_p),
-                contract_map.bb_src_addr.ctypes.data_as(ctypes.c_void_p),
-                contract_map.bb_dst_addr.ctypes.data_as(ctypes.c_void_p),
-                contract_map.bb_sign.ctypes.data_as(ctypes.c_void_p),
-                contract_map.bb_eri_idx.ctypes.data_as(ctypes.c_void_p),
-            )
-        else:
-            kernel(
-                eri.ctypes.data_as(ctypes.c_void_p),
-                fcivec.ctypes.data_as(ctypes.c_void_p),
-                sigma_ci.ctypes.data_as(ctypes.c_void_p),
-                ctypes.c_int(nkpts),
-                ctypes.c_int(ncas),
-                ctypes.c_int(contract_map.blocks.shape[0]),
-                contract_map.blocks.ctypes.data_as(ctypes.c_void_p),
-                contract_map.ab_tab.ctypes.data_as(ctypes.c_void_p),
-                contract_map.ab_offsets.ctypes.data_as(ctypes.c_void_p),
-                contract_map.aa_tab.ctypes.data_as(ctypes.c_void_p),
-                contract_map.aa_offsets.ctypes.data_as(ctypes.c_void_p),
-                contract_map.bb_tab.ctypes.data_as(ctypes.c_void_p),
-                contract_map.bb_offsets.ctypes.data_as(ctypes.c_void_p),
-            )
+        kernel(
+            eri.ctypes.data_as(ctypes.c_void_p),
+            fcivec.ctypes.data_as(ctypes.c_void_p),
+            sigma_ci.ctypes.data_as(ctypes.c_void_p),
+            ctypes.c_int(nkpts),
+            ctypes.c_int(ncas),
+            ctypes.c_int(contract_map.blocks.shape[0]),
+            contract_map.blocks.ctypes.data_as(ctypes.c_void_p),
+            contract_map.ab_group_tab.ctypes.data_as(ctypes.c_void_p),
+            contract_map.ab_group_offsets.ctypes.data_as(ctypes.c_void_p),
+            contract_map.ab_src_addr.ctypes.data_as(ctypes.c_void_p),
+            contract_map.ab_dst_addr.ctypes.data_as(ctypes.c_void_p),
+            contract_map.ab_sign.ctypes.data_as(ctypes.c_void_p),
+            contract_map.ab_eri_idx_ab.ctypes.data_as(ctypes.c_void_p),
+            contract_map.ab_eri_idx_ba.ctypes.data_as(ctypes.c_void_p),
+            ctypes.c_int(contract_map.ab_src_addr.size),
+            contract_map.aa_group_tab.ctypes.data_as(ctypes.c_void_p),
+            contract_map.aa_group_offsets.ctypes.data_as(ctypes.c_void_p),
+            contract_map.aa_src_addr.ctypes.data_as(ctypes.c_void_p),
+            contract_map.aa_dst_addr.ctypes.data_as(ctypes.c_void_p),
+            contract_map.aa_sign.ctypes.data_as(ctypes.c_void_p),
+            contract_map.aa_eri_idx.ctypes.data_as(ctypes.c_void_p),
+            contract_map.bb_group_tab.ctypes.data_as(ctypes.c_void_p),
+            contract_map.bb_group_offsets.ctypes.data_as(ctypes.c_void_p),
+            contract_map.bb_src_addr.ctypes.data_as(ctypes.c_void_p),
+            contract_map.bb_dst_addr.ctypes.data_as(ctypes.c_void_p),
+            contract_map.bb_sign.ctypes.data_as(ctypes.c_void_p),
+            contract_map.bb_eri_idx.ctypes.data_as(ctypes.c_void_p),
+        )
     return sigma_ci
 
 def contract_2e_k_c(eri, fcivec, norb, nelec, nkpts, target_k,
                     link_index=None, contract_map=None, plan=None):
     '''
-    C implementation of contract_2e_k using Python-built k pair tables.
-    This wrapper keeps the current Python implementation available as the
-    reference path while the lower-level kernel is validated.
+    Compatibility alias for the BLAS-backed C implementation of contract_2e_k.
     '''
-    return _contract_2e_k_c_kernel(
-        "FCIcontract_2e_k", eri, fcivec, norb, nelec, nkpts, target_k,
+    return contract_2e_k_zgemm(
+        eri, fcivec, norb, nelec, nkpts, target_k,
         link_index=link_index, contract_map=contract_map, plan=plan,
     )
 
 def contract_2e_k_zgemm(eri, fcivec, norb, nelec, nkpts, target_k,
                         link_index=None, contract_map=None, plan=None):
     '''
-    BLAS-backed C implementation of contract_2e_k using Python-built k pair
-    tables.  The alpha-alpha and beta-beta same-spin contractions are applied
-    with zgemm; the alpha-beta terms are packed into sparse source/destination
-    block groups.  OpenMP threads follow
+    BLAS-backed C implementation of contract_2e_k using structural k-sector
+    contraction maps.  The alpha-alpha and beta-beta same-spin contractions
+    are applied with zgemm; the alpha-beta terms are packed into sparse
+    source/destination block groups.  OpenMP threads follow
     pbc_k_contract_2e_threads/pbc_contract_2e_threads.
     '''
     return _contract_2e_k_c_kernel(
