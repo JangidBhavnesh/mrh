@@ -1,14 +1,14 @@
 #!/bin/bash
 import unittest
 import numpy as np
+import scipy
+
+from pyscf import fci
 
 from mrh.my_pyscf.pbc.fci import direct_spin1_cplx
 from mrh.my_pyscf.pbc.fci import direct_spin1_kfci
-
-try:
-    from mrh.tests.pbc.kfci_test_helper import kFCIHelperFunctions
-except ImportError:
-    from kfci_test_helper import kFCIHelperFunctions
+from mrh.my_pyscf.pbc.fci.direct_spin1_kfci import _unpack
+from mrh.my_pyscf.pbc.fci.kcistrings import gen_k_sector_maps, gen_k_sector_linkstr_info
 
 # Author: Bhavnesh Jangid
 
@@ -21,6 +21,127 @@ There are four make_rdm functions
 3. make_rdm1 (spin-summed 1-RDM)
 4. make_rdm12 (spin-summed 2-RDM)
 '''
+
+class kFCIHelperFunctions:
+    '''
+    This class contains helper functions to test the k-FCI implementation. These functions are used to
+    arrange the 1e/2e integrals and CI vectors between the k-space format and the full format, and to 
+    compare the results from the k-FCI code with the full cplx-FCI code.
+    '''
+    def __init__(self):
+        pass
+    
+    def h1e_k_to_full(self, h1e_k):
+        '''
+        Arrange k-space 1e integrals to full 1e integrals. (still in k-space only)
+        '''
+        h1e_full = scipy.linalg.block_diag(*h1e_k)
+        return h1e_full
+    
+    def eri_k_to_full(self, eri_k):
+        '''
+        Arrange k-space 2e integrals to full 2e integrals. (still in k-space only)
+        '''
+        nkpts, ncas = eri_k.shape[0], eri_k.shape[-1]
+        norb = nkpts * ncas
+        eri_full = np.zeros((norb, norb, norb, norb), dtype=eri_k.dtype)
+        for kp, kq, kr in np.ndindex(nkpts, nkpts, nkpts):
+            ks = (kp - kq + kr) % nkpts
+            P, Q, R, S = kp * ncas, kq * ncas, kr * ncas, ks * ncas
+            eri_full[P:P + ncas, Q:Q + ncas, R:R + ncas, S:S + ncas] = eri_k[kp, kq, kr]
+        return eri_full
+
+    def eri_full_to_k(self, eri_full, nkpts, ncas):
+        '''
+        Arrange full 2e integrals to k-space 2e integrals.
+        '''
+        ef = eri_full.reshape(nkpts, ncas, nkpts, ncas, nkpts, ncas, nkpts, ncas)
+        eri_k = np.zeros((nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas), dtype=eri_full.dtype)
+        for kp, kq, kr in np.ndindex(nkpts, nkpts, nkpts):
+            ks = (kp - kq + kr) % nkpts
+            eri_k[kp, kq, kr] = ef[kp, :, kq, :, kr, :, ks, :]
+        return eri_k
+
+    def get_ksector_info(self, norb, nelec, nkpts, target_k):
+        '''
+        Generate the k-sector string maps and block information.
+        '''
+        link_indexa, link_indexb = _unpack(norb, nelec, None, nkpts)
+        straid_k, strbid_k = gen_k_sector_maps(link_indexa, link_indexb, nkpts)[:2]
+        blocks = gen_k_sector_linkstr_info(link_indexa, link_indexb, nkpts, target_k)
+        return link_indexa, link_indexb, straid_k, strbid_k, blocks
+
+    def embed_sector_fcivec_to_full_ci(self, fcivec_k, blocks, straid_k, strbid_k, 
+                                    nstra_total, nstrb_total):
+        '''
+        In this function, I will create the full CI vector (as zeros) and then only
+        fill in the specific block corresponding to each (ka, kb) sector with the sector-wise CI vector.
+        '''
+        
+        ci_full = np.zeros( (nstra_total, nstrb_total), dtype=fcivec_k.dtype)
+
+        for blk in blocks:
+            ka, kb, nstra, nstrb, offset, size = map(int, blk)
+            block_ka_kb = fcivec_k[offset:offset + size].reshape(nstra, nstrb)
+
+            astrs = straid_k[ka]
+            bstrs = strbid_k[kb]
+
+            ci_full[np.ix_(astrs, bstrs)] = block_ka_kb
+
+        return ci_full
+
+    def extract_sector_from_full_ci(self, ci_full, blocks, straid_k, strbid_k):
+        '''
+        This function extracts the sector-wise CI vector from the full CI vector.
+        '''
+
+        sector_size = int(blocks[:, 5].sum())
+
+        fcivec_k = np.zeros(sector_size, dtype=ci_full.dtype)
+
+        for blk in blocks:
+            ka, kb, nstra, nstrb, offset, size = map(int, blk)
+        
+            astrs = straid_k[ka]
+            bstrs = strbid_k[kb]
+
+            block = ci_full[np.ix_(astrs, bstrs)]
+
+            fcivec_k[offset:offset + size] = block.reshape(-1)
+
+        return fcivec_k
+
+    def random_ksector_fcivec(self, nkpts, ncas, nelec, target_k=0, seed=12):
+        '''
+        Generate a random normalized k-sector CI vector and the corresponding maps.
+        '''
+        rng = np.random.default_rng(seed)
+        norb = nkpts * ncas
+        link_indexa, link_indexb, straid_k, strbid_k, blocks = \
+            self.get_ksector_info(norb, nelec, nkpts, target_k)
+        sector_size = int(blocks[:, 5].sum())
+
+        fcivec_k = (rng.normal(size=sector_size) 
+                    + 1j * rng.normal(size=sector_size))
+        fcivec_k /= np.linalg.norm(fcivec_k)
+
+        return fcivec_k, link_indexa, link_indexb, straid_k, strbid_k, blocks
+
+    def embed_random_ksector_fcivec_to_full_ci(self, nkpts, ncas, nelec, target_k=0, seed=12):
+        '''
+        Generate a random normalized k-sector CI vector and embed it to the full CI matrix.
+        '''
+        norb = nkpts * ncas
+        fcivec_k, link_indexa, link_indexb, straid_k, strbid_k, blocks = \
+            self.random_ksector_fcivec(nkpts, ncas, nelec, target_k=target_k, seed=seed)
+
+        nstra_total = fci.cistring.num_strings(norb, nelec[0])
+        nstrb_total = fci.cistring.num_strings(norb, nelec[1])
+        ci_full = self.embed_sector_fcivec_to_full_ci(
+            fcivec_k, blocks, straid_k, strbid_k, nstra_total, nstrb_total)
+
+        return fcivec_k, ci_full, link_indexa, link_indexb, straid_k, strbid_k, blocks
 
 def _check_kRDM_and_kRDMs_thoroughly(rdm1, rdm2, rdm1a, rdm1b, rdm2aa, rdm2ab, rdm2bb,
                                      rdm1_from_make_rdm1, rdm1a_from_make_rdm1s, 
@@ -145,4 +266,3 @@ class KnownValues(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
