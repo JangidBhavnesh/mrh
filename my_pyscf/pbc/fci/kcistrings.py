@@ -783,6 +783,92 @@ def build_ab_sparse_structure(ab_tab, ab_offsets, blocks, nkpts, ncas):
     }
 
 
+def build_same_spin_dense_structure(ss_tab, ss_offsets, blocks, nkpts, ncas,
+                                    spin):
+    block_offset = -np.ones(nkpts * nkpts, dtype=np.int32)
+    block_na = np.zeros(nkpts * nkpts, dtype=np.int32)
+    block_nb = np.zeros(nkpts * nkpts, dtype=np.int32)
+
+    for ka, kb, na, nb, offset, _ in blocks:
+        key = int(ka) * nkpts + int(kb)
+        block_offset[key] = int(offset)
+        block_na[key] = int(na)
+        block_nb[key] = int(nb)
+
+    groups = []
+    group_offsets = [0]
+    src_addrs = []
+    dst_addrs = []
+    signs = []
+    eri_idx = []
+
+    for src_key in range(nkpts * nkpts):
+        ka = src_key // nkpts
+        kb = src_key % nkpts
+        src_offset = int(block_offset[src_key])
+
+        if src_offset < 0:
+            group_offsets.append(len(groups))
+            continue
+
+        na = int(block_na[src_key])
+        nb = int(block_nb[src_key])
+        src_k = ka if spin == "a" else kb
+        ss0 = int(ss_offsets[src_k])
+        ss1 = int(ss_offsets[src_k + 1])
+
+        for dst_k in range(nkpts):
+            if spin == "a":
+                dst_key = dst_k * nkpts + kb
+                dst_dim = int(block_na[dst_key])
+                good_dst = (int(block_offset[dst_key]) >= 0 and
+                            dst_dim > 0 and
+                            int(block_nb[dst_key]) == nb)
+            else:
+                dst_key = ka * nkpts + dst_k
+                dst_dim = int(block_nb[dst_key])
+                good_dst = (int(block_offset[dst_key]) >= 0 and
+                            dst_dim > 0)
+
+            if not good_dst:
+                continue
+
+            entry0 = len(src_addrs)
+            for i in range(ss0, ss1):
+                row = ss_tab[i]
+                if int(row[SS_K1]) != dst_k:
+                    continue
+
+                src_addrs.append(int(row[SS_0]))
+                dst_addrs.append(int(row[SS_1]))
+                signs.append(int(row[SS_SIGN]))
+                eri_idx.append(_eri_index(
+                    row[SS_KP], row[SS_KQ], row[SS_KR],
+                    row[SS_P], row[SS_Q], row[SS_R], row[SS_S],
+                    nkpts, ncas))
+
+            if len(src_addrs) > entry0:
+                groups.append([int(block_offset[dst_key]), dst_dim, entry0,
+                               len(src_addrs)])
+
+        group_offsets.append(len(groups))
+
+    if groups:
+        group_tab = np.asarray(groups, dtype=np.int32, order="C")
+    else:
+        group_tab = np.zeros((0, 4), dtype=np.int32)
+
+    return {
+        "group_tab": group_tab,
+        "group_offsets": np.asarray(group_offsets, dtype=np.int32,
+                                    order="C"),
+        "src_addr": np.asarray(src_addrs, dtype=np.int32, order="C"),
+        "dst_addr": np.asarray(dst_addrs, dtype=np.int32, order="C"),
+        "sign": np.asarray(signs, dtype=np.int32, order="C"),
+        "eri_idx": np.asarray(eri_idx, dtype=np.int64, order="C"),
+    }
+
+
 def build_contract_pair_tables(link_indexa, link_indexb, norb, nkpts):
     straid_k, strbid_k, str2tot_a, str2tot_b = gen_k_sector_maps(
         link_indexa, link_indexb, nkpts)
@@ -831,6 +917,18 @@ class KFCIContractMap:
     ab_sign: np.ndarray
     ab_eri_idx_ab: np.ndarray
     ab_eri_idx_ba: np.ndarray
+    aa_group_tab: np.ndarray
+    aa_group_offsets: np.ndarray
+    aa_src_addr: np.ndarray
+    aa_dst_addr: np.ndarray
+    aa_sign: np.ndarray
+    aa_eri_idx: np.ndarray
+    bb_group_tab: np.ndarray
+    bb_group_offsets: np.ndarray
+    bb_src_addr: np.ndarray
+    bb_dst_addr: np.ndarray
+    bb_sign: np.ndarray
+    bb_eri_idx: np.ndarray
 
     @classmethod
     def build(cls, norb, nelec, nkpts, target_k, link_index=None):
@@ -858,6 +956,10 @@ class KFCIContractMap:
             build_contract_pair_tables(link_indexa, link_indexb, norb, nkpts))
         ab_sparse = build_ab_sparse_structure(
             ab_tab, ab_offsets, blocks, nkpts, ncas)
+        aa_dense = build_same_spin_dense_structure(
+            aa_tab, aa_offsets, blocks, nkpts, ncas, "a")
+        bb_dense = build_same_spin_dense_structure(
+            bb_tab, bb_offsets, blocks, nkpts, ncas, "b")
 
         return cls(
             norb=norb,
@@ -887,6 +989,18 @@ class KFCIContractMap:
             ab_sign=ab_sparse["ab_sign"],
             ab_eri_idx_ab=ab_sparse["ab_eri_idx_ab"],
             ab_eri_idx_ba=ab_sparse["ab_eri_idx_ba"],
+            aa_group_tab=aa_dense["group_tab"],
+            aa_group_offsets=aa_dense["group_offsets"],
+            aa_src_addr=aa_dense["src_addr"],
+            aa_dst_addr=aa_dense["dst_addr"],
+            aa_sign=aa_dense["sign"],
+            aa_eri_idx=aa_dense["eri_idx"],
+            bb_group_tab=bb_dense["group_tab"],
+            bb_group_offsets=bb_dense["group_offsets"],
+            bb_src_addr=bb_dense["src_addr"],
+            bb_dst_addr=bb_dense["dst_addr"],
+            bb_sign=bb_dense["sign"],
+            bb_eri_idx=bb_dense["eri_idx"],
         )
 
 
