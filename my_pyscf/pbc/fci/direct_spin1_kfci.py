@@ -31,7 +31,7 @@ def _load_k_contract_lib():
     global libpbcfci_k
     if libpbcfci_k is None:
         libpbcfci_k = load_library("libpbc_fci_contract_k")
-        libpbcfci_k.FCIcontract_2e_k.argtypes = [
+        contract_2e_k_args = [
             ctypes.c_void_p,
             ctypes.c_void_p,
             ctypes.c_void_p,
@@ -46,7 +46,10 @@ def _load_k_contract_lib():
             ctypes.c_void_p,
             ctypes.c_void_p,
         ]
+        libpbcfci_k.FCIcontract_2e_k.argtypes = contract_2e_k_args
         libpbcfci_k.FCIcontract_2e_k.restype = None
+        libpbcfci_k.FCIcontract_2e_k_zgemm.argtypes = contract_2e_k_args
+        libpbcfci_k.FCIcontract_2e_k_zgemm.restype = None
     return libpbcfci_k
 
 def _unpack(norb, nelec, link_index, nkpts, spin=None):
@@ -601,13 +604,8 @@ def _build_contract_pair_tables(link_indexa, link_indexb, norb, nkpts):
 
     return _flatten_pair_tables(ab_pairs, aa_pairs, bb_pairs, nkpts)
 
-def contract_2e_k_c(eri, fcivec, norb, nelec, nkpts, target_k,
-                    link_index=None):
-    '''
-    C implementation of contract_2e_k using Python-built k pair tables.
-    This wrapper keeps the current Python implementation available as the
-    reference path while the lower-level kernel is validated.
-    '''
+def _contract_2e_k_c_kernel(kernel_name, eri, fcivec, norb, nelec, nkpts,
+                            target_k, link_index=None):
     nkpts = int(nkpts)
     ncas = int(norb) // nkpts
     assert ncas * nkpts == int(norb)
@@ -629,7 +627,8 @@ def contract_2e_k_c(eri, fcivec, norb, nelec, nkpts, target_k,
     assert eri.shape == (nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas)
 
     libpbcfci = _load_k_contract_lib()
-    libpbcfci.FCIcontract_2e_k(
+    kernel = getattr(libpbcfci, kernel_name)
+    kernel(
         eri.ctypes.data_as(ctypes.c_void_p),
         fcivec.ctypes.data_as(ctypes.c_void_p),
         sigma_ci.ctypes.data_as(ctypes.c_void_p),
@@ -645,6 +644,30 @@ def contract_2e_k_c(eri, fcivec, norb, nelec, nkpts, target_k,
         bb_offsets.ctypes.data_as(ctypes.c_void_p),
     )
     return sigma_ci
+
+def contract_2e_k_c(eri, fcivec, norb, nelec, nkpts, target_k,
+                    link_index=None):
+    '''
+    C implementation of contract_2e_k using Python-built k pair tables.
+    This wrapper keeps the current Python implementation available as the
+    reference path while the lower-level kernel is validated.
+    '''
+    return _contract_2e_k_c_kernel(
+        "FCIcontract_2e_k", eri, fcivec, norb, nelec, nkpts, target_k,
+        link_index=link_index,
+    )
+
+def contract_2e_k_zgemm(eri, fcivec, norb, nelec, nkpts, target_k,
+                        link_index=None):
+    '''
+    BLAS-backed C implementation of contract_2e_k using Python-built k pair
+    tables.  The alpha-alpha and beta-beta same-spin contractions are applied
+    with zgemm; the alpha-beta terms still use the scalar pair loop.
+    '''
+    return _contract_2e_k_c_kernel(
+        "FCIcontract_2e_k_zgemm", eri, fcivec, norb, nelec, nkpts, target_k,
+        link_index=link_index,
+    )
 
 def contract_2e_k(eri, fcivec, norb, nelec, nkpts, target_k, link_index=None):
     '''
