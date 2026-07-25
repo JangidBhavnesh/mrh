@@ -3,11 +3,13 @@ import scipy.linalg
 import sys
 import types
 import warnings
+import ctypes
 
 from pyscf import lib
 from pyscf.fci import direct_spin1
 from pyscf.fci.addons import _unpack_nelec
 from mrh.my_pyscf.pbc.fci import rdm_helper, kcistrings, krdm_helper
+from mrh.lib.helper import load_library
 
 
 from mrh.my_pyscf.pbc.fci.kcistrings import gen_k_sector_linkstr_info, gen_k_sector_maps, build_k_links_spin
@@ -23,6 +25,29 @@ logger = lib.logger
 
 HDIAG_IMAG_TOL = 1e-3
 HERMI_THRESH = 1e-8
+libpbcfci_k = None
+
+def _load_k_contract_lib():
+    global libpbcfci_k
+    if libpbcfci_k is None:
+        libpbcfci_k = load_library("libpbc_fci_contract_k")
+        libpbcfci_k.FCIcontract_2e_k.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+        ]
+        libpbcfci_k.FCIcontract_2e_k.restype = None
+    return libpbcfci_k
 
 def _unpack(norb, nelec, link_index, nkpts, spin=None):
     assert norb % nkpts == 0
@@ -512,6 +537,114 @@ def contract_bb_pairs(eri, ci0_blocks, ci1_blocks, bb_pairs, ka, kb):
         val = eri[row[SS_KP], row[SS_KQ], row[SS_KR], row[SS_P], row[SS_Q], row[SS_R], row[SS_S]]
 
         ci1_block[:, b1] += val * sign * ci0_block[:, b0]
+
+def _flatten_pair_tables(ab_pairs, aa_pairs, bb_pairs, nkpts):
+    ab_rows = []
+    ab_offsets = [0]
+    for ka in range(nkpts):
+        for kb in range(nkpts):
+            tab = np.asarray(ab_pairs[ka][kb], dtype=np.int32, order="C")
+            if tab.size:
+                ab_rows.append(tab.reshape(-1, NAB_FIELDS))
+            ab_offsets.append(ab_offsets[-1] + tab.reshape(-1, NAB_FIELDS).shape[0])
+
+    aa_rows = []
+    aa_offsets = [0]
+    for k in range(nkpts):
+        tab = np.asarray(aa_pairs[k], dtype=np.int32, order="C")
+        if tab.size:
+            aa_rows.append(tab.reshape(-1, NSS_FIELDS))
+        aa_offsets.append(aa_offsets[-1] + tab.reshape(-1, NSS_FIELDS).shape[0])
+
+    bb_rows = []
+    bb_offsets = [0]
+    for k in range(nkpts):
+        tab = np.asarray(bb_pairs[k], dtype=np.int32, order="C")
+        if tab.size:
+            bb_rows.append(tab.reshape(-1, NSS_FIELDS))
+        bb_offsets.append(bb_offsets[-1] + tab.reshape(-1, NSS_FIELDS).shape[0])
+
+    if ab_rows:
+        ab_tab = np.asarray(np.vstack(ab_rows), dtype=np.int32, order="C")
+    else:
+        ab_tab = np.zeros((0, NAB_FIELDS), dtype=np.int32)
+
+    if aa_rows:
+        aa_tab = np.asarray(np.vstack(aa_rows), dtype=np.int32, order="C")
+    else:
+        aa_tab = np.zeros((0, NSS_FIELDS), dtype=np.int32)
+
+    if bb_rows:
+        bb_tab = np.asarray(np.vstack(bb_rows), dtype=np.int32, order="C")
+    else:
+        bb_tab = np.zeros((0, NSS_FIELDS), dtype=np.int32)
+
+    return (ab_tab, np.asarray(ab_offsets, dtype=np.int32, order="C"),
+            aa_tab, np.asarray(aa_offsets, dtype=np.int32, order="C"),
+            bb_tab, np.asarray(bb_offsets, dtype=np.int32, order="C"))
+
+def _build_contract_pair_tables(link_indexa, link_indexb, norb, nkpts):
+    straid_k, strbid_k, str2tot_a, str2tot_b = gen_k_sector_maps(
+        link_indexa, link_indexb, nkpts)
+
+    links_a = build_k_links_spin(link_indexa, norb, nkpts,
+                                 straid_k, str2tot_a)
+    links_b = build_k_links_spin(link_indexb, norb, nkpts,
+                                 strbid_k, str2tot_b)
+
+    links_a = build_links_by_global_source_array(links_a)
+    links_b = build_links_by_global_source_array(links_b)
+
+    ab_pairs = build_ab_pair_tables(links_a, links_b, nkpts)
+    aa_pairs = build_same_spin_pair_tables(links_a, nkpts)
+    bb_pairs = build_same_spin_pair_tables(links_b, nkpts)
+
+    return _flatten_pair_tables(ab_pairs, aa_pairs, bb_pairs, nkpts)
+
+def contract_2e_k_c(eri, fcivec, norb, nelec, nkpts, target_k,
+                    link_index=None):
+    '''
+    C implementation of contract_2e_k using Python-built k pair tables.
+    This wrapper keeps the current Python implementation available as the
+    reference path while the lower-level kernel is validated.
+    '''
+    nkpts = int(nkpts)
+    ncas = int(norb) // nkpts
+    assert ncas * nkpts == int(norb)
+
+    link_indexa, link_indexb = _unpack(norb, nelec, link_index, nkpts)
+    blocks = gen_k_sector_linkstr_info(link_indexa, link_indexb, nkpts,
+                                       target_k)
+    sector_size = int(blocks[:, 5].sum()) if blocks.size else 0
+    assert fcivec.size == sector_size
+
+    ab_tab, ab_offsets, aa_tab, aa_offsets, bb_tab, bb_offsets = (
+        _build_contract_pair_tables(link_indexa, link_indexb, norb, nkpts))
+
+    eri = np.asarray(eri, dtype=np.complex128, order="C")
+    fcivec = np.asarray(fcivec, dtype=np.complex128, order="C")
+    blocks = np.asarray(blocks, dtype=np.int32, order="C")
+    sigma_ci = np.zeros(fcivec.shape, dtype=np.complex128, order="C")
+
+    assert eri.shape == (nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas)
+
+    libpbcfci = _load_k_contract_lib()
+    libpbcfci.FCIcontract_2e_k(
+        eri.ctypes.data_as(ctypes.c_void_p),
+        fcivec.ctypes.data_as(ctypes.c_void_p),
+        sigma_ci.ctypes.data_as(ctypes.c_void_p),
+        ctypes.c_int(nkpts),
+        ctypes.c_int(ncas),
+        ctypes.c_int(blocks.shape[0]),
+        blocks.ctypes.data_as(ctypes.c_void_p),
+        ab_tab.ctypes.data_as(ctypes.c_void_p),
+        ab_offsets.ctypes.data_as(ctypes.c_void_p),
+        aa_tab.ctypes.data_as(ctypes.c_void_p),
+        aa_offsets.ctypes.data_as(ctypes.c_void_p),
+        bb_tab.ctypes.data_as(ctypes.c_void_p),
+        bb_offsets.ctypes.data_as(ctypes.c_void_p),
+    )
+    return sigma_ci
 
 def contract_2e_k(eri, fcivec, norb, nelec, nkpts, target_k, link_index=None):
     '''
