@@ -700,6 +700,89 @@ def flatten_pair_tables(ab_pairs, aa_pairs, bb_pairs, nkpts):
             bb_tab, np.asarray(bb_offsets, dtype=np.int32, order="C"))
 
 
+def _eri_index(kp, kq, kr, p, q, r, s, nkpts, ncas):
+    idx = int(kp)
+    idx = idx * nkpts + int(kq)
+    idx = idx * nkpts + int(kr)
+    idx = idx * ncas + int(p)
+    idx = idx * ncas + int(q)
+    idx = idx * ncas + int(r)
+    idx = idx * ncas + int(s)
+    return idx
+
+
+def build_ab_sparse_structure(ab_tab, ab_offsets, blocks, nkpts, ncas):
+    table_size = nkpts * nkpts
+    block_offset = -np.ones(table_size, dtype=np.int32)
+    block_nb = np.zeros(table_size, dtype=np.int32)
+
+    for blk in np.asarray(blocks, dtype=np.int32).reshape(-1, 6):
+        key = int(blk[0]) * nkpts + int(blk[1])
+        block_offset[key] = int(blk[4])
+        block_nb[key] = int(blk[3])
+
+    groups = []
+    group_offsets = [0]
+    src_addrs = []
+    dst_addrs = []
+    signs = []
+    eri_idx_ab = []
+    eri_idx_ba = []
+
+    for src_key in range(table_size):
+        if block_offset[src_key] < 0:
+            group_offsets.append(len(groups))
+            continue
+
+        src_nb = int(block_nb[src_key])
+        by_dst = {}
+
+        for i in range(int(ab_offsets[src_key]), int(ab_offsets[src_key + 1])):
+            row = ab_tab[i]
+            dst_key = int(row[AB_KA1]) * nkpts + int(row[AB_KB1])
+            if block_offset[dst_key] < 0:
+                continue
+            by_dst.setdefault(dst_key, []).append(row)
+
+        for dst_key in sorted(by_dst):
+            entry0 = len(src_addrs)
+            dst_nb = int(block_nb[dst_key])
+
+            for row in by_dst[dst_key]:
+                src_addrs.append(int(row[AB_A0]) * src_nb + int(row[AB_B0]))
+                dst_addrs.append(int(row[AB_A1]) * dst_nb + int(row[AB_B1]))
+                signs.append(int(row[AB_SIGN]))
+                eri_idx_ab.append(_eri_index(
+                    row[AB_KPA], row[AB_KQA], row[AB_KRB],
+                    row[AB_PA], row[AB_QA], row[AB_RB], row[AB_SB],
+                    nkpts, ncas))
+                eri_idx_ba.append(_eri_index(
+                    row[AB_KPB], row[AB_KQB], row[AB_KRA],
+                    row[AB_PB], row[AB_QB], row[AB_RA], row[AB_SA],
+                    nkpts, ncas))
+
+            groups.append([int(block_offset[dst_key]), entry0,
+                           len(src_addrs)])
+
+        group_offsets.append(len(groups))
+
+    if groups:
+        group_tab = np.asarray(groups, dtype=np.int32, order="C")
+    else:
+        group_tab = np.zeros((0, 3), dtype=np.int32)
+
+    return {
+        "ab_group_tab": group_tab,
+        "ab_group_offsets": np.asarray(group_offsets, dtype=np.int32,
+                                       order="C"),
+        "ab_src_addr": np.asarray(src_addrs, dtype=np.int32, order="C"),
+        "ab_dst_addr": np.asarray(dst_addrs, dtype=np.int32, order="C"),
+        "ab_sign": np.asarray(signs, dtype=np.int32, order="C"),
+        "ab_eri_idx_ab": np.asarray(eri_idx_ab, dtype=np.int64, order="C"),
+        "ab_eri_idx_ba": np.asarray(eri_idx_ba, dtype=np.int64, order="C"),
+    }
+
+
 def build_contract_pair_tables(link_indexa, link_indexb, norb, nkpts):
     straid_k, strbid_k, str2tot_a, str2tot_b = gen_k_sector_maps(
         link_indexa, link_indexb, nkpts)
@@ -741,6 +824,13 @@ class KFCIContractMap:
     aa_offsets: np.ndarray
     bb_tab: np.ndarray
     bb_offsets: np.ndarray
+    ab_group_tab: np.ndarray
+    ab_group_offsets: np.ndarray
+    ab_src_addr: np.ndarray
+    ab_dst_addr: np.ndarray
+    ab_sign: np.ndarray
+    ab_eri_idx_ab: np.ndarray
+    ab_eri_idx_ba: np.ndarray
 
     @classmethod
     def build(cls, norb, nelec, nkpts, target_k, link_index=None):
@@ -766,6 +856,8 @@ class KFCIContractMap:
         strb_ids, strb_offsets = _flatten_sector_ids(strbid_k, nkpts)
         ab_tab, ab_offsets, aa_tab, aa_offsets, bb_tab, bb_offsets = (
             build_contract_pair_tables(link_indexa, link_indexb, norb, nkpts))
+        ab_sparse = build_ab_sparse_structure(
+            ab_tab, ab_offsets, blocks, nkpts, ncas)
 
         return cls(
             norb=norb,
@@ -788,6 +880,13 @@ class KFCIContractMap:
             aa_offsets=aa_offsets,
             bb_tab=bb_tab,
             bb_offsets=bb_offsets,
+            ab_group_tab=ab_sparse["ab_group_tab"],
+            ab_group_offsets=ab_sparse["ab_group_offsets"],
+            ab_src_addr=ab_sparse["ab_src_addr"],
+            ab_dst_addr=ab_sparse["ab_dst_addr"],
+            ab_sign=ab_sparse["ab_sign"],
+            ab_eri_idx_ab=ab_sparse["ab_eri_idx_ab"],
+            ab_eri_idx_ba=ab_sparse["ab_eri_idx_ba"],
         )
 
 
