@@ -35,6 +35,28 @@ def _load_k_contract_lib():
     global libpbcfci_k
     if libpbcfci_k is None:
         libpbcfci_k = load_library("libpbc_fci_contract_k")
+        libpbcfci_k.FCIcontract_1e_k.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+        ]
+        libpbcfci_k.FCIcontract_1e_k.restype = None
         contract_2e_k_args = [
             ctypes.c_void_p,
             ctypes.c_void_p,
@@ -55,6 +77,21 @@ def _load_k_contract_lib():
         libpbcfci_k.FCIcontract_2e_k_zgemm.argtypes = contract_2e_k_args
         libpbcfci_k.FCIcontract_2e_k_zgemm.restype = None
     return libpbcfci_k
+
+def _flatten_sector_ids(str_ids_by_k, nkpts):
+    ids = []
+    offsets = [0]
+    for k in range(nkpts):
+        tab = np.asarray(str_ids_by_k[k], dtype=np.int32, order="C")
+        ids.append(tab)
+        offsets.append(offsets[-1] + tab.size)
+
+    if ids:
+        ids = np.asarray(np.concatenate(ids), dtype=np.int32, order="C")
+    else:
+        ids = np.zeros(0, dtype=np.int32)
+
+    return ids, np.asarray(offsets, dtype=np.int32, order="C")
 
 def _unpack(norb, nelec, link_index, nkpts, spin=None):
     assert norb % nkpts == 0
@@ -194,6 +231,63 @@ def contract_1e_k(h1e, fcivec, norb, nelec, nkpts, kindx, link_index=None):
 
                 Sblk[:, ib1_local] += sign * hpq * Cblk[:, ib0_local]
 
+    return sigma_ci
+
+def contract_1e_k_c(h1e, fcivec, norb, nelec, nkpts, kindx,
+                    link_index=None):
+    '''
+    C implementation of contract_1e_k using k-sector link maps generated in
+    Python.  The result is returned as complex128 to match the C kernel.
+    '''
+    nkpts = int(nkpts)
+    ncas = int(norb) // nkpts
+    assert ncas * nkpts == int(norb)
+
+    link_indexa, link_indexb = _unpack(norb, nelec, link_index, nkpts)
+    blocks = gen_k_sector_linkstr_info(link_indexa, link_indexb, nkpts,
+                                       kindx)
+    sector_size = int(blocks[:, 5].sum()) if blocks.size else 0
+    assert fcivec.size == sector_size
+
+    straid_k, strbid_k, str2tot_a, str2tot_b = gen_k_sector_maps(
+        link_indexa, link_indexb, nkpts)
+    stra_ids, stra_offsets = _flatten_sector_ids(straid_k, nkpts)
+    strb_ids, strb_offsets = _flatten_sector_ids(strbid_k, nkpts)
+
+    h1e = np.asarray(h1e, dtype=np.complex128, order="C")
+    fcivec = np.asarray(fcivec, dtype=np.complex128, order="C")
+    blocks = np.asarray(blocks, dtype=np.int32, order="C")
+    link_indexa = np.asarray(link_indexa, dtype=np.int32, order="C")
+    link_indexb = np.asarray(link_indexb, dtype=np.int32, order="C")
+    str2tot_a = np.asarray(str2tot_a, dtype=np.int32, order="C")
+    str2tot_b = np.asarray(str2tot_b, dtype=np.int32, order="C")
+    sigma_ci = np.zeros(fcivec.shape, dtype=np.complex128, order="C")
+
+    assert h1e.shape == (nkpts, ncas, ncas)
+
+    libpbcfci = _load_k_contract_lib()
+    with lib.with_omp_threads(contract_2e_threads):
+        libpbcfci.FCIcontract_1e_k(
+            h1e.ctypes.data_as(ctypes.c_void_p),
+            fcivec.ctypes.data_as(ctypes.c_void_p),
+            sigma_ci.ctypes.data_as(ctypes.c_void_p),
+            ctypes.c_int(nkpts),
+            ctypes.c_int(ncas),
+            ctypes.c_int(blocks.shape[0]),
+            blocks.ctypes.data_as(ctypes.c_void_p),
+            link_indexa.ctypes.data_as(ctypes.c_void_p),
+            ctypes.c_int(link_indexa.shape[0]),
+            ctypes.c_int(link_indexa.shape[1]),
+            link_indexb.ctypes.data_as(ctypes.c_void_p),
+            ctypes.c_int(link_indexb.shape[0]),
+            ctypes.c_int(link_indexb.shape[1]),
+            stra_ids.ctypes.data_as(ctypes.c_void_p),
+            stra_offsets.ctypes.data_as(ctypes.c_void_p),
+            strb_ids.ctypes.data_as(ctypes.c_void_p),
+            strb_offsets.ctypes.data_as(ctypes.c_void_p),
+            str2tot_a.ctypes.data_as(ctypes.c_void_p),
+            str2tot_b.ctypes.data_as(ctypes.c_void_p),
+        )
     return sigma_ci
 
 
