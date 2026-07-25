@@ -6,6 +6,7 @@ from mrh.my_pyscf.pbc.fci.direct_spin1_kfci import _unpack, contract_2e_k
 from mrh.my_pyscf.pbc.fci.direct_spin1_kfci import (
     contract_2e_k_c,
     contract_2e_k_zgemm,
+    make_kfci_contract_map,
     sector_size,
 )
 
@@ -37,6 +38,8 @@ class KnownValues(unittest.TestCase):
                     ndet = sector_size(
                         norb, nelec, nkpts, target_k, link_index=link_index
                     )
+                    contract_map = make_kfci_contract_map(
+                        norb, nelec, nkpts, target_k, link_index=link_index)
                     ci0 = rng.normal(size=ndet) + 1j * rng.normal(size=ndet)
                     ci0 = np.asarray(ci0, dtype=np.complex128, order="C")
 
@@ -46,11 +49,11 @@ class KnownValues(unittest.TestCase):
                     )
                     sigma_c = contract_2e_k_c(
                         eri, ci0, norb, nelec, nkpts, target_k,
-                        link_index=link_index,
+                        contract_map=contract_map,
                     )
                     sigma_zgemm = contract_2e_k_zgemm(
                         eri, ci0, norb, nelec, nkpts, target_k,
-                        link_index=link_index,
+                        contract_map=contract_map,
                     )
 
                     np.testing.assert_allclose(
