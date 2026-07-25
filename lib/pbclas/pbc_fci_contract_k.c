@@ -631,6 +631,46 @@ static void contract_ab_sparse(double complex *ci0,
         }
 }
 
+static void fill_ab_sparse_coef(double complex *eri,
+                                double complex *ab_coef,
+                                int *ab_sign,
+                                long long *ab_eri_idx_ab,
+                                long long *ab_eri_idx_ba,
+                                int nab_entries)
+{
+#pragma omp parallel for schedule(static) default(none) \
+        shared(eri, ab_coef, ab_sign, ab_eri_idx_ab, ab_eri_idx_ba, nab_entries)
+        for (int i = 0; i < nab_entries; i++) {
+                ab_coef[i] = (eri[ab_eri_idx_ab[i]] + eri[ab_eri_idx_ba[i]])
+                        * (double)ab_sign[i];
+        }
+}
+
+static void contract_ab_sparse_struct(double complex *ci0,
+                                      double complex *ci1,
+                                      int src_key,
+                                      int src_offset,
+                                      int *ab_group_tab,
+                                      int *ab_group_offsets,
+                                      int *ab_src_addr,
+                                      int *ab_dst_addr,
+                                      double complex *ab_coef)
+{
+        int group0 = ab_group_offsets[src_key];
+        int group1 = ab_group_offsets[src_key + 1];
+
+        for (int ig = group0; ig < group1; ig++) {
+                int *group = ab_group_tab + ig * 3;
+                int dst_offset = group[0];
+
+                for (int i = group[1]; i < group[2]; i++) {
+                        ci1[dst_offset + ab_dst_addr[i]] +=
+                                ab_coef[i] *
+                                ci0[src_offset + ab_src_addr[i]];
+                }
+        }
+}
+
 static void contract_aa_zgemm(double complex *eri,
                               double complex *ci0,
                               double complex *ci1,
@@ -965,4 +1005,203 @@ void FCIcontract_2e_k_zgemm(double complex *eri,
         free(ab_groups);
         free(ab_group_offsets);
         free(ab_entries);
+}
+
+void FCIcontract_2e_k_zgemm_ab_struct(double complex *eri,
+                                      double complex *ci0,
+                                      double complex *ci1,
+                                      int nkpts, int ncas,
+                                      int nblocks, int *blocks,
+                                      int *ab_group_tab,
+                                      int *ab_group_offsets,
+                                      int *ab_src_addr,
+                                      int *ab_dst_addr,
+                                      int *ab_sign,
+                                      long long *ab_eri_idx_ab,
+                                      long long *ab_eri_idx_ba,
+                                      int nab_entries,
+                                      int *aa_pairs, int *aa_offsets,
+                                      int *bb_pairs, int *bb_offsets)
+{
+        int ndet = 0;
+        int *block_offset = NULL;
+        int *block_na = NULL;
+        int *block_nb = NULL;
+
+        if (make_block_tables(nkpts, nblocks, blocks,
+                              &block_offset, &block_na, &block_nb,
+                              &ndet) != 0) {
+                return;
+        }
+        if (ndet == 0) {
+                free(block_offset);
+                free(block_na);
+                free(block_nb);
+                return;
+        }
+
+        int max_na = 0;
+        int max_nb = 0;
+        for (int iblk = 0; iblk < nblocks; iblk++) {
+                int *blk = blocks + iblk * 6;
+                if (blk[BLOCK_NA] > max_na) {
+                        max_na = blk[BLOCK_NA];
+                }
+                if (blk[BLOCK_NB] > max_nb) {
+                        max_nb = blk[BLOCK_NB];
+                }
+        }
+
+        size_t ndet_size = (size_t)ndet;
+        size_t aa_work_size = (size_t)max_na * max_na;
+        size_t bb_work_size = (size_t)max_nb * max_nb;
+        if (aa_work_size == 0) {
+                aa_work_size = 1;
+        }
+        if (bb_work_size == 0) {
+                bb_work_size = 1;
+        }
+
+        double complex *ab_coef = malloc(sizeof(double complex)
+                                         * (size_t)(nab_entries > 0 ?
+                                                    nab_entries : 1));
+        if (ab_coef == NULL) {
+                free(block_offset);
+                free(block_na);
+                free(block_nb);
+                return;
+        }
+        fill_ab_sparse_coef(eri, ab_coef, ab_sign,
+                            ab_eri_idx_ab, ab_eri_idx_ba, nab_entries);
+
+        zset0(ci1, (size_t)ndet);
+        int status = 0;
+        int nthreads = omp_get_max_threads();
+        if (nthreads > nblocks) {
+                nthreads = nblocks;
+        }
+        if (nthreads < 1) {
+                nthreads = 1;
+        }
+
+#pragma omp parallel default(none) \
+        num_threads(nthreads) \
+        shared(eri, ci0, ci1, nkpts, ncas, nblocks, blocks, \
+               block_offset, block_na, block_nb, \
+               ab_group_tab, ab_group_offsets, ab_src_addr, ab_dst_addr, \
+               ab_coef, aa_pairs, aa_offsets, bb_pairs, bb_offsets, \
+               ndet_size, aa_work_size, bb_work_size, status)
+{
+        double complex *ci1buf = malloc(sizeof(double complex) * ndet_size);
+        double complex *amat = malloc(sizeof(double complex) * aa_work_size);
+        double complex *bmat = malloc(sizeof(double complex) * bb_work_size);
+        int ok = (ci1buf != NULL && amat != NULL && bmat != NULL);
+
+        if (!ok) {
+#pragma omp atomic write
+                status = 1;
+        }
+        if (ok) {
+                zset0(ci1buf, ndet_size);
+        }
+
+#pragma omp for schedule(dynamic)
+        for (int iblk = 0; iblk < nblocks; iblk++) {
+                if (ok) {
+                        int *blk = blocks + iblk * 6;
+                        int ka = blk[BLOCK_KA];
+                        int kb = blk[BLOCK_KB];
+                        int na = blk[BLOCK_NA];
+                        int nb = blk[BLOCK_NB];
+                        int src_offset = blk[BLOCK_OFFSET];
+                        int src_key = ka * nkpts + kb;
+
+                        contract_ab_sparse_struct(ci0, ci1buf,
+                                                  src_key, src_offset,
+                                                  ab_group_tab,
+                                                  ab_group_offsets,
+                                                  ab_src_addr,
+                                                  ab_dst_addr,
+                                                  ab_coef);
+
+                        contract_aa_zgemm(eri, ci0, ci1buf, amat,
+                                          nkpts, ncas,
+                                          ka, kb, na, nb, src_offset,
+                                          block_offset, block_na, block_nb,
+                                          aa_pairs, aa_offsets);
+
+                        contract_bb_zgemm(eri, ci0, ci1buf, bmat,
+                                          nkpts, ncas,
+                                          ka, kb, na, nb, src_offset,
+                                          block_offset, block_nb,
+                                          bb_pairs, bb_offsets);
+                }
+        }
+
+        if (ok) {
+#pragma omp critical
+                {
+                        zadd(ci1, ci1buf, ndet_size);
+                }
+        }
+
+        free(bmat);
+        free(amat);
+        free(ci1buf);
+}
+
+        if (status != 0) {
+                double complex *amat = malloc(sizeof(double complex)
+                                              * aa_work_size);
+                double complex *bmat = malloc(sizeof(double complex)
+                                              * bb_work_size);
+                if (amat == NULL || bmat == NULL) {
+                        free(amat);
+                        free(bmat);
+                        free(ab_coef);
+                        free(block_offset);
+                        free(block_na);
+                        free(block_nb);
+                        return;
+                }
+
+                zset0(ci1, ndet_size);
+                for (int iblk = 0; iblk < nblocks; iblk++) {
+                        int *blk = blocks + iblk * 6;
+                        int ka = blk[BLOCK_KA];
+                        int kb = blk[BLOCK_KB];
+                        int na = blk[BLOCK_NA];
+                        int nb = blk[BLOCK_NB];
+                        int src_offset = blk[BLOCK_OFFSET];
+                        int src_key = ka * nkpts + kb;
+
+                        contract_ab_sparse_struct(ci0, ci1,
+                                                  src_key, src_offset,
+                                                  ab_group_tab,
+                                                  ab_group_offsets,
+                                                  ab_src_addr,
+                                                  ab_dst_addr,
+                                                  ab_coef);
+
+                        contract_aa_zgemm(eri, ci0, ci1, amat,
+                                          nkpts, ncas,
+                                          ka, kb, na, nb, src_offset,
+                                          block_offset, block_na, block_nb,
+                                          aa_pairs, aa_offsets);
+
+                        contract_bb_zgemm(eri, ci0, ci1, bmat,
+                                          nkpts, ncas,
+                                          ka, kb, na, nb, src_offset,
+                                          block_offset, block_nb,
+                                          bb_pairs, bb_offsets);
+                }
+
+                free(amat);
+                free(bmat);
+        }
+
+        free(ab_coef);
+        free(block_offset);
+        free(block_na);
+        free(block_nb);
 }
