@@ -5,7 +5,7 @@ import types
 import warnings
 import ctypes
 
-from pyscf import lib
+from pyscf import lib, __config__
 from pyscf.fci import direct_spin1
 from pyscf.fci.addons import _unpack_nelec
 from mrh.my_pyscf.pbc.fci import rdm_helper, kcistrings, krdm_helper
@@ -26,6 +26,10 @@ logger = lib.logger
 HDIAG_IMAG_TOL = 1e-3
 HERMI_THRESH = 1e-8
 libpbcfci_k = None
+contract_2e_threads = getattr(
+    __config__, "pbc_k_contract_2e_threads",
+    getattr(__config__, "pbc_contract_2e_threads", None),
+)
 
 def _load_k_contract_lib():
     global libpbcfci_k
@@ -628,21 +632,22 @@ def _contract_2e_k_c_kernel(kernel_name, eri, fcivec, norb, nelec, nkpts,
 
     libpbcfci = _load_k_contract_lib()
     kernel = getattr(libpbcfci, kernel_name)
-    kernel(
-        eri.ctypes.data_as(ctypes.c_void_p),
-        fcivec.ctypes.data_as(ctypes.c_void_p),
-        sigma_ci.ctypes.data_as(ctypes.c_void_p),
-        ctypes.c_int(nkpts),
-        ctypes.c_int(ncas),
-        ctypes.c_int(blocks.shape[0]),
-        blocks.ctypes.data_as(ctypes.c_void_p),
-        ab_tab.ctypes.data_as(ctypes.c_void_p),
-        ab_offsets.ctypes.data_as(ctypes.c_void_p),
-        aa_tab.ctypes.data_as(ctypes.c_void_p),
-        aa_offsets.ctypes.data_as(ctypes.c_void_p),
-        bb_tab.ctypes.data_as(ctypes.c_void_p),
-        bb_offsets.ctypes.data_as(ctypes.c_void_p),
-    )
+    with lib.with_omp_threads(contract_2e_threads):
+        kernel(
+            eri.ctypes.data_as(ctypes.c_void_p),
+            fcivec.ctypes.data_as(ctypes.c_void_p),
+            sigma_ci.ctypes.data_as(ctypes.c_void_p),
+            ctypes.c_int(nkpts),
+            ctypes.c_int(ncas),
+            ctypes.c_int(blocks.shape[0]),
+            blocks.ctypes.data_as(ctypes.c_void_p),
+            ab_tab.ctypes.data_as(ctypes.c_void_p),
+            ab_offsets.ctypes.data_as(ctypes.c_void_p),
+            aa_tab.ctypes.data_as(ctypes.c_void_p),
+            aa_offsets.ctypes.data_as(ctypes.c_void_p),
+            bb_tab.ctypes.data_as(ctypes.c_void_p),
+            bb_offsets.ctypes.data_as(ctypes.c_void_p),
+        )
     return sigma_ci
 
 def contract_2e_k_c(eri, fcivec, norb, nelec, nkpts, target_k,
@@ -662,7 +667,8 @@ def contract_2e_k_zgemm(eri, fcivec, norb, nelec, nkpts, target_k,
     '''
     BLAS-backed C implementation of contract_2e_k using Python-built k pair
     tables.  The alpha-alpha and beta-beta same-spin contractions are applied
-    with zgemm; the alpha-beta terms still use the scalar pair loop.
+    with zgemm; the alpha-beta terms still use the scalar pair loop.  OpenMP
+    threads follow pbc_k_contract_2e_threads/pbc_contract_2e_threads.
     '''
     return _contract_2e_k_c_kernel(
         "FCIcontract_2e_k_zgemm", eri, fcivec, norb, nelec, nkpts, target_k,
