@@ -801,6 +801,95 @@ static void contract_bb_zgemm(double complex *eri,
         }
 }
 
+static void contract_aa_zgemm_struct(double complex *eri,
+                                     double complex *ci0,
+                                     double complex *ci1,
+                                     double complex *amat,
+                                     int nkpts, int ka, int kb,
+                                     int na, int nb,
+                                     int src_offset,
+                                     int *aa_group_tab,
+                                     int *aa_group_offsets,
+                                     int *aa_src_addr,
+                                     int *aa_dst_addr,
+                                     int *aa_sign,
+                                     long long *aa_eri_idx)
+{
+        const char TRANS_N = 'N';
+        const double complex Z1 = 1.0 + 0.0 * I;
+        int src_key = ka * nkpts + kb;
+        int group0 = aa_group_offsets[src_key];
+        int group1 = aa_group_offsets[src_key + 1];
+
+        if (na == 0 || nb == 0) {
+                return;
+        }
+
+        for (int ig = group0; ig < group1; ig++) {
+                int *group = aa_group_tab + ig * 4;
+                int dst_offset = group[0];
+                int dst_na = group[1];
+                int entry0 = group[2];
+                int entry1 = group[3];
+
+                zset0(amat, (size_t)dst_na * na);
+                for (int i = entry0; i < entry1; i++) {
+                        amat[aa_dst_addr[i] * (size_t)na + aa_src_addr[i]] +=
+                                eri[aa_eri_idx[i]] * (double)aa_sign[i];
+                }
+
+                zgemm_(&TRANS_N, &TRANS_N, &nb, &dst_na, &na,
+                       &Z1, ci0 + src_offset, &nb,
+                       amat, &na,
+                       &Z1, ci1 + dst_offset, &nb);
+        }
+}
+
+static void contract_bb_zgemm_struct(double complex *eri,
+                                     double complex *ci0,
+                                     double complex *ci1,
+                                     double complex *bmat,
+                                     int nkpts, int ka, int kb,
+                                     int na, int nb,
+                                     int src_offset,
+                                     int *bb_group_tab,
+                                     int *bb_group_offsets,
+                                     int *bb_src_addr,
+                                     int *bb_dst_addr,
+                                     int *bb_sign,
+                                     long long *bb_eri_idx)
+{
+        const char TRANS_N = 'N';
+        const double complex Z1 = 1.0 + 0.0 * I;
+        int src_key = ka * nkpts + kb;
+        int group0 = bb_group_offsets[src_key];
+        int group1 = bb_group_offsets[src_key + 1];
+
+        if (na == 0 || nb == 0) {
+                return;
+        }
+
+        for (int ig = group0; ig < group1; ig++) {
+                int *group = bb_group_tab + ig * 4;
+                int dst_offset = group[0];
+                int dst_nb = group[1];
+                int entry0 = group[2];
+                int entry1 = group[3];
+
+                zset0(bmat, (size_t)nb * dst_nb);
+                for (int i = entry0; i < entry1; i++) {
+                        bmat[bb_src_addr[i] * (size_t)dst_nb +
+                             bb_dst_addr[i]] +=
+                                eri[bb_eri_idx[i]] * (double)bb_sign[i];
+                }
+
+                zgemm_(&TRANS_N, &TRANS_N, &dst_nb, &na, &nb,
+                       &Z1, bmat, &dst_nb,
+                       ci0 + src_offset, &nb,
+                       &Z1, ci1 + dst_offset, &dst_nb);
+        }
+}
+
 void FCIcontract_2e_k_zgemm(double complex *eri,
                             double complex *ci0,
                             double complex *ci1,
@@ -1020,8 +1109,18 @@ void FCIcontract_2e_k_zgemm_ab_struct(double complex *eri,
                                       long long *ab_eri_idx_ab,
                                       long long *ab_eri_idx_ba,
                                       int nab_entries,
-                                      int *aa_pairs, int *aa_offsets,
-                                      int *bb_pairs, int *bb_offsets)
+                                      int *aa_group_tab,
+                                      int *aa_group_offsets,
+                                      int *aa_src_addr,
+                                      int *aa_dst_addr,
+                                      int *aa_sign,
+                                      long long *aa_eri_idx,
+                                      int *bb_group_tab,
+                                      int *bb_group_offsets,
+                                      int *bb_src_addr,
+                                      int *bb_dst_addr,
+                                      int *bb_sign,
+                                      long long *bb_eri_idx)
 {
         int ndet = 0;
         int *block_offset = NULL;
@@ -1089,7 +1188,10 @@ void FCIcontract_2e_k_zgemm_ab_struct(double complex *eri,
         shared(eri, ci0, ci1, nkpts, ncas, nblocks, blocks, \
                block_offset, block_na, block_nb, \
                ab_group_tab, ab_group_offsets, ab_src_addr, ab_dst_addr, \
-               ab_coef, aa_pairs, aa_offsets, bb_pairs, bb_offsets, \
+               ab_coef, aa_group_tab, aa_group_offsets, \
+               aa_src_addr, aa_dst_addr, aa_sign, aa_eri_idx, \
+               bb_group_tab, bb_group_offsets, \
+               bb_src_addr, bb_dst_addr, bb_sign, bb_eri_idx, \
                ndet_size, aa_work_size, bb_work_size, status)
 {
         double complex *ci1buf = malloc(sizeof(double complex) * ndet_size);
@@ -1124,17 +1226,19 @@ void FCIcontract_2e_k_zgemm_ab_struct(double complex *eri,
                                                   ab_dst_addr,
                                                   ab_coef);
 
-                        contract_aa_zgemm(eri, ci0, ci1buf, amat,
-                                          nkpts, ncas,
-                                          ka, kb, na, nb, src_offset,
-                                          block_offset, block_na, block_nb,
-                                          aa_pairs, aa_offsets);
+                        contract_aa_zgemm_struct(
+                                eri, ci0, ci1buf, amat,
+                                nkpts, ka, kb, na, nb, src_offset,
+                                aa_group_tab, aa_group_offsets,
+                                aa_src_addr, aa_dst_addr,
+                                aa_sign, aa_eri_idx);
 
-                        contract_bb_zgemm(eri, ci0, ci1buf, bmat,
-                                          nkpts, ncas,
-                                          ka, kb, na, nb, src_offset,
-                                          block_offset, block_nb,
-                                          bb_pairs, bb_offsets);
+                        contract_bb_zgemm_struct(
+                                eri, ci0, ci1buf, bmat,
+                                nkpts, ka, kb, na, nb, src_offset,
+                                bb_group_tab, bb_group_offsets,
+                                bb_src_addr, bb_dst_addr,
+                                bb_sign, bb_eri_idx);
                 }
         }
 
@@ -1183,17 +1287,19 @@ void FCIcontract_2e_k_zgemm_ab_struct(double complex *eri,
                                                   ab_dst_addr,
                                                   ab_coef);
 
-                        contract_aa_zgemm(eri, ci0, ci1, amat,
-                                          nkpts, ncas,
-                                          ka, kb, na, nb, src_offset,
-                                          block_offset, block_na, block_nb,
-                                          aa_pairs, aa_offsets);
+                        contract_aa_zgemm_struct(
+                                eri, ci0, ci1, amat,
+                                nkpts, ka, kb, na, nb, src_offset,
+                                aa_group_tab, aa_group_offsets,
+                                aa_src_addr, aa_dst_addr,
+                                aa_sign, aa_eri_idx);
 
-                        contract_bb_zgemm(eri, ci0, ci1, bmat,
-                                          nkpts, ncas,
-                                          ka, kb, na, nb, src_offset,
-                                          block_offset, block_nb,
-                                          bb_pairs, bb_offsets);
+                        contract_bb_zgemm_struct(
+                                eri, ci0, ci1, bmat,
+                                nkpts, ka, kb, na, nb, src_offset,
+                                bb_group_tab, bb_group_offsets,
+                                bb_src_addr, bb_dst_addr,
+                                bb_sign, bb_eri_idx);
                 }
 
                 free(amat);
