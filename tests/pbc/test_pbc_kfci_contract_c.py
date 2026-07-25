@@ -3,7 +3,11 @@ import unittest
 import numpy as np
 
 from mrh.my_pyscf.pbc.fci.direct_spin1_kfci import _unpack, contract_2e_k
-from mrh.my_pyscf.pbc.fci.direct_spin1_kfci import contract_2e_k_c, sector_size
+from mrh.my_pyscf.pbc.fci.direct_spin1_kfci import (
+    contract_2e_k_c,
+    contract_2e_k_zgemm,
+    sector_size,
+)
 
 class KnownValues(unittest.TestCase):
 
@@ -44,9 +48,16 @@ class KnownValues(unittest.TestCase):
                         eri, ci0, norb, nelec, nkpts, target_k,
                         link_index=link_index,
                     )
+                    sigma_zgemm = contract_2e_k_zgemm(
+                        eri, ci0, norb, nelec, nkpts, target_k,
+                        link_index=link_index,
+                    )
 
                     np.testing.assert_allclose(
                         sigma_c, sigma_ref, atol=1e-10, rtol=1e-10
+                    )
+                    np.testing.assert_allclose(
+                        sigma_zgemm, sigma_ref, atol=1e-10, rtol=1e-10
                     )
 
 
