@@ -63,7 +63,7 @@ def _load_k_contract_lib():
             ctypes.c_void_p,
         ]
         libpbcfci_k.FCIcontract_1e_k.restype = None
-        libpbcfci_k.FCIcontract_2e_k_zgemm_ab_struct.argtypes = [
+        libpbcfci_k.FCIcontract_2e_k.argtypes = [
             ctypes.c_void_p,
             ctypes.c_void_p,
             ctypes.c_void_p,
@@ -92,7 +92,7 @@ def _load_k_contract_lib():
             ctypes.c_void_p,
             ctypes.c_void_p,
         ]
-        libpbcfci_k.FCIcontract_2e_k_zgemm_ab_struct.restype = None
+        libpbcfci_k.FCIcontract_2e_k.restype = None
     return libpbcfci_k
 
 def _as_contract_map(norb, nelec, nkpts, target_k, link_index=None,
@@ -719,17 +719,15 @@ def _build_contract_pair_tables(link_indexa, link_indexb, norb, nkpts):
 
     return _flatten_pair_tables(ab_pairs, aa_pairs, bb_pairs, nkpts)
 
-def _contract_2e_k_c_kernel(kernel_name, eri, fcivec, norb, nelec, nkpts,
-                            target_k, link_index=None, contract_map=None,
-                            plan=None):
+def _contract_2e_k_lib(eri, fcivec, norb, nelec, nkpts, target_k,
+                       link_index=None, contract_map=None, plan=None):
     nkpts = int(nkpts)
     ncas = int(norb) // nkpts
     assert ncas * nkpts == int(norb)
 
     contract_map = _as_contract_map(
         norb, nelec, nkpts, target_k, link_index=link_index,
-        contract_map=contract_map, plan=plan,
-        need_pair_tables=(kernel_name != "FCIcontract_2e_k_zgemm"))
+        contract_map=contract_map, plan=plan)
     assert fcivec.size == contract_map.sector_size
 
     eri = np.asarray(eri, dtype=np.complex128, order="C")
@@ -739,9 +737,7 @@ def _contract_2e_k_c_kernel(kernel_name, eri, fcivec, norb, nelec, nkpts,
     assert eri.shape == (nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas)
 
     libpbcfci = _load_k_contract_lib()
-    if kernel_name != "FCIcontract_2e_k_zgemm":
-        raise ValueError("Only the zgemm k-FCI 2e C kernel is available")
-    kernel = libpbcfci.FCIcontract_2e_k_zgemm_ab_struct
+    kernel = libpbcfci.FCIcontract_2e_k
     with lib.with_omp_threads(contract_2e_threads):
         kernel(
             eri.ctypes.data_as(ctypes.c_void_p),
@@ -774,18 +770,8 @@ def _contract_2e_k_c_kernel(kernel_name, eri, fcivec, norb, nelec, nkpts,
         )
     return sigma_ci
 
-def contract_2e_k_c(eri, fcivec, norb, nelec, nkpts, target_k,
-                    link_index=None, contract_map=None, plan=None):
-    '''
-    Compatibility alias for the BLAS-backed C implementation of contract_2e_k.
-    '''
-    return contract_2e_k_zgemm(
-        eri, fcivec, norb, nelec, nkpts, target_k,
-        link_index=link_index, contract_map=contract_map, plan=plan,
-    )
-
-def contract_2e_k_zgemm(eri, fcivec, norb, nelec, nkpts, target_k,
-                        link_index=None, contract_map=None, plan=None):
+def contract_2e_k(eri, fcivec, norb, nelec, nkpts, target_k,
+                  link_index=None, contract_map=None, plan=None):
     '''
     BLAS-backed C implementation of contract_2e_k using structural k-sector
     contraction maps.  The alpha-alpha and beta-beta same-spin contractions
@@ -793,12 +779,13 @@ def contract_2e_k_zgemm(eri, fcivec, norb, nelec, nkpts, target_k,
     source/destination block groups.  OpenMP threads follow
     pbc_k_contract_2e_threads/pbc_contract_2e_threads.
     '''
-    return _contract_2e_k_c_kernel(
-        "FCIcontract_2e_k_zgemm", eri, fcivec, norb, nelec, nkpts, target_k,
+    return _contract_2e_k_lib(
+        eri, fcivec, norb, nelec, nkpts, target_k,
         link_index=link_index, contract_map=contract_map, plan=plan,
     )
 
-def contract_2e_k(eri, fcivec, norb, nelec, nkpts, target_k, link_index=None):
+def contract_2e_k_py(eri, fcivec, norb, nelec, nkpts, target_k,
+                     link_index=None):
     '''
     Contract two-electron Hamiltonian with a k-FCI vector in a fixed total momentum sector.
     args:
