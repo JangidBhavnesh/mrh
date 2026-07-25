@@ -1,6 +1,7 @@
 
 from pyscf.pbc import scf, dft
 from mrh.my_pyscf.pbc.mcscf import casci
+from mrh.my_pyscf.pbc.mcscf import kcasci
 from mrh.my_pyscf.pbc.mcscf import mc1step
 
 def CASCI(kmf, ncas, nelecas, ncore=None):
@@ -14,6 +15,17 @@ def CASCI(kmf, ncas, nelecas, ncore=None):
     kmc = casci.CASCI(kmf, ncas, nelecas, ncore)
     return kmc
 
+def KCASCI(kmf, ncas, nelecas, ncore=None, target_k=0):
+    assert isinstance(kmf, scf.hf.SCF),  "KCASCI only works with periodic SCF objects"
+    # Make sure kdft mean field objects are not passed to kCASCI
+    if isinstance(kmf, dft.krks.KRKS) or isinstance(kmf, dft.kuks.KUKS) \
+        or isinstance(kmf, dft.rks.RKS) or isinstance(kmf, dft.uks.UKS):
+        raise NotImplementedError("KCASCI with DFT is not implemented yet.")
+    if isinstance(kmf, scf.kuhf.KUHF):
+        kmf = scf.addons.convert_to_rhf(kmf)
+    kmc = kcasci.KCASCI(kmf, ncas, nelecas, ncore, target_k=target_k)
+    return kmc
+
 def CASSCF(kmf, ncas, nelecas, ncore=None):
     assert isinstance(kmf, scf.hf.SCF),  "CASSCF only works with periodic SCF objects"
     # Make sure kdft mean field objects are not passed to kCASSCF
@@ -25,4 +37,3 @@ def CASSCF(kmf, ncas, nelecas, ncore=None):
         kmf = scf.addons.convert_to_rhf(kmf)
     kmc = mc1step.CASSCF(kmf, ncas, nelecas, ncore)
     return kmc
-
