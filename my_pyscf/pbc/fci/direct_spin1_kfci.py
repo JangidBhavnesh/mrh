@@ -12,7 +12,13 @@ from mrh.my_pyscf.pbc.fci import rdm_helper, kcistrings, krdm_helper
 from mrh.lib.helper import load_library
 
 
-from mrh.my_pyscf.pbc.fci.kcistrings import gen_k_sector_linkstr_info, gen_k_sector_maps, build_k_links_spin
+from mrh.my_pyscf.pbc.fci.kcistrings import (
+    KFCIContractMap,
+    build_k_links_spin,
+    gen_k_sector_linkstr_info,
+    gen_k_sector_maps,
+    make_kfci_contract_map,
+)
 
 
 # Author: Bhavnesh Jangid
@@ -78,20 +84,24 @@ def _load_k_contract_lib():
         libpbcfci_k.FCIcontract_2e_k_zgemm.restype = None
     return libpbcfci_k
 
-def _flatten_sector_ids(str_ids_by_k, nkpts):
-    ids = []
-    offsets = [0]
-    for k in range(nkpts):
-        tab = np.asarray(str_ids_by_k[k], dtype=np.int32, order="C")
-        ids.append(tab)
-        offsets.append(offsets[-1] + tab.size)
+def _as_contract_map(norb, nelec, nkpts, target_k, link_index=None,
+                     contract_map=None, plan=None):
+    if contract_map is None:
+        contract_map = plan
+    if contract_map is None and isinstance(link_index, KFCIContractMap):
+        contract_map = link_index
+        link_index = None
 
-    if ids:
-        ids = np.asarray(np.concatenate(ids), dtype=np.int32, order="C")
-    else:
-        ids = np.zeros(0, dtype=np.int32)
+    if contract_map is None:
+        return make_kfci_contract_map(norb, nelec, nkpts, target_k,
+                                      link_index=link_index)
 
-    return ids, np.asarray(offsets, dtype=np.int32, order="C")
+    assert contract_map.norb == int(norb)
+    assert contract_map.nkpts == int(nkpts)
+    assert contract_map.ncas * contract_map.nkpts == contract_map.norb
+    assert contract_map.target_k == int(target_k) % int(nkpts)
+    assert tuple(contract_map.nelec) == tuple(_unpack_nelec(nelec))
+    return contract_map
 
 def _unpack(norb, nelec, link_index, nkpts, spin=None):
     assert norb % nkpts == 0
@@ -234,7 +244,7 @@ def contract_1e_k(h1e, fcivec, norb, nelec, nkpts, kindx, link_index=None):
     return sigma_ci
 
 def contract_1e_k_c(h1e, fcivec, norb, nelec, nkpts, kindx,
-                    link_index=None):
+                    link_index=None, contract_map=None, plan=None):
     '''
     C implementation of contract_1e_k using k-sector link maps generated in
     Python.  The result is returned as complex128 to match the C kernel.
@@ -243,27 +253,17 @@ def contract_1e_k_c(h1e, fcivec, norb, nelec, nkpts, kindx,
     ncas = int(norb) // nkpts
     assert ncas * nkpts == int(norb)
 
-    link_indexa, link_indexb = _unpack(norb, nelec, link_index, nkpts)
-    blocks = gen_k_sector_linkstr_info(link_indexa, link_indexb, nkpts,
-                                       kindx)
-    sector_size = int(blocks[:, 5].sum()) if blocks.size else 0
-    assert fcivec.size == sector_size
-
-    straid_k, strbid_k, str2tot_a, str2tot_b = gen_k_sector_maps(
-        link_indexa, link_indexb, nkpts)
-    stra_ids, stra_offsets = _flatten_sector_ids(straid_k, nkpts)
-    strb_ids, strb_offsets = _flatten_sector_ids(strbid_k, nkpts)
+    contract_map = _as_contract_map(
+        norb, nelec, nkpts, kindx, link_index=link_index,
+        contract_map=contract_map, plan=plan)
+    assert fcivec.size == contract_map.sector_size
 
     h1e = np.asarray(h1e, dtype=np.complex128, order="C")
     fcivec = np.asarray(fcivec, dtype=np.complex128, order="C")
-    blocks = np.asarray(blocks, dtype=np.int32, order="C")
-    link_indexa = np.asarray(link_indexa, dtype=np.int32, order="C")
-    link_indexb = np.asarray(link_indexb, dtype=np.int32, order="C")
-    str2tot_a = np.asarray(str2tot_a, dtype=np.int32, order="C")
-    str2tot_b = np.asarray(str2tot_b, dtype=np.int32, order="C")
     sigma_ci = np.zeros(fcivec.shape, dtype=np.complex128, order="C")
 
     assert h1e.shape == (nkpts, ncas, ncas)
+    link_indexa, link_indexb = contract_map.link_index
 
     libpbcfci = _load_k_contract_lib()
     with lib.with_omp_threads(contract_2e_threads):
@@ -273,20 +273,20 @@ def contract_1e_k_c(h1e, fcivec, norb, nelec, nkpts, kindx,
             sigma_ci.ctypes.data_as(ctypes.c_void_p),
             ctypes.c_int(nkpts),
             ctypes.c_int(ncas),
-            ctypes.c_int(blocks.shape[0]),
-            blocks.ctypes.data_as(ctypes.c_void_p),
+            ctypes.c_int(contract_map.blocks.shape[0]),
+            contract_map.blocks.ctypes.data_as(ctypes.c_void_p),
             link_indexa.ctypes.data_as(ctypes.c_void_p),
             ctypes.c_int(link_indexa.shape[0]),
             ctypes.c_int(link_indexa.shape[1]),
             link_indexb.ctypes.data_as(ctypes.c_void_p),
             ctypes.c_int(link_indexb.shape[0]),
             ctypes.c_int(link_indexb.shape[1]),
-            stra_ids.ctypes.data_as(ctypes.c_void_p),
-            stra_offsets.ctypes.data_as(ctypes.c_void_p),
-            strb_ids.ctypes.data_as(ctypes.c_void_p),
-            strb_offsets.ctypes.data_as(ctypes.c_void_p),
-            str2tot_a.ctypes.data_as(ctypes.c_void_p),
-            str2tot_b.ctypes.data_as(ctypes.c_void_p),
+            contract_map.stra_ids.ctypes.data_as(ctypes.c_void_p),
+            contract_map.stra_offsets.ctypes.data_as(ctypes.c_void_p),
+            contract_map.strb_ids.ctypes.data_as(ctypes.c_void_p),
+            contract_map.strb_offsets.ctypes.data_as(ctypes.c_void_p),
+            contract_map.str2tot_a.ctypes.data_as(ctypes.c_void_p),
+            contract_map.str2tot_b.ctypes.data_as(ctypes.c_void_p),
         )
     return sigma_ci
 
@@ -703,23 +703,19 @@ def _build_contract_pair_tables(link_indexa, link_indexb, norb, nkpts):
     return _flatten_pair_tables(ab_pairs, aa_pairs, bb_pairs, nkpts)
 
 def _contract_2e_k_c_kernel(kernel_name, eri, fcivec, norb, nelec, nkpts,
-                            target_k, link_index=None):
+                            target_k, link_index=None, contract_map=None,
+                            plan=None):
     nkpts = int(nkpts)
     ncas = int(norb) // nkpts
     assert ncas * nkpts == int(norb)
 
-    link_indexa, link_indexb = _unpack(norb, nelec, link_index, nkpts)
-    blocks = gen_k_sector_linkstr_info(link_indexa, link_indexb, nkpts,
-                                       target_k)
-    sector_size = int(blocks[:, 5].sum()) if blocks.size else 0
-    assert fcivec.size == sector_size
-
-    ab_tab, ab_offsets, aa_tab, aa_offsets, bb_tab, bb_offsets = (
-        _build_contract_pair_tables(link_indexa, link_indexb, norb, nkpts))
+    contract_map = _as_contract_map(
+        norb, nelec, nkpts, target_k, link_index=link_index,
+        contract_map=contract_map, plan=plan)
+    assert fcivec.size == contract_map.sector_size
 
     eri = np.asarray(eri, dtype=np.complex128, order="C")
     fcivec = np.asarray(fcivec, dtype=np.complex128, order="C")
-    blocks = np.asarray(blocks, dtype=np.int32, order="C")
     sigma_ci = np.zeros(fcivec.shape, dtype=np.complex128, order="C")
 
     assert eri.shape == (nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas)
@@ -733,19 +729,19 @@ def _contract_2e_k_c_kernel(kernel_name, eri, fcivec, norb, nelec, nkpts,
             sigma_ci.ctypes.data_as(ctypes.c_void_p),
             ctypes.c_int(nkpts),
             ctypes.c_int(ncas),
-            ctypes.c_int(blocks.shape[0]),
-            blocks.ctypes.data_as(ctypes.c_void_p),
-            ab_tab.ctypes.data_as(ctypes.c_void_p),
-            ab_offsets.ctypes.data_as(ctypes.c_void_p),
-            aa_tab.ctypes.data_as(ctypes.c_void_p),
-            aa_offsets.ctypes.data_as(ctypes.c_void_p),
-            bb_tab.ctypes.data_as(ctypes.c_void_p),
-            bb_offsets.ctypes.data_as(ctypes.c_void_p),
+            ctypes.c_int(contract_map.blocks.shape[0]),
+            contract_map.blocks.ctypes.data_as(ctypes.c_void_p),
+            contract_map.ab_tab.ctypes.data_as(ctypes.c_void_p),
+            contract_map.ab_offsets.ctypes.data_as(ctypes.c_void_p),
+            contract_map.aa_tab.ctypes.data_as(ctypes.c_void_p),
+            contract_map.aa_offsets.ctypes.data_as(ctypes.c_void_p),
+            contract_map.bb_tab.ctypes.data_as(ctypes.c_void_p),
+            contract_map.bb_offsets.ctypes.data_as(ctypes.c_void_p),
         )
     return sigma_ci
 
 def contract_2e_k_c(eri, fcivec, norb, nelec, nkpts, target_k,
-                    link_index=None):
+                    link_index=None, contract_map=None, plan=None):
     '''
     C implementation of contract_2e_k using Python-built k pair tables.
     This wrapper keeps the current Python implementation available as the
@@ -753,11 +749,11 @@ def contract_2e_k_c(eri, fcivec, norb, nelec, nkpts, target_k,
     '''
     return _contract_2e_k_c_kernel(
         "FCIcontract_2e_k", eri, fcivec, norb, nelec, nkpts, target_k,
-        link_index=link_index,
+        link_index=link_index, contract_map=contract_map, plan=plan,
     )
 
 def contract_2e_k_zgemm(eri, fcivec, norb, nelec, nkpts, target_k,
-                        link_index=None):
+                        link_index=None, contract_map=None, plan=None):
     '''
     BLAS-backed C implementation of contract_2e_k using Python-built k pair
     tables.  The alpha-alpha and beta-beta same-spin contractions are applied
@@ -767,7 +763,7 @@ def contract_2e_k_zgemm(eri, fcivec, norb, nelec, nkpts, target_k,
     '''
     return _contract_2e_k_c_kernel(
         "FCIcontract_2e_k_zgemm", eri, fcivec, norb, nelec, nkpts, target_k,
-        link_index=link_index,
+        link_index=link_index, contract_map=contract_map, plan=plan,
     )
 
 def contract_2e_k(eri, fcivec, norb, nelec, nkpts, target_k, link_index=None):
