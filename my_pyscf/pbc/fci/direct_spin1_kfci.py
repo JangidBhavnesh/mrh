@@ -667,8 +667,9 @@ def contract_2e_k_zgemm(eri, fcivec, norb, nelec, nkpts, target_k,
     '''
     BLAS-backed C implementation of contract_2e_k using Python-built k pair
     tables.  The alpha-alpha and beta-beta same-spin contractions are applied
-    with zgemm; the alpha-beta terms still use the scalar pair loop.  OpenMP
-    threads follow pbc_k_contract_2e_threads/pbc_contract_2e_threads.
+    with zgemm; the alpha-beta terms are packed into sparse source/destination
+    block groups.  OpenMP threads follow
+    pbc_k_contract_2e_threads/pbc_contract_2e_threads.
     '''
     return _contract_2e_k_c_kernel(
         "FCIcontract_2e_k_zgemm", eri, fcivec, norb, nelec, nkpts, target_k,

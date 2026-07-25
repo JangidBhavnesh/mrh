@@ -54,6 +54,18 @@
 #define SS_S       10
 #define NSS_FIELDS 11
 
+typedef struct {
+        int dst_offset;
+        int entry0;
+        int entry1;
+} ABGroup;
+
+typedef struct {
+        int src_addr;
+        int dst_addr;
+        double complex coef;
+} ABEntry;
+
 static inline size_t eri_index(int kp, int kq, int kr,
                                int p, int q, int r, int s,
                                int nkpts, int ncas)
@@ -331,6 +343,170 @@ static void contract_ab_scalar(double complex *eri,
         }
 }
 
+static int make_ab_sparse_tables(double complex *eri,
+                                 int nkpts, int ncas,
+                                 int *block_offset,
+                                 int *block_nb,
+                                 int *ab_pairs,
+                                 int *ab_offsets,
+                                 ABGroup **p_groups,
+                                 int **p_group_offsets,
+                                 ABEntry **p_entries)
+{
+        int table_size = nkpts * nkpts;
+        int ngroups = 0;
+        int nentries = 0;
+        int *dst_counts = calloc((size_t)table_size, sizeof(int));
+
+        if (dst_counts == NULL) {
+                return 1;
+        }
+
+        for (int src_key = 0; src_key < table_size; src_key++) {
+                if (block_offset[src_key] < 0) {
+                        continue;
+                }
+
+                for (int dst_key = 0; dst_key < table_size; dst_key++) {
+                        dst_counts[dst_key] = 0;
+                }
+
+                int ab0 = ab_offsets[src_key];
+                int ab1 = ab_offsets[src_key + 1];
+                for (int i = ab0; i < ab1; i++) {
+                        int *row = ab_pairs + i * NAB_FIELDS;
+                        int dst_key = row[AB_KA1] * nkpts + row[AB_KB1];
+
+                        if (block_offset[dst_key] < 0) {
+                                continue;
+                        }
+                        if (dst_counts[dst_key] == 0) {
+                                ngroups++;
+                        }
+                        dst_counts[dst_key]++;
+                        nentries++;
+                }
+        }
+
+        ABGroup *groups = malloc(sizeof(ABGroup)
+                                 * (size_t)(ngroups > 0 ? ngroups : 1));
+        int *group_offsets = malloc(sizeof(int) * (size_t)(table_size + 1));
+        ABEntry *entries = malloc(sizeof(ABEntry)
+                                  * (size_t)(nentries > 0 ? nentries : 1));
+
+        if (groups == NULL || group_offsets == NULL || entries == NULL) {
+                free(groups);
+                free(group_offsets);
+                free(entries);
+                free(dst_counts);
+                return 1;
+        }
+
+        int gpos = 0;
+        int epos = 0;
+        for (int src_key = 0; src_key < table_size; src_key++) {
+                group_offsets[src_key] = gpos;
+
+                for (int dst_key = 0; dst_key < table_size; dst_key++) {
+                        dst_counts[dst_key] = 0;
+                }
+
+                if (block_offset[src_key] < 0) {
+                        continue;
+                }
+
+                int ab0 = ab_offsets[src_key];
+                int ab1 = ab_offsets[src_key + 1];
+                for (int i = ab0; i < ab1; i++) {
+                        int *row = ab_pairs + i * NAB_FIELDS;
+                        int dst_key = row[AB_KA1] * nkpts + row[AB_KB1];
+
+                        if (block_offset[dst_key] >= 0) {
+                                dst_counts[dst_key]++;
+                        }
+                }
+
+                for (int dst_key = 0; dst_key < table_size; dst_key++) {
+                        int count = dst_counts[dst_key];
+                        if (count > 0) {
+                                groups[gpos].dst_offset =
+                                        block_offset[dst_key];
+                                groups[gpos].entry0 = epos;
+                                groups[gpos].entry1 = epos + count;
+                                dst_counts[dst_key] = epos;
+                                epos += count;
+                                gpos++;
+                        }
+                }
+
+                int src_nb = block_nb[src_key];
+                for (int i = ab0; i < ab1; i++) {
+                        int *row = ab_pairs + i * NAB_FIELDS;
+                        int dst_key = row[AB_KA1] * nkpts + row[AB_KB1];
+                        int dst_offset = block_offset[dst_key];
+
+                        if (dst_offset < 0) {
+                                continue;
+                        }
+
+                        int dst_nb = block_nb[dst_key];
+                        int pos = dst_counts[dst_key]++;
+                        int a0 = row[AB_A0];
+                        int a1 = row[AB_A1];
+                        int b0 = row[AB_B0];
+                        int b1 = row[AB_B1];
+                        double sign = (double)row[AB_SIGN];
+
+                        double complex val_ab = eri[eri_index(
+                                row[AB_KPA], row[AB_KQA], row[AB_KRB],
+                                row[AB_PA], row[AB_QA],
+                                row[AB_RB], row[AB_SB],
+                                nkpts, ncas)];
+                        double complex val_ba = eri[eri_index(
+                                row[AB_KPB], row[AB_KQB], row[AB_KRA],
+                                row[AB_PB], row[AB_QB],
+                                row[AB_RA], row[AB_SA],
+                                nkpts, ncas)];
+
+                        entries[pos].src_addr = a0 * src_nb + b0;
+                        entries[pos].dst_addr = a1 * dst_nb + b1;
+                        entries[pos].coef = (val_ab + val_ba) * sign;
+                }
+        }
+        group_offsets[table_size] = gpos;
+
+        *p_groups = groups;
+        *p_group_offsets = group_offsets;
+        *p_entries = entries;
+
+        free(dst_counts);
+        return 0;
+}
+
+static void contract_ab_sparse(double complex *ci0,
+                               double complex *ci1,
+                               int src_key,
+                               int src_offset,
+                               ABGroup *ab_groups,
+                               int *ab_group_offsets,
+                               ABEntry *ab_entries)
+{
+        int group0 = ab_group_offsets[src_key];
+        int group1 = ab_group_offsets[src_key + 1];
+
+        for (int ig = group0; ig < group1; ig++) {
+                ABGroup *group = ab_groups + ig;
+                int dst_offset = group->dst_offset;
+
+                for (int i = group->entry0; i < group->entry1; i++) {
+                        ABEntry *entry = ab_entries + i;
+                        ci1[dst_offset + entry->dst_addr] +=
+                                entry->coef *
+                                ci0[src_offset + entry->src_addr];
+                }
+        }
+}
+
 static void contract_aa_zgemm(double complex *eri,
                               double complex *ci0,
                               double complex *ci1,
@@ -474,6 +650,9 @@ void FCIcontract_2e_k_zgemm(double complex *eri,
         int *block_offset = NULL;
         int *block_na = NULL;
         int *block_nb = NULL;
+        ABGroup *ab_groups = NULL;
+        int *ab_group_offsets = NULL;
+        ABEntry *ab_entries = NULL;
 
         if (make_block_tables(nkpts, nblocks, blocks,
                               &block_offset, &block_na, &block_nb,
@@ -509,6 +688,13 @@ void FCIcontract_2e_k_zgemm(double complex *eri,
                 bb_work_size = 1;
         }
 
+        int use_ab_sparse = (
+                make_ab_sparse_tables(eri, nkpts, ncas,
+                                      block_offset, block_nb,
+                                      ab_pairs, ab_offsets,
+                                      &ab_groups, &ab_group_offsets,
+                                      &ab_entries) == 0);
+
         zset0(ci1, (size_t)ndet);
         int status = 0;
         int nthreads = omp_get_max_threads();
@@ -525,7 +711,7 @@ void FCIcontract_2e_k_zgemm(double complex *eri,
                block_offset, block_na, block_nb, \
                ab_pairs, ab_offsets, aa_pairs, aa_offsets, \
                bb_pairs, bb_offsets, ndet_size, aa_work_size, bb_work_size, \
-               status)
+               status, use_ab_sparse, ab_groups, ab_group_offsets, ab_entries)
 {
         double complex *ci1buf = malloc(sizeof(double complex) * ndet_size);
         double complex *amat = malloc(sizeof(double complex) * aa_work_size);
@@ -549,11 +735,21 @@ void FCIcontract_2e_k_zgemm(double complex *eri,
                         int na = blk[BLOCK_NA];
                         int nb = blk[BLOCK_NB];
                         int src_offset = blk[BLOCK_OFFSET];
+                        int src_key = ka * nkpts + kb;
 
-                        contract_ab_scalar(eri, ci0, ci1buf, nkpts, ncas,
-                                           ka, kb, nb, src_offset,
-                                           block_offset, block_nb,
-                                           ab_pairs, ab_offsets);
+                        if (use_ab_sparse) {
+                                contract_ab_sparse(ci0, ci1buf,
+                                                   src_key, src_offset,
+                                                   ab_groups,
+                                                   ab_group_offsets,
+                                                   ab_entries);
+                        } else {
+                                contract_ab_scalar(eri, ci0, ci1buf,
+                                                   nkpts, ncas,
+                                                   ka, kb, nb, src_offset,
+                                                   block_offset, block_nb,
+                                                   ab_pairs, ab_offsets);
+                        }
 
                         contract_aa_zgemm(eri, ci0, ci1buf, amat,
                                           nkpts, ncas,
@@ -592,6 +788,9 @@ void FCIcontract_2e_k_zgemm(double complex *eri,
                         free(block_offset);
                         free(block_na);
                         free(block_nb);
+                        free(ab_groups);
+                        free(ab_group_offsets);
+                        free(ab_entries);
                         return;
                 }
 
@@ -603,11 +802,21 @@ void FCIcontract_2e_k_zgemm(double complex *eri,
                         int na = blk[BLOCK_NA];
                         int nb = blk[BLOCK_NB];
                         int src_offset = blk[BLOCK_OFFSET];
+                        int src_key = ka * nkpts + kb;
 
-                        contract_ab_scalar(eri, ci0, ci1, nkpts, ncas,
-                                           ka, kb, nb, src_offset,
-                                           block_offset, block_nb,
-                                           ab_pairs, ab_offsets);
+                        if (use_ab_sparse) {
+                                contract_ab_sparse(ci0, ci1,
+                                                   src_key, src_offset,
+                                                   ab_groups,
+                                                   ab_group_offsets,
+                                                   ab_entries);
+                        } else {
+                                contract_ab_scalar(eri, ci0, ci1,
+                                                   nkpts, ncas,
+                                                   ka, kb, nb, src_offset,
+                                                   block_offset, block_nb,
+                                                   ab_pairs, ab_offsets);
+                        }
 
                         contract_aa_zgemm(eri, ci0, ci1, amat,
                                           nkpts, ncas,
@@ -629,4 +838,7 @@ void FCIcontract_2e_k_zgemm(double complex *eri,
         free(block_offset);
         free(block_na);
         free(block_nb);
+        free(ab_groups);
+        free(ab_group_offsets);
+        free(ab_entries);
 }
