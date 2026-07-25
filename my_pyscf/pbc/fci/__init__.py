@@ -1,4 +1,5 @@
 from mrh.my_pyscf.pbc.fci import direct_spin1_cplx
+from mrh.my_pyscf.pbc.fci import direct_spin1_kfci
 from mrh.my_pyscf.pbc.fci import csf_cplx
 from mrh.my_pyscf.pbc.fci import spin_op
 from mrh.my_pyscf.pbc.fci import addons
@@ -8,7 +9,7 @@ from mrh.my_pyscf.pbc.fci import addons
 
 # TODO: 
 # 1. Add the option of direct_spin0 during the initialization.
-# 2. Add the point group symmetry option.
+# 2. Add the point group symmetry sanity checks.
 
 class DMRGCICPLX:
     def __init__(self, cell, **kwargs):
@@ -27,6 +28,15 @@ def solver(cell, singlet, symm=None):
     if symm is not None and symm is not False:
         raise NotImplementedError("Symmetry is not implemented for FCI in PBC yet.")
     return direct_spin1_cplx.FCISolver(cell)
+
+def ksolver(cell=None, nkpts=None, target_k=0, symm=None):
+    '''
+    k-FCI solver working in one total momentum sector.
+    '''
+    if symm is not None and symm is not False:
+        raise NotImplementedError("Symmetry is not implemented for k-FCI in PBC yet.")
+    return direct_spin1_kfci.FCISolver(cell, nkpts=nkpts, target_k=target_k)
+
 
 def csf_solver(cell, smult, symm=None):
     if symm is not None and symm is not False:
