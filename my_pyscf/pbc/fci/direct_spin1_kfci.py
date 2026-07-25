@@ -82,6 +82,28 @@ def _load_k_contract_lib():
         libpbcfci_k.FCIcontract_2e_k.restype = None
         libpbcfci_k.FCIcontract_2e_k_zgemm.argtypes = contract_2e_k_args
         libpbcfci_k.FCIcontract_2e_k_zgemm.restype = None
+        libpbcfci_k.FCIcontract_2e_k_zgemm_ab_struct.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+        ]
+        libpbcfci_k.FCIcontract_2e_k_zgemm_ab_struct.restype = None
     return libpbcfci_k
 
 def _as_contract_map(norb, nelec, nkpts, target_k, link_index=None,
@@ -721,23 +743,49 @@ def _contract_2e_k_c_kernel(kernel_name, eri, fcivec, norb, nelec, nkpts,
     assert eri.shape == (nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas)
 
     libpbcfci = _load_k_contract_lib()
-    kernel = getattr(libpbcfci, kernel_name)
+    if kernel_name == "FCIcontract_2e_k_zgemm":
+        kernel = libpbcfci.FCIcontract_2e_k_zgemm_ab_struct
+    else:
+        kernel = getattr(libpbcfci, kernel_name)
     with lib.with_omp_threads(contract_2e_threads):
-        kernel(
-            eri.ctypes.data_as(ctypes.c_void_p),
-            fcivec.ctypes.data_as(ctypes.c_void_p),
-            sigma_ci.ctypes.data_as(ctypes.c_void_p),
-            ctypes.c_int(nkpts),
-            ctypes.c_int(ncas),
-            ctypes.c_int(contract_map.blocks.shape[0]),
-            contract_map.blocks.ctypes.data_as(ctypes.c_void_p),
-            contract_map.ab_tab.ctypes.data_as(ctypes.c_void_p),
-            contract_map.ab_offsets.ctypes.data_as(ctypes.c_void_p),
-            contract_map.aa_tab.ctypes.data_as(ctypes.c_void_p),
-            contract_map.aa_offsets.ctypes.data_as(ctypes.c_void_p),
-            contract_map.bb_tab.ctypes.data_as(ctypes.c_void_p),
-            contract_map.bb_offsets.ctypes.data_as(ctypes.c_void_p),
-        )
+        if kernel_name == "FCIcontract_2e_k_zgemm":
+            kernel(
+                eri.ctypes.data_as(ctypes.c_void_p),
+                fcivec.ctypes.data_as(ctypes.c_void_p),
+                sigma_ci.ctypes.data_as(ctypes.c_void_p),
+                ctypes.c_int(nkpts),
+                ctypes.c_int(ncas),
+                ctypes.c_int(contract_map.blocks.shape[0]),
+                contract_map.blocks.ctypes.data_as(ctypes.c_void_p),
+                contract_map.ab_group_tab.ctypes.data_as(ctypes.c_void_p),
+                contract_map.ab_group_offsets.ctypes.data_as(ctypes.c_void_p),
+                contract_map.ab_src_addr.ctypes.data_as(ctypes.c_void_p),
+                contract_map.ab_dst_addr.ctypes.data_as(ctypes.c_void_p),
+                contract_map.ab_sign.ctypes.data_as(ctypes.c_void_p),
+                contract_map.ab_eri_idx_ab.ctypes.data_as(ctypes.c_void_p),
+                contract_map.ab_eri_idx_ba.ctypes.data_as(ctypes.c_void_p),
+                ctypes.c_int(contract_map.ab_src_addr.size),
+                contract_map.aa_tab.ctypes.data_as(ctypes.c_void_p),
+                contract_map.aa_offsets.ctypes.data_as(ctypes.c_void_p),
+                contract_map.bb_tab.ctypes.data_as(ctypes.c_void_p),
+                contract_map.bb_offsets.ctypes.data_as(ctypes.c_void_p),
+            )
+        else:
+            kernel(
+                eri.ctypes.data_as(ctypes.c_void_p),
+                fcivec.ctypes.data_as(ctypes.c_void_p),
+                sigma_ci.ctypes.data_as(ctypes.c_void_p),
+                ctypes.c_int(nkpts),
+                ctypes.c_int(ncas),
+                ctypes.c_int(contract_map.blocks.shape[0]),
+                contract_map.blocks.ctypes.data_as(ctypes.c_void_p),
+                contract_map.ab_tab.ctypes.data_as(ctypes.c_void_p),
+                contract_map.ab_offsets.ctypes.data_as(ctypes.c_void_p),
+                contract_map.aa_tab.ctypes.data_as(ctypes.c_void_p),
+                contract_map.aa_offsets.ctypes.data_as(ctypes.c_void_p),
+                contract_map.bb_tab.ctypes.data_as(ctypes.c_void_p),
+                contract_map.bb_offsets.ctypes.data_as(ctypes.c_void_p),
+            )
     return sigma_ci
 
 def contract_2e_k_c(eri, fcivec, norb, nelec, nkpts, target_k,
