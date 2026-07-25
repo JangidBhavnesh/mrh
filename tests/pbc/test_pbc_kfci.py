@@ -5,6 +5,7 @@ import scipy
 
 from pyscf import fci
 
+from mrh.my_pyscf.pbc import fci as pbc_fci
 from mrh.my_pyscf.pbc.fci import direct_spin1_cplx, direct_spin1_cplx_opt
 from mrh.my_pyscf.pbc.fci import direct_spin1_kfci
 from mrh.my_pyscf.pbc.fci.direct_spin1_kfci import contract_2e_k, contract_1e_k, _unpack
@@ -332,6 +333,44 @@ class KnownValues(unittest.TestCase):
         e_test = solver.energy(h1e, eri, fcivec_k, norb, nelec)
 
         self.assertTrue(np.allclose(e_test, e_ref, atol=1e-12, rtol=1e-12))
+
+    def test_fix_spin_k(self):
+        '''
+        Test k-FCI fix_spin against the explicit spin-penalty Hamiltonian-vector product.
+        '''
+        rng = np.random.default_rng(12)
+
+        nkpts = 2
+        ncas = 2
+        norb = nkpts * ncas
+        nelec = (1, 1)
+        target_k = 0
+        shift = 0.3
+        ss = 0.0
+
+        helper = kFCIHelperFunctions()
+        fcivec_k = helper.random_ksector_fcivec(nkpts, ncas, nelec, target_k=target_k, seed=12)[0]
+
+        h1e = (rng.normal(size=(nkpts, ncas, ncas)) 
+               + 1j * rng.normal(size=(nkpts, ncas, ncas)))
+        eri = (rng.normal(size=(nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas)) 
+               + 1j * rng.normal(size=(nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas)))
+
+        base_solver = direct_spin1_kfci.FCISolver(nkpts=nkpts, target_k=target_k)
+        base_sigma = base_solver.contract_ham(h1e, eri, fcivec_k, norb, nelec)
+        penalty = shift * (base_solver.contract_ss(fcivec_k, norb, nelec) - ss * fcivec_k)
+
+        ksolver = direct_spin1_kfci.FCISolver(nkpts=nkpts, target_k=target_k)
+        pbc_fci.addons.fix_spin_(ksolver, shift=shift, ss=ss)
+
+        self.assertTrue(isinstance(ksolver, direct_spin1_kfci.SpinPenaltyFCISolver))
+
+        sigma = ksolver.contract_ham(h1e, eri, fcivec_k, norb, nelec)
+        self.assertTrue(np.allclose(sigma, base_sigma + penalty, atol=1e-12, rtol=1e-12))
+
+        hmat = ksolver.make_hamiltonian(h1e, eri, norb, nelec)
+        sigma_ref = np.dot(hmat, fcivec_k)
+        self.assertTrue(np.allclose(sigma, sigma_ref, atol=1e-12, rtol=1e-12))
 
     def test_kfci_kernel_direct_and_davidson(self):
         '''
