@@ -102,6 +102,14 @@ def _load_k_contract_lib():
             ctypes.c_void_p,
             ctypes.c_void_p,
             ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
         ]
         libpbcfci_k.FCIcontract_2e_k_zgemm_ab_struct.restype = None
     return libpbcfci_k
@@ -765,10 +773,18 @@ def _contract_2e_k_c_kernel(kernel_name, eri, fcivec, norb, nelec, nkpts,
                 contract_map.ab_eri_idx_ab.ctypes.data_as(ctypes.c_void_p),
                 contract_map.ab_eri_idx_ba.ctypes.data_as(ctypes.c_void_p),
                 ctypes.c_int(contract_map.ab_src_addr.size),
-                contract_map.aa_tab.ctypes.data_as(ctypes.c_void_p),
-                contract_map.aa_offsets.ctypes.data_as(ctypes.c_void_p),
-                contract_map.bb_tab.ctypes.data_as(ctypes.c_void_p),
-                contract_map.bb_offsets.ctypes.data_as(ctypes.c_void_p),
+                contract_map.aa_group_tab.ctypes.data_as(ctypes.c_void_p),
+                contract_map.aa_group_offsets.ctypes.data_as(ctypes.c_void_p),
+                contract_map.aa_src_addr.ctypes.data_as(ctypes.c_void_p),
+                contract_map.aa_dst_addr.ctypes.data_as(ctypes.c_void_p),
+                contract_map.aa_sign.ctypes.data_as(ctypes.c_void_p),
+                contract_map.aa_eri_idx.ctypes.data_as(ctypes.c_void_p),
+                contract_map.bb_group_tab.ctypes.data_as(ctypes.c_void_p),
+                contract_map.bb_group_offsets.ctypes.data_as(ctypes.c_void_p),
+                contract_map.bb_src_addr.ctypes.data_as(ctypes.c_void_p),
+                contract_map.bb_dst_addr.ctypes.data_as(ctypes.c_void_p),
+                contract_map.bb_sign.ctypes.data_as(ctypes.c_void_p),
+                contract_map.bb_eri_idx.ctypes.data_as(ctypes.c_void_p),
             )
         else:
             kernel(
