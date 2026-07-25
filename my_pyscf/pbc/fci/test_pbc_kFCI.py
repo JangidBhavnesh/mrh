@@ -7,6 +7,7 @@ from pyscf import fci
 
 from mrh.my_pyscf.pbc.fci import direct_spin1_cplx, direct_spin1_cplx_opt
 from mrh.my_pyscf.pbc.fci.direct_spin1_kfci import contract_2e_k, _unpack, contract_1e_k
+from mrh.my_pyscf.pbc.fci import direct_spin1_kfci
 from mrh.my_pyscf.pbc.fci.kcistrings import gen_k_sector_maps, gen_k_sector_linkstr_info
 
 # Author: Bhavnesh Jangid
@@ -323,6 +324,123 @@ class KnownValues(unittest.TestCase):
 
                     # Now compare the absolute values
                     self.assertTrue(np.allclose(sigma_k, sigma_ref_k, atol=1e-12, rtol=1e-12))
+
+    def test_make_hamiltonian_k(self):
+        '''
+        Test explicit Hamiltonian construction against repeated Hamiltonian-vector contractions.
+        '''
+        rng = np.random.default_rng(12)
+
+        nkpts = 2
+        ncas = 2
+        norb = nkpts * ncas
+        nelec = (1, 1)
+        target_k = 0
+
+        h1e = (rng.normal(size=(nkpts, ncas, ncas)) 
+               + 1j * rng.normal(size=(nkpts, ncas, ncas)))
+        eri = (rng.normal(size=(nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas)) 
+               + 1j * rng.normal(size=(nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas)))
+
+        solver = direct_spin1_kfci.FCISolver(nkpts=nkpts, target_k=target_k)
+        hmat = solver.make_hamiltonian(h1e, eri, norb, nelec)
+
+        for i in range(hmat.shape[1]):
+            ci0 = np.zeros(hmat.shape[0], dtype=hmat.dtype)
+            ci0[i] = 1.0
+            sigma = solver.contract_ham(h1e, eri, ci0, norb, nelec)
+            self.assertTrue(np.allclose(hmat[:, i], sigma, atol=1e-12, rtol=1e-12))
+
+    def test_kfci_kernel_direct_and_davidson(self):
+        '''
+        Test direct and Davidson k-FCI diagonalization for a small Hermitian Hamiltonian.
+        '''
+        rng = np.random.default_rng(12)
+
+        nkpts = 2
+        ncas = 2
+        norb = nkpts * ncas
+        nelec = (1, 1)
+        target_k = 0
+
+        h1e = (rng.normal(size=(nkpts, ncas, ncas)) 
+               + 1j * rng.normal(size=(nkpts, ncas, ncas)))
+        for k in range(nkpts):
+            h1e[k] = 0.5 * (h1e[k] + h1e[k].conj().T)
+
+        eri = np.zeros((nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas), 
+                       dtype=np.complex128)
+
+        solver_direct = direct_spin1_kfci.FCISolver(nkpts=nkpts, target_k=target_k)
+        solver_direct.verbose = 0
+        solver_direct.davidson_only = False
+        solver_direct.pspace_size = 100
+        e_direct, ci_direct = solver_direct.kernel(h1e, eri, norb, nelec, nroots=1)
+
+        solver_davidson = direct_spin1_kfci.FCISolver(nkpts=nkpts, target_k=target_k)
+        solver_davidson.verbose = 0
+        solver_davidson.davidson_only = True
+        e_davidson, ci_davidson = solver_davidson.kernel(h1e, eri, norb, nelec, nroots=1)
+
+        self.assertTrue(np.allclose(e_direct, e_davidson, atol=1e-10, rtol=1e-10))
+
+        sigma = solver_davidson.contract_ham(h1e, eri, ci_davidson, norb, nelec)
+        self.assertTrue(np.linalg.norm(sigma - e_davidson * ci_davidson) < 1e-9)
+
+    def test_kfci_rdms_vs_full_cplx_fci(self):
+        '''
+        Test k-FCI RDMs against full complex-FCI RDMs after embedding the sector CI vector.
+        '''
+        rng = np.random.default_rng(12)
+
+        nkpts = 2
+        ncas = 2
+        norb = nkpts * ncas
+        nelec = (1, 1)
+        target_k = 0
+
+        link_indexa, link_indexb = _unpack(norb, nelec, None, nkpts)
+        straid_k, strbid_k = gen_k_sector_maps(link_indexa, link_indexb, nkpts)[:2]
+        blocks = gen_k_sector_linkstr_info(link_indexa, link_indexb, nkpts, target_k)
+        sector_size = int(blocks[:, 5].sum())
+
+        fcivec_k = (rng.normal(size=sector_size) 
+                    + 1j * rng.normal(size=sector_size))
+        fcivec_k /= np.linalg.norm(fcivec_k)
+
+        helper = kFCIHelperFunctions()
+        nstra_total = fci.cistring.num_strings(norb, nelec[0])
+        nstrb_total = fci.cistring.num_strings(norb, nelec[1])
+        ci_full = helper.embed_sector_fcivec_to_full_ci(
+            fcivec_k, blocks, straid_k, strbid_k, nstra_total, nstrb_total)
+
+        solver = direct_spin1_kfci.FCISolver(nkpts=nkpts, target_k=target_k)
+
+        rdm1s_k = solver.make_rdm1s_py(fcivec_k, norb, nelec)
+        rdm1s_ref = direct_spin1_cplx.make_rdm1s_py(ci_full, norb, nelec)
+
+        self.assertTrue(np.allclose(rdm1s_k[0], rdm1s_ref[0], atol=1e-12, rtol=1e-12))
+        self.assertTrue(np.allclose(rdm1s_k[1], rdm1s_ref[1], atol=1e-12, rtol=1e-12))
+
+        rdm1_k = solver.make_rdm1_py(fcivec_k, norb, nelec)
+        rdm1_ref = direct_spin1_cplx.make_rdm1_py(ci_full, norb, nelec)
+
+        self.assertTrue(np.allclose(rdm1_k, rdm1_ref, atol=1e-12, rtol=1e-12))
+
+        rdm12s_k = solver.make_rdm12s_py(fcivec_k.copy(), norb, nelec)
+        rdm12s_ref = direct_spin1_cplx.make_rdm12s_py(ci_full.copy(), norb, nelec)
+
+        for dm_k, dm_ref in zip(rdm12s_k[0], rdm12s_ref[0]):
+            self.assertTrue(np.allclose(dm_k, dm_ref, atol=1e-12, rtol=1e-12))
+
+        for dm_k, dm_ref in zip(rdm12s_k[1], rdm12s_ref[1]):
+            self.assertTrue(np.allclose(dm_k, dm_ref, atol=1e-12, rtol=1e-12))
+
+        rdm1_k, rdm2_k = solver.make_rdm12_py(fcivec_k.copy(), norb, nelec)
+        rdm1_ref, rdm2_ref = direct_spin1_cplx.make_rdm12_py(ci_full.copy(), norb, nelec)
+
+        self.assertTrue(np.allclose(rdm1_k, rdm1_ref, atol=1e-12, rtol=1e-12))
+        self.assertTrue(np.allclose(rdm2_k, rdm2_ref, atol=1e-12, rtol=1e-12))
 
 if __name__ == "__main__":
     unittest.main()
