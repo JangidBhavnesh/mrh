@@ -1,5 +1,7 @@
 import numpy as np
 import scipy.linalg
+import sys
+import types
 import warnings
 
 from pyscf import lib
@@ -797,6 +799,40 @@ def spin_square(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
                                    link_index=link_index, spin=spin,
                                    **kwargs)
 
+def _get_spin_penalty(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
+                      spin=None, ss_value=None, ss_penalty=0.1):
+    '''
+    Apply the spin penalty operator to a k-FCI vector in one momentum sector.
+    This follows the same logic as pyscf.fci.addons.SpinPenaltyFCISolver.
+    '''
+    nelec = _unpack_nelec(nelec, spin)
+    sz = abs(nelec[0] - nelec[1]) * 0.5
+    if ss_value is None:
+        ss = sz * (sz + 1)
+    else:
+        ss = ss_value
+
+    fcivec = np.asarray(fcivec)
+    if ss < sz * (sz + 1) + 0.1:
+        # (S^2-ss)|Psi> to shift state other than the lowest state.
+        ci1 = contract_ss(fcivec, norb, nelec, nkpts,
+                          target_k=target_k,
+                          link_index=link_index, spin=spin).reshape(fcivec.shape)
+        ci1 -= ss * fcivec
+    else:
+        # (S^2-ss)^2|Psi> to shift states except the given spin.
+        tmp = contract_ss(fcivec, norb, nelec, nkpts,
+                          target_k=target_k,
+                          link_index=link_index, spin=spin).reshape(fcivec.shape)
+        tmp -= ss * fcivec
+        ci1 = -ss * tmp
+        ci1 += contract_ss(tmp, norb, nelec, nkpts,
+                           target_k=target_k,
+                           link_index=link_index, spin=spin).reshape(fcivec.shape)
+        tmp = None
+    ci1 *= ss_penalty
+    return ci1
+
 def _make_diag_precond(hdiag, level_shift=1e-3):
     '''
     Diagonal preconditioner for the Davidson solver.
@@ -916,6 +952,128 @@ def kernel_ms1(fci, h1e, eri, norb, nelec, nkpts, target_k=0, ci0=None,
                        follow_state=True, tol_residual=tol_residual,
                        **kwargs)
     return e + ecore, c
+
+class SpinPenaltyFCISolver:
+    __name_mixin__ = 'SpinPenalty'
+    _keys = {'ss_value', 'ss_penalty', 'base'}
+
+    def __init__(self, fcibase, shift, ss_value):
+        self.base = fcibase.copy()
+        self.__dict__.update(fcibase.__dict__)
+        self.ss_value = ss_value
+        self.ss_penalty = shift
+        self.davidson_only = self.base.davidson_only = True
+
+    def undo_fix_spin(self):
+        obj = lib.view(self, lib.drop_class(self.__class__, SpinPenaltyFCISolver))
+        del obj.base
+        del obj.ss_value
+        del obj.ss_penalty
+        return obj
+
+    def base_contract_ham(self, *args, **kwargs):
+        return super().contract_ham(*args, **kwargs)
+
+    def contract_spin_penalty(self, fcivec, norb, nelec, nkpts=None,
+                              target_k=None, link_index=None):
+        if nkpts is None: nkpts = self.nkpts
+        if target_k is None: target_k = self.target_k
+        nelec = _unpack_nelec(nelec, self.spin)
+        return _get_spin_penalty(fcivec, norb, nelec, nkpts,
+                                 target_k=target_k,
+                                 link_index=link_index, spin=self.spin,
+                                 ss_value=self.ss_value,
+                                 ss_penalty=self.ss_penalty)
+
+    def contract_ham(self, h1e, eri, fcivec, norb, nelec, nkpts=None,
+                     target_k=None, link_index=None):
+        if nkpts is None: nkpts = self.nkpts
+        if target_k is None: target_k = self.target_k
+        ci0 = super().contract_ham(h1e, eri, fcivec, norb, nelec,
+                                   nkpts=nkpts, target_k=target_k,
+                                   link_index=link_index)
+        ci1 = self.contract_spin_penalty(fcivec, norb, nelec,
+                                         nkpts=nkpts, target_k=target_k,
+                                         link_index=link_index)
+        ci1 += ci0.reshape(fcivec.shape)
+        return ci1
+
+    def make_hdiag(self, h1e, eri, norb, nelec, nkpts=None, target_k=None,
+                   link_index=None, compress=False):
+        if nkpts is None: nkpts = self.nkpts
+        if target_k is None: target_k = self.target_k
+        nelec = _unpack_nelec(nelec, self.spin)
+        link_index = _unpack(norb, nelec, link_index, nkpts, spin=self.spin)
+        ndet = sector_size(norb, nelec, nkpts, target_k, link_index=link_index)
+        dtype = np.result_type(h1e, eri, np.complex128)
+        hdiag = np.empty(ndet, dtype=dtype)
+
+        for i in range(ndet):
+            ci0 = np.zeros(ndet, dtype=dtype)
+            ci0[i] = 1.0
+            sigma = self.contract_ham(h1e, eri, ci0, norb, nelec,
+                                      nkpts=nkpts, target_k=target_k,
+                                      link_index=link_index)
+            hdiag[i] = sigma[i]
+
+        return hdiag
+
+    def make_hamiltonian(self, h1e, eri, norb, nelec, nkpts=None,
+                         target_k=None, link_index=None):
+        if nkpts is None: nkpts = self.nkpts
+        if target_k is None: target_k = self.target_k
+        nelec = _unpack_nelec(nelec, self.spin)
+        link_index = _unpack(norb, nelec, link_index, nkpts, spin=self.spin)
+        ndet = sector_size(norb, nelec, nkpts, target_k, link_index=link_index)
+        dtype = np.result_type(h1e, eri, np.complex128)
+        hmat = np.empty((ndet, ndet), dtype=dtype, order="F")
+
+        for i in range(ndet):
+            ci0 = np.zeros(ndet, dtype=dtype)
+            ci0[i] = 1.0
+            hmat[:, i] = self.contract_ham(h1e, eri, ci0, norb, nelec,
+                                           nkpts=nkpts, target_k=target_k,
+                                           link_index=link_index)
+
+        return hmat
+
+    def energy(self, h1e, eri, fcivec, norb, nelec, nkpts=None,
+               target_k=None, link_index=None):
+        if nkpts is None: nkpts = self.nkpts
+        if target_k is None: target_k = self.target_k
+        nelec = _unpack_nelec(nelec, self.spin)
+        sigma = self.contract_ham(h1e, eri, fcivec, norb, nelec,
+                                  nkpts=nkpts, target_k=target_k,
+                                  link_index=link_index)
+        return np.vdot(fcivec, sigma)
+
+def fix_spin(fciobj, shift=0.1, ss=None, **kwargs):
+    '''
+    Add a spin penalty to the k-FCI solver.
+    '''
+    if isinstance(fciobj, types.ModuleType):
+        raise DeprecationWarning('fix_spin should be applied on FCI object only')
+
+    if 'ss_value' in kwargs:
+        sys.stderr.write('fix_spin_: kwarg "ss_value" will be removed in future release. '
+                         'It was replaced by "ss"\n')
+        ss_value = kwargs['ss_value']
+    else:
+        ss_value = ss
+
+    if isinstance(fciobj, SpinPenaltyFCISolver):
+        fciobj.ss_penalty = shift
+        fciobj.ss_value = ss_value
+        return fciobj
+
+    return lib.set_class(SpinPenaltyFCISolver(fciobj, shift, ss_value),
+                         (SpinPenaltyFCISolver, fciobj.__class__))
+
+def fix_spin_(fciobj, shift=0.1, ss=None, **kwargs):
+    sp_fci = fix_spin(fciobj, shift=shift, ss=ss, **kwargs)
+    fciobj.__class__ = sp_fci.__class__
+    fciobj.__dict__ = sp_fci.__dict__
+    return fciobj
 
 class FCISolver(direct_spin1.FCISolver):
     '''
@@ -1077,6 +1235,11 @@ class FCISolver(direct_spin1.FCISolver):
                           pspace_size=pspace_size, ecore=ecore, **kwargs)
         self.eci, self.ci = e, c
         return e, c
+
+    def fix_spin_(self, shift=0.1, ss=None, **kwargs):
+        return fix_spin_(self, shift=shift, ss=ss, **kwargs)
+
+    fix_spin = fix_spin_
 
     def eig(self, op, x0=None, precond=None, **kwargs):
         if isinstance(op, np.ndarray):
