@@ -778,6 +778,25 @@ def make_rdm12_py(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
                                      link_index=link_index,
                                      reorder=reorder, spin=spin)
 
+def contract_ss(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
+                spin=None):
+    '''
+    Apply S^2 to a k-FCI vector in a fixed total momentum sector.
+    '''
+    return krdm_helper.contract_ss(fcivec, norb, nelec, nkpts,
+                                   target_k=target_k,
+                                   link_index=link_index, spin=spin)
+
+def spin_square(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
+                spin=None, **kwargs):
+    '''
+    Spin square for a k-FCI vector in a fixed total momentum sector.
+    '''
+    return krdm_helper.spin_square(fcivec, norb, nelec, nkpts,
+                                   target_k=target_k,
+                                   link_index=link_index, spin=spin,
+                                   **kwargs)
+
 def _make_diag_precond(hdiag, level_shift=1e-3):
     '''
     Diagonal preconditioner for the Davidson solver.
@@ -1013,6 +1032,22 @@ class FCISolver(direct_spin1.FCISolver):
         return self.make_rdm12_py(fcivec, norb, nelec, nkpts=nkpts,
                                   target_k=target_k, link_index=link_index,
                                   reorder=reorder)
+
+    def contract_ss(self, fcivec, norb, nelec, nkpts=None, target_k=None,
+                    link_index=None):
+        if nkpts is None: nkpts = self.nkpts
+        if target_k is None: target_k = self.target_k
+        nelec = _unpack_nelec(nelec, self.spin)
+        return contract_ss(fcivec, norb, nelec, nkpts, target_k,
+                           link_index=link_index, spin=self.spin)
+
+    def spin_square(self, fcivec, norb, nelec, nkpts=None, target_k=None,
+                    link_index=None, **kwargs):
+        if nkpts is None: nkpts = self.nkpts
+        if target_k is None: target_k = self.target_k
+        nelec = _unpack_nelec(nelec, self.spin)
+        return spin_square(fcivec, norb, nelec, nkpts, target_k,
+                           link_index=link_index, spin=self.spin, **kwargs)
 
     def make_precond(self, hdiag, pspaceig=None, pspaceci=None, addr=None):
         return make_diag_precond(hdiag, pspaceig, pspaceci, addr,
