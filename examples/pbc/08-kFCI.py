@@ -7,18 +7,16 @@ from pyscf.pbc import gto as pgto
 from mrh.my_pyscf.pbc import mcscf
 from mrh.my_pyscf.pbc.fci import ksolver
 
-# Author: Bhavnesh Jangid
-
 '''
 In this file, I am showing a basic k-FCI calculation.
 The k-FCI solver works in one total momentum sector at a time.
+After solving each target_k sector, I compute the S^2 of the k-FCI wavefunction.
 '''
 
 
 def get_kfci_integrals(kmc, mo_coeff):
     '''
-    Build the active-space Hamiltonian in k-space for the k-FCI solver.
-    These are in block MO basis, not the wannier MO basis.
+    Build the active-space effective Hamiltonian in k-space for the k-FCI solver.
     '''
     cell = kmc.cell
     kmf = kmc._scf
@@ -28,14 +26,14 @@ def get_kfci_integrals(kmc, mo_coeff):
     nocc = ncore + ncas
 
     hcore = kmc.get_hcore()
-    dtype = mo_coeff[0].dtype
+    dtype = np.result_type(hcore, *[mo.dtype for mo in mo_coeff])
     hcore = hcore.astype(dtype)
 
     mo_core = [mo[:, :ncore] for mo in mo_coeff]
-    mo_cas = np.asarray([mo[:, ncore:nocc] 
-                         for mo in mo_coeff], dtype=dtype)
+    mo_cas = np.asarray([mo[:, ncore:nocc] for mo in mo_coeff], dtype=dtype)
 
-    ecore = kmc.energy_nuc() #* nkpts
+    # Core energy contribution. Remember, the total energy is divided by nkpts later.
+    ecore = kmc.energy_nuc() * nkpts
     if ncore > 0:
         dm_core = np.asarray([2.0 * mo_core[k] @ mo_core[k].conj().T
                               for k in range(nkpts)], dtype=dtype)
@@ -51,6 +49,16 @@ def get_kfci_integrals(kmc, mo_coeff):
     # Two-electron integrals in k-space. The 1/nkpts factor gives the supercell normalization.
     h2e = kmf.with_df.ao2mo_7d(mo_cas, kpts=kmf.kpts)
     h2e = np.asarray(h2e, dtype=dtype) / nkpts
+
+    # k-FCI contract_2e uses the same lower-level convention as PySCF direct_spin1.contract_2e.
+    # Therefore, use the effective Hamiltonian h1 - 0.5*J and 0.5*h2.
+    j_eff = np.zeros_like(h1e)
+    for kp in range(nkpts):
+        for kq in range(nkpts):
+            j_eff[kp] += np.einsum('piis->ps', h2e[kp, kq, kq])
+
+    h1e = h1e - 0.5 * j_eff
+    h2e *= 0.5
 
     return h1e, h2e, ecore
 
@@ -100,9 +108,12 @@ h1e, h2e, ecore = get_kfci_integrals(kmc, mo_coeff)
 norb = nkpts * kmc.ncas
 nelecas = (nkpts * kmc.nelecas[0], nkpts * kmc.nelecas[1])
 
+print(f"k-RHF energy: {kmf.e_tot.real:12.8f}")
+
 for target_k in range(nkpts):
     kmc.fcisolver = ksolver(cell, nkpts=nkpts, target_k=target_k)
     kmc.fcisolver.conv_tol = 1e-10
+    kmc.fcisolver.fix_spin_(shift=0.2, ss=0.0)
     e_tot, ci = kmc.fcisolver.kernel(h1e, h2e, norb, nelecas, ecore=ecore)
     ss, smult = kmc.fcisolver.spin_square(ci, norb, nelecas)
 
@@ -110,3 +121,7 @@ for target_k in range(nkpts):
     print(f"k-FCI energy: {e_tot.real / nkpts:12.8f}")
     print(f"<S^2>       : {ss.real:12.8f}")
     print(f"2S+1        : {smult.real:12.8f}")
+
+    rdm1, rdm2 = kmc.fcisolver.make_rdm12(ci, norb, nelecas, nkpts, target_k=target_k)
+    print(f"1-RDM trace: {np.trace(rdm1).real:12.8f}")
+    print(f"2-RDM shape : {rdm2.shape}")
