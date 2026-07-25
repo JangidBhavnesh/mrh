@@ -115,7 +115,7 @@ def _load_k_contract_lib():
     return libpbcfci_k
 
 def _as_contract_map(norb, nelec, nkpts, target_k, link_index=None,
-                     contract_map=None, plan=None):
+                     contract_map=None, plan=None, need_pair_tables=False):
     if contract_map is None:
         contract_map = plan
     if contract_map is None and isinstance(link_index, KFCIContractMap):
@@ -124,13 +124,19 @@ def _as_contract_map(norb, nelec, nkpts, target_k, link_index=None,
 
     if contract_map is None:
         return make_kfci_contract_map(norb, nelec, nkpts, target_k,
-                                      link_index=link_index)
+                                      link_index=link_index,
+                                      build_pair_tables=need_pair_tables)
 
     assert contract_map.norb == int(norb)
     assert contract_map.nkpts == int(nkpts)
     assert contract_map.ncas * contract_map.nkpts == contract_map.norb
     assert contract_map.target_k == int(target_k) % int(nkpts)
     assert tuple(contract_map.nelec) == tuple(_unpack_nelec(nelec))
+    if need_pair_tables and not getattr(contract_map, "has_pair_tables", True):
+        return make_kfci_contract_map(
+            norb, nelec, nkpts, target_k,
+            link_index=contract_map.link_index,
+            build_pair_tables=True)
     return contract_map
 
 def _unpack(norb, nelec, link_index, nkpts, spin=None):
@@ -741,7 +747,8 @@ def _contract_2e_k_c_kernel(kernel_name, eri, fcivec, norb, nelec, nkpts,
 
     contract_map = _as_contract_map(
         norb, nelec, nkpts, target_k, link_index=link_index,
-        contract_map=contract_map, plan=plan)
+        contract_map=contract_map, plan=plan,
+        need_pair_tables=(kernel_name != "FCIcontract_2e_k_zgemm"))
     assert fcivec.size == contract_map.sector_size
 
     eri = np.asarray(eri, dtype=np.complex128, order="C")
