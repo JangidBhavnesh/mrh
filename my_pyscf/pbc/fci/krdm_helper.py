@@ -3,7 +3,7 @@ import numpy as np
 from pyscf.fci import cistring
 from pyscf.fci.addons import _unpack_nelec
 
-from mrh.my_pyscf.pbc.fci import kcistrings, rdm_helper
+from mrh.my_pyscf.pbc.fci import kcistrings, rdm_helper, spin_op
 
 # Author: Bhavnesh Jangid
 
@@ -90,6 +90,54 @@ def embed_ksector_ci_to_full(fcivec, norb, nelec, nkpts, target_k=0,
 
     return ci_full
 
+def extract_ksector_ci_from_full(ci_full, norb, nelec, nkpts, target_k=0,
+                                 link_index=None, spin=None):
+    '''
+    Extract a k-FCI sector vector from the full spin-string CI matrix.
+    args:
+        ci_full : ndarray, shape (nstra, nstrb)
+            Full CI matrix.
+        norb : int
+            Total number of orbitals across all k-points.
+        nelec : tuple of 2 ints
+            Number of alpha and beta electrons.
+        nkpts : int
+            Number of k-points.
+        target_k : int, optional
+            Total momentum sector.
+        link_index : tuple of 2 ndarrays or None
+            k-aware link tables.
+        spin : int or None
+            Spin value passed to _unpack_nelec.
+    returns:
+        fcivec : ndarray, shape (sector_size,)
+            CI vector in the target momentum sector.
+    '''
+    neleca, nelecb = _unpack_nelec(nelec, spin)
+    target_k = int(target_k) % nkpts
+
+    link_indexa, link_indexb = _unpack_k(norb, (neleca, nelecb), nkpts,
+                                         link_index=link_index, spin=spin)
+    straid_k, strbid_k = kcistrings.gen_k_sector_maps(
+        link_indexa, link_indexb, nkpts)[:2]
+    blocks = kcistrings.gen_k_sector_linkstr_info(
+        link_indexa, link_indexb, nkpts, target_k)
+
+    ci_full = np.asarray(ci_full)
+    sector_size = int(blocks[:, 5].sum()) if blocks.size else 0
+    fcivec = np.zeros(sector_size, dtype=ci_full.dtype)
+
+    for blk in blocks:
+        ka, kb, nstra_k, nstrb_k, offset, size = map(int, blk)
+
+        astrs = straid_k[ka]
+        bstrs = strbid_k[kb]
+
+        ci_blk = ci_full[np.ix_(astrs, bstrs)]
+        fcivec[offset:offset + size] = ci_blk.reshape(-1)
+
+    return fcivec
+
 def make_rdm1s_py(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
                   spin=None):
     '''
@@ -140,3 +188,30 @@ def make_rdm12_py(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
     rdm2 = dm2aa + dm2bb + dm2ab + dm2ab.transpose(2, 3, 0, 1)
     return rdm1.conj().T, rdm2
 
+def contract_ss(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
+                spin=None):
+    '''
+    Apply S^2 to a k-FCI vector in a fixed total momentum sector.
+    The S^2 operator does not change the spatial total momentum sector, so the
+    full-space result is extracted back to the same k sector.
+    '''
+    ci_full = embed_ksector_ci_to_full(fcivec, norb, nelec, nkpts,
+                                       target_k=target_k,
+                                       link_index=link_index, spin=spin)
+    ci_full = np.asarray(ci_full, dtype=np.complex128, order="C")
+    ci1_full = spin_op.contract_ss0(ci_full, norb, _unpack_nelec(nelec, spin))
+    return extract_ksector_ci_from_full(ci1_full, norb, nelec, nkpts,
+                                        target_k=target_k,
+                                        link_index=link_index, spin=spin)
+
+def spin_square(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
+                spin=None, **kwargs):
+    '''
+    Spin square for a k-FCI vector in a fixed total momentum sector.
+    '''
+    ci_full = embed_ksector_ci_to_full(fcivec, norb, nelec, nkpts,
+                                       target_k=target_k,
+                                       link_index=link_index, spin=spin)
+    ci_full = np.asarray(ci_full, dtype=np.complex128, order="C")
+    return spin_op.spin_square0(ci_full, norb, _unpack_nelec(nelec, spin),
+                                **kwargs)
