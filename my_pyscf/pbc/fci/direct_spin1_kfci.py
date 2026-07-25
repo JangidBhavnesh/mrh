@@ -1,7 +1,11 @@
 import numpy as np
+import scipy.linalg
+import warnings
 
+from pyscf import lib
+from pyscf.fci import direct_spin1
 from pyscf.fci.addons import _unpack_nelec
-from mrh.my_pyscf.pbc.fci import rdm_helper, kcistrings
+from mrh.my_pyscf.pbc.fci import rdm_helper, kcistrings, krdm_helper
 
 
 from mrh.my_pyscf.pbc.fci.kcistrings import gen_k_sector_linkstr_info, gen_k_sector_maps, build_k_links_spin
@@ -12,6 +16,11 @@ from mrh.my_pyscf.pbc.fci.kcistrings import gen_k_sector_linkstr_info, gen_k_sec
 '''
 Implementation of k-FCI.
 '''
+
+logger = lib.logger
+
+HDIAG_IMAG_TOL = 1e-3
+HERMI_THRESH = 1e-8
 
 def _unpack(norb, nelec, link_index, nkpts, spin=None):
     assert norb % nkpts == 0
@@ -587,6 +596,473 @@ def contract_2e_k(eri, fcivec, norb, nelec, nkpts, target_k, link_index=None):
         contract_bb_pairs(eri, ci0_blocks, ci1_blocks, bb_pairs, ka, kb)
 
     return sigma_ci
+
+def sector_size(norb, nelec, nkpts, target_k=0, link_index=None):
+    '''
+    Number of determinants in a fixed total momentum sector.
+    args:
+        norb : int
+            Total number of active orbitals across all k-points.
+        nelec : tuple of 2 ints
+            Number of alpha and beta electrons.
+        nkpts : int
+            Number of k-points.
+        target_k : int, optional
+            Total momentum sector.
+        link_index : tuple of 2 ndarrays or None
+            k-aware link indices. If None, they are generated on the fly.
+    returns:
+        ndet_k : int
+            Number of determinants in the target momentum sector.
+    '''
+    link_indexa, link_indexb = _unpack(norb, nelec, link_index, nkpts)
+    blocks = gen_k_sector_linkstr_info(link_indexa, link_indexb, nkpts, target_k)
+    if blocks.size == 0:
+        return 0
+    return int(blocks[:, 5].sum())
+
+def contract_ham_k(h1e, eri, fcivec, norb, nelec, nkpts, target_k=0,
+                   link_index=None):
+    '''
+    Contract the k-FCI Hamiltonian with a CI vector.
+    Currently, I am keeping the one-electron and two-electron
+    Hamiltonian contractions separate. I am not absorbing h1e into the
+    two-electron Hamiltonian here.
+
+    args:
+        h1e : ndarray, shape (nkpts, norb_k, norb_k)
+            One-electron Hamiltonian in k-space.
+        eri : ndarray, shape (nkpts, nkpts, nkpts, norb_k, norb_k, norb_k, norb_k)
+            Two-electron Hamiltonian in k-space and in the same convention as
+            contract_2e_k.
+        fcivec : ndarray, shape (sector_size,)
+            k-FCI vector in the target momentum sector.
+        norb : int
+            Total number of active orbitals across all k-points.
+        nelec : tuple of 2 ints
+            Number of alpha and beta electrons.
+        nkpts : int
+            Number of k-points.
+        target_k : int, optional
+            Total momentum sector.
+        link_index : tuple of 2 ndarrays or None
+            k-aware link indices. If None, they are generated on the fly.
+    returns:
+        sigma_ci : ndarray, shape (sector_size,)
+            Result of applying H to fcivec.
+    '''
+    dtype = np.result_type(h1e, eri, fcivec)
+    fcivec = np.asarray(fcivec, dtype=dtype, order="C")
+    link_index = _unpack(norb, nelec, link_index, nkpts)
+
+    sigma_ci = contract_1e_k(h1e, fcivec, norb, nelec, nkpts, target_k,
+                             link_index=link_index)
+    sigma_ci += contract_2e_k(eri, fcivec, norb, nelec, nkpts, target_k,
+                              link_index=link_index)
+    return sigma_ci
+
+def make_hdiag(h1e, eri, norb, nelec, nkpts, target_k=0, link_index=None):
+    '''
+    Diagonal of the k-FCI Hamiltonian in a fixed total momentum sector.
+    This is a pure Python implementation for now. The diagonal is computed by
+    applying the separated Hamiltonian contractions to each determinant basis
+    vector and reading back the matching diagonal element.
+    '''
+    link_index = _unpack(norb, nelec, link_index, nkpts)
+    ndet = sector_size(norb, nelec, nkpts, target_k, link_index=link_index)
+    dtype = np.result_type(h1e, eri)
+    hdiag = np.empty(ndet, dtype=dtype)
+
+    for i in range(ndet):
+        ci0 = np.zeros(ndet, dtype=dtype)
+        ci0[i] = 1.0
+        sigma = contract_ham_k(h1e, eri, ci0, norb, nelec, nkpts, target_k,
+                               link_index=link_index)
+        hdiag[i] = sigma[i]
+
+    return hdiag
+
+def get_init_guess_k(norb, nelec, nkpts, target_k, nroots, hdiag):
+    '''
+    Get initial guess vectors for k-FCI in a fixed total momentum sector.
+    The guesses are determinant basis vectors corresponding to the lowest
+    diagonal Hamiltonian elements.
+    '''
+    hdiag = np.asarray(hdiag)
+    ndet = hdiag.size
+    nroots = min(int(nroots), ndet)
+    dtype = hdiag.dtype
+
+    if nroots == 0:
+        return []
+
+    try:
+        addr = np.argpartition(hdiag.real, nroots - 1)[:nroots]
+        addr = addr[np.argsort(hdiag.real[addr], kind="stable")]
+    except AttributeError:
+        addr = np.argsort(hdiag.real, kind="stable")[:nroots]
+
+    ci0 = []
+    for i in range(nroots):
+        x = np.zeros(ndet, dtype=dtype)
+        x[int(addr[i])] = 1.0
+        ci0.append(x)
+    return ci0
+
+def make_hamiltonian_k(h1e, eri, norb, nelec, nkpts, target_k=0,
+                       link_index=None):
+    '''
+    Construct the explicit k-FCI Hamiltonian in a fixed total momentum sector.
+    This routine is intended for small determinant spaces and for debugging.
+    For large spaces, kernel_ms1 uses Davidson with contract_ham_k instead.
+    '''
+    link_index = _unpack(norb, nelec, link_index, nkpts)
+    ndet = sector_size(norb, nelec, nkpts, target_k, link_index=link_index)
+    dtype = np.result_type(h1e, eri)
+    hmat = np.empty((ndet, ndet), dtype=dtype, order="F")
+
+    for i in range(ndet):
+        ci0 = np.zeros(ndet, dtype=dtype)
+        ci0[i] = 1.0
+        hmat[:, i] = contract_ham_k(h1e, eri, ci0, norb, nelec, nkpts,
+                                    target_k, link_index=link_index)
+
+    return hmat
+
+def energy(h1e, eri, fcivec, norb, nelec, nkpts, target_k=0, link_index=None):
+    '''
+    Compute the k-FCI electronic energy for a CI vector.
+    The one-electron and two-electron Hamiltonian contractions are evaluated
+    separately; h1e is not absorbed into eri.
+    '''
+    ci0 = np.asarray(fcivec)
+    sigma = contract_ham_k(h1e, eri, ci0, norb, nelec, nkpts, target_k,
+                           link_index=link_index)
+    return np.vdot(ci0, sigma)
+
+def make_rdm1s_py(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
+                  spin=None):
+    '''
+    Python implementation of spin-separated 1-RDMs for a k-FCI vector.
+    '''
+    return krdm_helper.make_rdm1s_py(fcivec, norb, nelec, nkpts,
+                                     target_k=target_k,
+                                     link_index=link_index, spin=spin)
+
+def make_rdm1_py(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
+                 spin=None):
+    '''
+    Python implementation of spin-summed 1-RDM for a k-FCI vector.
+    '''
+    return krdm_helper.make_rdm1_py(fcivec, norb, nelec, nkpts,
+                                    target_k=target_k,
+                                    link_index=link_index, spin=spin)
+
+def make_rdm12s_py(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
+                   reorder=True, spin=None):
+    '''
+    Python implementation of spin-separated 1-RDMs and 2-RDMs for a k-FCI vector.
+    '''
+    return krdm_helper.make_rdm12s_py(fcivec, norb, nelec, nkpts,
+                                      target_k=target_k,
+                                      link_index=link_index,
+                                      reorder=reorder, spin=spin)
+
+def make_rdm12_py(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
+                  reorder=True, spin=None):
+    '''
+    Python implementation of spin-summed 1-RDM and 2-RDM for a k-FCI vector.
+    '''
+    return krdm_helper.make_rdm12_py(fcivec, norb, nelec, nkpts,
+                                     target_k=target_k,
+                                     link_index=link_index,
+                                     reorder=reorder, spin=spin)
+
+def _make_diag_precond(hdiag, level_shift=1e-3):
+    '''
+    Diagonal preconditioner for the Davidson solver.
+    '''
+    hdiag = np.asarray(hdiag)
+    if np.iscomplexobj(hdiag) and np.max(np.abs(hdiag.imag)) > HDIAG_IMAG_TOL:
+        warnings.warn("The k-FCI Hamiltonian diagonal has non-negligible "
+                      "imaginary parts: max |Im(hdiag)| = "
+                      f"{np.max(np.abs(hdiag.imag))}.")
+
+    def precond(dx, e, *args):
+        diagd = hdiag - (np.real(e) - level_shift)
+        diagd = diagd.astype(hdiag.dtype, copy=True)
+        diagd[np.abs(diagd) < 1e-8] = 1e-8
+        return dx / diagd
+
+    return precond
+
+def make_diag_precond(hdiag, pspaceig=None, pspaceci=None, addr=None,
+                      level_shift=0):
+    '''
+    Wrapper to match the PySCF direct_spin1 preconditioner interface.
+    '''
+    return _make_diag_precond(hdiag, level_shift)
+
+def kernel_ms1(fci, h1e, eri, norb, nelec, nkpts, target_k=0, ci0=None,
+               link_index=None, tol=None, lindep=None, max_cycle=None,
+               max_space=None, nroots=None, davidson_only=None,
+               pspace_size=None, max_memory=None, verbose=None, ecore=0,
+               **kwargs):
+    '''
+    k-FCI kernel in a fixed total momentum sector.
+    This follows the direct_spin1 control flow: construct the explicit
+    Hamiltonian for small spaces when memory allows, otherwise use Davidson.
+    The Hamiltonian-vector product is contract_1e_k + contract_2e_k; no
+    absorb_h1e step is used.
+    '''
+    if nroots is None: nroots = fci.nroots
+    if davidson_only is None: davidson_only = fci.davidson_only
+    if pspace_size is None: pspace_size = fci.pspace_size
+    if max_memory is None: max_memory = fci.max_memory - lib.current_memory()[0]
+
+    log = logger.new_logger(fci, verbose)
+    nelec = _unpack_nelec(nelec, fci.spin)
+    target_k = int(target_k) % nkpts
+    link_index = _unpack(norb, nelec, link_index, nkpts, spin=fci.spin)
+
+    assert norb % nkpts == 0
+    ncas = norb // nkpts
+    assert h1e.shape == (nkpts, ncas, ncas)
+    assert eri.shape == (nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas)
+
+    hdiag = fci.make_hdiag(h1e, eri, norb, nelec, nkpts, target_k,
+                           link_index=link_index).ravel()
+    civec_size = hdiag.size
+
+    if civec_size == 0:
+        raise RuntimeError(f"No determinants in k-FCI sector target_k={target_k}.")
+
+    nroots = min(int(nroots), civec_size)
+    hmat_mem = civec_size * civec_size * np.dtype(hdiag.dtype).itemsize * 1e-6
+    min_davidson_mem = civec_size * 6 * np.dtype(hdiag.dtype).itemsize * 1e-6
+
+    if max_memory < min_davidson_mem:
+        log.warn("Not enough memory for k-FCI solver. "
+                 "The minimal Davidson requirement is %.0f MB",
+                 min_davidson_mem)
+
+    do_direct = ((not davidson_only)
+                 and civec_size <= pspace_size
+                 and hmat_mem < max_memory)
+
+    if do_direct:
+        hmat = fci.make_hamiltonian(h1e, eri, norb, nelec, nkpts, target_k,
+                                    link_index=link_index)
+        e, c = fci.eig(hmat)
+        e = e[:nroots]
+        if nroots == 1:
+            c = c[:, 0]
+            e = e[0]
+        else:
+            c = c[:, :nroots].T
+        return e + ecore, c
+
+    precond = fci.make_precond(hdiag)
+
+    cpu0 = [logger.process_clock(), logger.perf_counter()]
+    def hop(c):
+        hc = fci.contract_ham(h1e, eri, c, norb, nelec, nkpts, target_k,
+                              link_index=link_index)
+        cpu0[:] = log.timer_debug1("contract_ham_k", *cpu0)
+        return hc.ravel()
+
+    def init_guess():
+        return fci.get_init_guess(norb, nelec, nkpts, target_k, nroots, hdiag)
+
+    if ci0 is None:
+        ci0 = init_guess
+    elif not callable(ci0):
+        if isinstance(ci0, np.ndarray):
+            ci0 = [ci0.ravel()]
+        else:
+            ci0 = [x.ravel() for x in ci0]
+        if len(ci0) < nroots:
+            ci0.extend(init_guess()[len(ci0):])
+
+    if tol is None: tol = fci.conv_tol
+    if lindep is None: lindep = fci.lindep
+    if max_cycle is None: max_cycle = fci.max_cycle
+    if max_space is None: max_space = fci.max_space
+    tol_residual = getattr(fci, "conv_tol_residual", None)
+
+    with lib.with_omp_threads(fci.threads):
+        e, c = fci.eig(hop, ci0, precond, tol=tol, lindep=lindep,
+                       max_cycle=max_cycle, max_space=max_space,
+                       nroots=nroots, max_memory=max_memory, verbose=log,
+                       follow_state=True, tol_residual=tol_residual,
+                       **kwargs)
+    return e + ecore, c
+
+class FCISolver(direct_spin1.FCISolver):
+    '''
+    k-FCI solver for periodic active spaces.
+    This solver works in one total momentum sector at a time. The CI vector is
+    stored only for that sector, using the k-aware link tables generated by
+    kcistrings.py.
+    '''
+    def __init__(self, *args, **kwargs):
+        nkpts = kwargs.pop("nkpts", None)
+        target_k = kwargs.pop("target_k", 0)
+        direct_spin1.FCISolver.__init__(self, *args, **kwargs)
+        self.nkpts = nkpts
+        self.target_k = target_k
+        self.davidson_only = False
+
+    def contract_1e(self, h1e, fcivec, norb, nelec, nkpts=None,
+                    target_k=None, link_index=None):
+        if nkpts is None: nkpts = self.nkpts
+        if target_k is None: target_k = self.target_k
+        return contract_1e_k(h1e, fcivec, norb, nelec, nkpts, target_k,
+                             link_index=link_index)
+
+    def contract_2e(self, eri, fcivec, norb, nelec, nkpts=None,
+                    target_k=None, link_index=None):
+        if nkpts is None: nkpts = self.nkpts
+        if target_k is None: target_k = self.target_k
+        return contract_2e_k(eri, fcivec, norb, nelec, nkpts, target_k,
+                             link_index=link_index)
+
+    def contract_ham(self, h1e, eri, fcivec, norb, nelec, nkpts=None,
+                     target_k=None, link_index=None):
+        if nkpts is None: nkpts = self.nkpts
+        if target_k is None: target_k = self.target_k
+        return contract_ham_k(h1e, eri, fcivec, norb, nelec, nkpts, target_k,
+                              link_index=link_index)
+
+    def make_hdiag(self, h1e, eri, norb, nelec, nkpts=None, target_k=None,
+                   link_index=None, compress=False):
+        if nkpts is None: nkpts = self.nkpts
+        if target_k is None: target_k = self.target_k
+        nelec = _unpack_nelec(nelec, self.spin)
+        return make_hdiag(h1e, eri, norb, nelec, nkpts, target_k,
+                          link_index=link_index)
+
+    def make_hamiltonian(self, h1e, eri, norb, nelec, nkpts=None,
+                         target_k=None, link_index=None):
+        if nkpts is None: nkpts = self.nkpts
+        if target_k is None: target_k = self.target_k
+        nelec = _unpack_nelec(nelec, self.spin)
+        return make_hamiltonian_k(h1e, eri, norb, nelec, nkpts, target_k,
+                                  link_index=link_index)
+
+    def energy(self, h1e, eri, fcivec, norb, nelec, nkpts=None,
+               target_k=None, link_index=None):
+        if nkpts is None: nkpts = self.nkpts
+        if target_k is None: target_k = self.target_k
+        nelec = _unpack_nelec(nelec, self.spin)
+        return energy(h1e, eri, fcivec, norb, nelec, nkpts, target_k,
+                      link_index=link_index)
+
+    def make_rdm1s_py(self, fcivec, norb, nelec, nkpts=None, target_k=None,
+                      link_index=None):
+        if nkpts is None: nkpts = self.nkpts
+        if target_k is None: target_k = self.target_k
+        nelec = _unpack_nelec(nelec, self.spin)
+        return make_rdm1s_py(fcivec, norb, nelec, nkpts, target_k,
+                             link_index=link_index, spin=self.spin)
+
+    def make_rdm1_py(self, fcivec, norb, nelec, nkpts=None, target_k=None,
+                     link_index=None):
+        if nkpts is None: nkpts = self.nkpts
+        if target_k is None: target_k = self.target_k
+        nelec = _unpack_nelec(nelec, self.spin)
+        return make_rdm1_py(fcivec, norb, nelec, nkpts, target_k,
+                            link_index=link_index, spin=self.spin)
+
+    def make_rdm12s_py(self, fcivec, norb, nelec, nkpts=None, target_k=None,
+                       link_index=None, reorder=True):
+        if nkpts is None: nkpts = self.nkpts
+        if target_k is None: target_k = self.target_k
+        nelec = _unpack_nelec(nelec, self.spin)
+        return make_rdm12s_py(fcivec, norb, nelec, nkpts, target_k,
+                              link_index=link_index, reorder=reorder,
+                              spin=self.spin)
+
+    def make_rdm12_py(self, fcivec, norb, nelec, nkpts=None, target_k=None,
+                      link_index=None, reorder=True):
+        if nkpts is None: nkpts = self.nkpts
+        if target_k is None: target_k = self.target_k
+        nelec = _unpack_nelec(nelec, self.spin)
+        return make_rdm12_py(fcivec, norb, nelec, nkpts, target_k,
+                             link_index=link_index, reorder=reorder,
+                             spin=self.spin)
+
+    def make_rdm1s(self, fcivec, norb, nelec, nkpts=None, target_k=None,
+                   link_index=None):
+        return self.make_rdm1s_py(fcivec, norb, nelec, nkpts=nkpts,
+                                  target_k=target_k, link_index=link_index)
+
+    def make_rdm1(self, fcivec, norb, nelec, nkpts=None, target_k=None,
+                  link_index=None):
+        return self.make_rdm1_py(fcivec, norb, nelec, nkpts=nkpts,
+                                 target_k=target_k, link_index=link_index)
+
+    def make_rdm12s(self, fcivec, norb, nelec, nkpts=None, target_k=None,
+                    link_index=None, reorder=True):
+        return self.make_rdm12s_py(fcivec, norb, nelec, nkpts=nkpts,
+                                   target_k=target_k, link_index=link_index,
+                                   reorder=reorder)
+
+    def make_rdm12(self, fcivec, norb, nelec, nkpts=None, target_k=None,
+                   link_index=None, reorder=True):
+        return self.make_rdm12_py(fcivec, norb, nelec, nkpts=nkpts,
+                                  target_k=target_k, link_index=link_index,
+                                  reorder=reorder)
+
+    def make_precond(self, hdiag, pspaceig=None, pspaceci=None, addr=None):
+        return make_diag_precond(hdiag, pspaceig, pspaceci, addr,
+                                 self.level_shift)
+
+    def get_init_guess(self, norb, nelec, nkpts, target_k, nroots, hdiag):
+        return get_init_guess_k(norb, nelec, nkpts, target_k, nroots, hdiag)
+
+    def kernel(self, h1e, eri, norb, nelec, ci0=None, nkpts=None,
+               target_k=None, tol=None, lindep=None, max_cycle=None,
+               max_space=None, nroots=None, davidson_only=None,
+               pspace_size=None, orbsym=None, wfnsym=None, ecore=0,
+               **kwargs):
+        if nkpts is None:
+            nkpts = self.nkpts
+        if nkpts is None:
+            nkpts = h1e.shape[0]
+        if target_k is None:
+            target_k = self.target_k
+
+        link_index = _unpack(norb, nelec, None, nkpts, spin=self.spin)
+        e, c = kernel_ms1(self, h1e, eri, norb, nelec, nkpts, target_k,
+                          ci0=ci0, link_index=link_index, tol=tol,
+                          lindep=lindep, max_cycle=max_cycle,
+                          max_space=max_space, nroots=nroots,
+                          davidson_only=davidson_only,
+                          pspace_size=pspace_size, ecore=ecore, **kwargs)
+        self.eci, self.ci = e, c
+        return e, c
+
+    def eig(self, op, x0=None, precond=None, **kwargs):
+        if isinstance(op, np.ndarray):
+            hermi_err = np.linalg.norm(op - op.conj().T)
+            if hermi_err < HERMI_THRESH:
+                self.converged = True
+                return scipy.linalg.eigh(op)
+            self.converged = True
+            return scipy.linalg.eig(op)
+
+        self.converged, e, ci = \
+                lib.davidson1(lambda xs: [op(x) for x in xs],
+                              x0, precond, lessio=self.lessio, **kwargs)
+
+        if kwargs.get("nroots", 1) == 1:
+            self.converged = self.converged[0]
+            e = e[0]
+            ci = ci[0]
+        return e, ci
+
+FCI = FCISolver
 
 if __name__ == '__main__':
     
