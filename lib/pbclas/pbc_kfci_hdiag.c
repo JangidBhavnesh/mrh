@@ -108,12 +108,13 @@ static void add_one_electron_hdiag(double complex *hdiag,
                                    int *linka, int nlinka,
                                    int *linkb, int nlinkb,
                                    int *stra_ids, int *stra_offsets,
-                                   int *strb_ids, int *strb_offsets)
+                                   int *strb_ids, int *strb_offsets,
+                                   int dk_zero)
 {
 #pragma omp parallel for schedule(static) default(none) if(nblocks > 16) \
         shared(hdiag, h1e, nkpts, ncas, nblocks, blocks, \
                linka, nlinka, linkb, nlinkb, \
-               stra_ids, stra_offsets, strb_ids, strb_offsets)
+               stra_ids, stra_offsets, strb_ids, strb_offsets, dk_zero)
         for (int iblk = 0; iblk < nblocks; iblk++) {
                 int *blk = blocks + iblk * 6;
                 int ka = blk[BLOCK_KA];
@@ -140,7 +141,7 @@ static void add_one_electron_hdiag(double complex *hdiag,
                                 int k_cre = link[LINK_K_CRE] % nkpts;
                                 int k_des = link[LINK_K_DES] % nkpts;
                                 int dk = link[LINK_DK] % nkpts;
-                                if (k_cre != k_des || dk != 0) {
+                                if (k_cre != k_des || dk != dk_zero) {
                                         continue;
                                 }
 
@@ -173,7 +174,7 @@ static void add_one_electron_hdiag(double complex *hdiag,
                                 int k_cre = link[LINK_K_CRE] % nkpts;
                                 int k_des = link[LINK_K_DES] % nkpts;
                                 int dk = link[LINK_DK] % nkpts;
-                                if (k_cre != k_des || dk != 0) {
+                                if (k_cre != k_des || dk != dk_zero) {
                                         continue;
                                 }
 
@@ -249,7 +250,8 @@ static void add_same_spin_hdiag(double complex *hdiag,
                                 int *src_addr,
                                 int *dst_addr,
                                 int *sign,
-                                long long *eri_idx)
+                                long long *eri_idx,
+                                int dk_zero)
 {
         int table_size = nkpts * nkpts;
 
@@ -311,7 +313,8 @@ static void add_ab_hdiag_scalar_block(double complex *hdiag,
                                       int *stra_ids,
                                       int *stra_offsets,
                                       int *strb_ids,
-                                      int *strb_offsets)
+                                      int *strb_offsets,
+                                      int dk_zero)
 {
         int *blk = blocks + iblk * 6;
         int ka = blk[BLOCK_KA];
@@ -335,7 +338,7 @@ static void add_ab_hdiag_scalar_block(double complex *hdiag,
                                         break;
                                 }
                                 if (la[LINK_TARGET] != astr0 ||
-                                    mod_pos(la[LINK_DK], nkpts) != 0 ||
+                                    mod_pos(la[LINK_DK], nkpts) != dk_zero ||
                                     mod_pos(la[LINK_K_CRE], nkpts) !=
                                     mod_pos(la[LINK_K_DES], nkpts)) {
                                         continue;
@@ -354,7 +357,7 @@ static void add_ab_hdiag_scalar_block(double complex *hdiag,
                                                 break;
                                         }
                                         if (lb[LINK_TARGET] != bstr0 ||
-                                            mod_pos(lb[LINK_DK], nkpts) != 0 ||
+                                            mod_pos(lb[LINK_DK], nkpts) != dk_zero ||
                                             mod_pos(lb[LINK_K_CRE], nkpts) !=
                                             mod_pos(lb[LINK_K_DES], nkpts)) {
                                                 continue;
@@ -397,6 +400,7 @@ void FCIhdiag_k(double complex *hdiag,
                 int *linkb, int nlinkb,
                 int *stra_ids, int *stra_offsets,
                 int *strb_ids, int *strb_offsets,
+                int dk_zero,
                 int *ab_group_tab,
                 int *ab_group_offsets,
                 int *ab_src_addr,
@@ -439,7 +443,7 @@ void FCIhdiag_k(double complex *hdiag,
         add_one_electron_hdiag(hdiag, h1e, nkpts, ncas, nblocks, blocks,
                                linka, nlinka, linkb, nlinkb,
                                stra_ids, stra_offsets,
-                               strb_ids, strb_offsets);
+                               strb_ids, strb_offsets, dk_zero);
         add_ab_hdiag(hdiag, eri, nkpts, block_offset,
                      ab_group_tab, ab_group_offsets,
                      ab_src_addr, ab_dst_addr, ab_sign,
@@ -447,11 +451,13 @@ void FCIhdiag_k(double complex *hdiag,
         add_same_spin_hdiag(hdiag, eri, nkpts, 1, block_offset,
                             block_na, block_nb,
                             aa_group_tab, aa_group_offsets,
-                            aa_src_addr, aa_dst_addr, aa_sign, aa_eri_idx);
+                            aa_src_addr, aa_dst_addr, aa_sign, aa_eri_idx,
+                            dk_zero);
         add_same_spin_hdiag(hdiag, eri, nkpts, 0, block_offset,
                             block_na, block_nb,
                             bb_group_tab, bb_group_offsets,
-                            bb_src_addr, bb_dst_addr, bb_sign, bb_eri_idx);
+                            bb_src_addr, bb_dst_addr, bb_sign, bb_eri_idx,
+                            dk_zero);
 
         free(block_offset);
         free(block_na);
@@ -465,7 +471,8 @@ void FCIhdiag_k_stream_ab(double complex *hdiag,
                           int *linka, int nlinka,
                           int *linkb, int nlinkb,
                           int *stra_ids, int *stra_offsets,
-                          int *strb_ids, int *strb_offsets)
+                          int *strb_ids, int *strb_offsets,
+                          int dk_zero)
 {
         const char TRANS_N = 'N';
         const char TRANS_T = 'T';
@@ -478,13 +485,14 @@ void FCIhdiag_k_stream_ab(double complex *hdiag,
         if (wmat == NULL) {
 #pragma omp parallel for schedule(dynamic) default(none) \
         shared(hdiag, eri, nkpts, ncas, nblocks, blocks, linka, nlinka, \
-               linkb, nlinkb, stra_ids, stra_offsets, strb_ids, strb_offsets)
+               linkb, nlinkb, stra_ids, stra_offsets, strb_ids, strb_offsets, \
+               dk_zero)
                 for (int iblk = 0; iblk < nblocks; iblk++) {
                         add_ab_hdiag_scalar_block(
                                 hdiag, eri, nkpts, ncas, blocks, iblk,
                                 linka, nlinka, linkb, nlinkb,
                                 stra_ids, stra_offsets,
-                                strb_ids, strb_offsets);
+                                strb_ids, strb_offsets, dk_zero);
                 }
                 return;
         }
@@ -507,7 +515,7 @@ void FCIhdiag_k_stream_ab(double complex *hdiag,
 #pragma omp parallel for schedule(dynamic) default(none) \
         shared(hdiag, eri, wmat, nkpts, ncas, norb, nblocks, blocks, linka, \
                nlinka, linkb, nlinkb, stra_ids, stra_offsets, strb_ids, \
-               strb_offsets, TRANS_N, TRANS_T, Z0, Z1)
+               strb_offsets, TRANS_N, TRANS_T, Z0, Z1, dk_zero)
         for (int iblk = 0; iblk < nblocks; iblk++) {
                 int *blk = blocks + iblk * 6;
                 int ka = blk[BLOCK_KA];
@@ -530,7 +538,7 @@ void FCIhdiag_k_stream_ab(double complex *hdiag,
                                 hdiag, eri, nkpts, ncas, blocks, iblk,
                                 linka, nlinka, linkb, nlinkb,
                                 stra_ids, stra_offsets,
-                                strb_ids, strb_offsets);
+                                strb_ids, strb_offsets, dk_zero);
                         continue;
                 }
 
@@ -550,7 +558,7 @@ void FCIhdiag_k_stream_ab(double complex *hdiag,
                                         break;
                                 }
                                 if (link[LINK_TARGET] != astr0 ||
-                                    mod_pos(link[LINK_DK], nkpts) != 0 ||
+                                    mod_pos(link[LINK_DK], nkpts) != dk_zero ||
                                     mod_pos(link[LINK_K_CRE], nkpts) !=
                                     mod_pos(link[LINK_K_DES], nkpts)) {
                                         continue;
@@ -576,7 +584,7 @@ void FCIhdiag_k_stream_ab(double complex *hdiag,
                                         break;
                                 }
                                 if (link[LINK_TARGET] != bstr0 ||
-                                    mod_pos(link[LINK_DK], nkpts) != 0 ||
+                                    mod_pos(link[LINK_DK], nkpts) != dk_zero ||
                                     mod_pos(link[LINK_K_CRE], nkpts) !=
                                     mod_pos(link[LINK_K_DES], nkpts)) {
                                         continue;

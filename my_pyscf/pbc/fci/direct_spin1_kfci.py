@@ -82,6 +82,7 @@ def _load_k_contract_lib():
             ctypes.c_void_p,
             ctypes.c_void_p,
             ctypes.c_void_p,
+            ctypes.c_int,
         ]
         libpbcfci_k.FCIcontract_1e_k.restype = None
         libpbcfci_k.FCIcontract_2e_k.argtypes = [
@@ -150,6 +151,7 @@ def _load_k_contract_lib():
             ctypes.c_void_p,  # stra_offsets
             ctypes.c_void_p,  # strb_ids
             ctypes.c_void_p,  # strb_offsets
+            ctypes.c_int,     # dk_zero
             ctypes.c_void_p,  # ab_group_tab
             ctypes.c_void_p,  # ab_group_offsets
             ctypes.c_void_p,  # ab_src_addr
@@ -186,6 +188,7 @@ def _load_k_contract_lib():
             ctypes.c_void_p,  # stra_offsets
             ctypes.c_void_p,  # strb_ids
             ctypes.c_void_p,  # strb_offsets
+            ctypes.c_int,     # dk_zero
         ]
         libpbcfci_k.FCIhdiag_k_stream_ab.restype = None
         _timer_debug1(None, "k-FCI load C contract library", t0)
@@ -482,6 +485,7 @@ def contract_1e_k(h1e, fcivec, norb, nelec, nkpts, kindx,
             contract_map.strb_offsets.ctypes.data_as(ctypes.c_void_p),
             contract_map.str2tot_a.ctypes.data_as(ctypes.c_void_p),
             contract_map.str2tot_b.ctypes.data_as(ctypes.c_void_p),
+            ctypes.c_int(contract_map.kmom.zero),
         )
     _timer_debug1(log_obj, "k-FCI contract_1e C kernel", t0)
     return sigma_ci
@@ -986,6 +990,7 @@ def make_hdiag(h1e, eri, norb, nelec, nkpts, target_k=0, link_index=None,
             contract_map.stra_offsets.ctypes.data_as(ctypes.c_void_p),
             contract_map.strb_ids.ctypes.data_as(ctypes.c_void_p),
             contract_map.strb_offsets.ctypes.data_as(ctypes.c_void_p),
+            ctypes.c_int(contract_map.kmom.zero),
             contract_map.ab_group_tab.ctypes.data_as(ctypes.c_void_p),
             contract_map.ab_group_offsets.ctypes.data_as(ctypes.c_void_p),
             contract_map.ab_src_addr.ctypes.data_as(ctypes.c_void_p),
@@ -1022,6 +1027,7 @@ def make_hdiag(h1e, eri, norb, nelec, nkpts, target_k=0, link_index=None,
                 contract_map.stra_offsets.ctypes.data_as(ctypes.c_void_p),
                 contract_map.strb_ids.ctypes.data_as(ctypes.c_void_p),
                 contract_map.strb_offsets.ctypes.data_as(ctypes.c_void_p),
+                ctypes.c_int(contract_map.kmom.zero),
             )
     _timer_debug1(log_obj, "k-FCI make_hdiag C kernel", t0)
     return hdiag
@@ -1975,18 +1981,20 @@ if __name__ == '__main__':
         def eri_k_to_full(eri_k):
             nkpts, ncas = eri_k.shape[0], eri_k.shape[-1]
             norb = nkpts * ncas
+            kmom = kcistrings.make_kpoint_momentum(nkpts)
             eri_full = np.zeros((norb, norb, norb, norb), dtype=eri_k.dtype)
             for kp, kq, kr in np.ndindex(nkpts, nkpts, nkpts):
-                ks = (kp - kq + kr) % nkpts
+                ks = int(kmom.kconserv[kp, kq, kr])
                 P, Q, R, S = kp * ncas, kq * ncas, kr * ncas, ks * ncas
                 eri_full[P:P + ncas, Q:Q + ncas, R:R + ncas, S:S + ncas] = eri_k[kp, kq, kr]
             return eri_full
         
         def eri_full_to_k(eri_full, nkpts, ncas):
             ef = eri_full.reshape(nkpts, ncas, nkpts, ncas, nkpts, ncas, nkpts, ncas)
+            kmom = kcistrings.make_kpoint_momentum(nkpts)
             eri_k = np.zeros((nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas), dtype=eri_full.dtype)
             for kp, kq, kr in np.ndindex(nkpts, nkpts, nkpts):
-                ks = (kp - kq + kr) % nkpts
+                ks = int(kmom.kconserv[kp, kq, kr])
                 eri_k[kp, kq, kr] = ef[kp, :, kq, :, kr, :, ks, :]
             return eri_k
       

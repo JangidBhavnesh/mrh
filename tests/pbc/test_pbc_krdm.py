@@ -8,6 +8,7 @@ from pyscf import fci
 from mrh.my_pyscf.pbc.fci import direct_spin1_cplx
 from mrh.my_pyscf.pbc.fci import direct_spin1_kfci
 from mrh.my_pyscf.pbc.fci import krdm_helper
+from mrh.my_pyscf.pbc.fci import kcistrings
 from mrh.my_pyscf.pbc.fci.direct_spin1_kfci import _unpack
 from mrh.my_pyscf.pbc.fci.kcistrings import gen_k_sector_maps, gen_k_sector_linkstr_info
 
@@ -45,9 +46,10 @@ class kFCIHelperFunctions:
         '''
         nkpts, ncas = eri_k.shape[0], eri_k.shape[-1]
         norb = nkpts * ncas
+        kmom = kcistrings.make_kpoint_momentum(nkpts)
         eri_full = np.zeros((norb, norb, norb, norb), dtype=eri_k.dtype)
         for kp, kq, kr in np.ndindex(nkpts, nkpts, nkpts):
-            ks = (kp - kq + kr) % nkpts
+            ks = int(kmom.kconserv[kp, kq, kr])
             P, Q, R, S = kp * ncas, kq * ncas, kr * ncas, ks * ncas
             eri_full[P:P + ncas, Q:Q + ncas, R:R + ncas, S:S + ncas] = eri_k[kp, kq, kr]
         return eri_full
@@ -57,9 +59,10 @@ class kFCIHelperFunctions:
         Arrange full 2e integrals to k-space 2e integrals.
         '''
         ef = eri_full.reshape(nkpts, ncas, nkpts, ncas, nkpts, ncas, nkpts, ncas)
+        kmom = kcistrings.make_kpoint_momentum(nkpts)
         eri_k = np.zeros((nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas), dtype=eri_full.dtype)
         for kp, kq, kr in np.ndindex(nkpts, nkpts, nkpts):
-            ks = (kp - kq + kr) % nkpts
+            ks = int(kmom.kconserv[kp, kq, kr])
             eri_k[kp, kq, kr] = ef[kp, :, kq, :, kr, :, ks, :]
         return eri_k
 

@@ -188,7 +188,8 @@ void FCIcontract_1e_k(double complex *h1e,
                       int *linkb, int nstrb, int nlinkb,
                       int *stra_ids, int *stra_offsets,
                       int *strb_ids, int *strb_offsets,
-                      int *str2tot_a, int *str2tot_b)
+                      int *str2tot_a, int *str2tot_b,
+                      int dk_zero)
 {
         int ndet = 0;
 
@@ -232,7 +233,8 @@ void FCIcontract_1e_k(double complex *h1e,
         shared(h1e, ci0, ci1, nkpts, ncas, nblocks, blocks, \
                linka, nstra, nlinka, stra_ids, stra_offsets, str2tot_a, \
                alpha_prefix, alpha_tasks, linkb, nstrb, nlinkb, \
-               strb_ids, strb_offsets, str2tot_b, beta_prefix, beta_tasks)
+               strb_ids, strb_offsets, str2tot_b, beta_prefix, beta_tasks, \
+               dk_zero)
 {
 #pragma omp for schedule(dynamic)
         for (int itask = 0; itask < alpha_tasks; itask++) {
@@ -255,7 +257,7 @@ void FCIcontract_1e_k(double complex *h1e,
                         int k_des = link[LINK_K_DES] % nkpts;
                         int dk = link[LINK_DK] % nkpts;
 
-                        if (k_cre != k_des || dk != 0) {
+                        if (k_cre != k_des || dk != dk_zero) {
                                 continue;
                         }
 
@@ -305,7 +307,7 @@ void FCIcontract_1e_k(double complex *h1e,
                         int k_des = link[LINK_K_DES] % nkpts;
                         int dk = link[LINK_DK] % nkpts;
 
-                        if (k_cre != k_des || dk != 0) {
+                        if (k_cre != k_des || dk != dk_zero) {
                                 continue;
                         }
 
