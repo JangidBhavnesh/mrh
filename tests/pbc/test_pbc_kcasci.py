@@ -1,6 +1,9 @@
+import io
 import unittest
+
 import numpy as np
 
+from pyscf import lib
 from pyscf.pbc import scf
 from pyscf.pbc import gto as pgto
 
@@ -10,6 +13,43 @@ from mrh.my_pyscf.pbc.fci import direct_spin1_cplx
 
 
 class KnownValues(unittest.TestCase):
+
+    def test_charged_finalize_uses_result_target_k_for_spin_square(self):
+        spin_square_calls = []
+
+        class RecordingSolver:
+            def spin_square(self, ci, norb, nelec, **kwargs):
+                spin_square_calls.append((ci, norb, nelec, kwargs))
+                return 0.75, 2.0
+
+        kmc = object.__new__(kcasci.ChargedPBCKCASCI)
+        kmc.stdout = io.StringIO()
+        kmc.verbose = lib.logger.NOTE
+        kmc.fcisolver = RecordingSolver()
+        kmc.nkpts = 3
+        kmc.ncas = 2
+        kmc.charged_nelecastot = (3, 2)
+        kmc.charged_results = [
+            {
+                'target_k': target_k,
+                'e_tot': np.asarray(-1.0),
+                'e_cas': np.asarray(-0.5),
+                'ci': np.asarray([target_k], dtype=np.complex128),
+            }
+            for target_k in range(kmc.nkpts)
+        ]
+
+        kmc._finalize()
+
+        self.assertEqual(len(spin_square_calls), kmc.nkpts)
+        for target_k, (ci, norb, nelec, kwargs) in enumerate(
+                spin_square_calls):
+            self.assertTrue(np.array_equal(
+                ci, kmc.charged_results[target_k]['ci']))
+            self.assertEqual(norb, kmc.nkpts * kmc.ncas)
+            self.assertEqual(nelec, kmc.charged_nelecastot)
+            self.assertEqual(kwargs['nkpts'], kmc.nkpts)
+            self.assertEqual(kwargs['target_k'], target_k)
 
     def test_charged_active_nelecas(self):
         self.assertEqual(
