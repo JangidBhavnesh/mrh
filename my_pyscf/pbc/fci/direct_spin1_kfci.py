@@ -136,7 +136,7 @@ def _unpack(norb, nelec, link_index, nkpts, spin=None):
         assert link_index[0].shape[2] == link_index[1].shape[2] == 8
         return link_index
 
-def contract_1e_k(h1e, fcivec, norb, nelec, nkpts, kindx, link_index=None):
+def contract_1e_k_py(h1e, fcivec, norb, nelec, nkpts, kindx, link_index=None):
     '''
     Contract one-electron Hamiltonian with a k-FCI vector in a fixed 
     total momentum sector.
@@ -260,12 +260,8 @@ def contract_1e_k(h1e, fcivec, norb, nelec, nkpts, kindx, link_index=None):
 
     return sigma_ci
 
-def contract_1e_k_c(h1e, fcivec, norb, nelec, nkpts, kindx,
-                    link_index=None, contract_map=None, plan=None):
-    '''
-    C implementation of contract_1e_k using k-sector link maps generated in
-    Python.  The result is returned as complex128 to match the C kernel.
-    '''
+def _contract_1e_k_lib(h1e, fcivec, norb, nelec, nkpts, kindx,
+                       link_index=None, contract_map=None, plan=None):
     nkpts = int(nkpts)
     ncas = int(norb) // nkpts
     assert ncas * nkpts == int(norb)
@@ -306,6 +302,18 @@ def contract_1e_k_c(h1e, fcivec, norb, nelec, nkpts, kindx,
             contract_map.str2tot_b.ctypes.data_as(ctypes.c_void_p),
         )
     return sigma_ci
+
+
+def contract_1e_k(h1e, fcivec, norb, nelec, nkpts, kindx,
+                  link_index=None, contract_map=None, plan=None):
+    '''
+    C implementation of contract_1e_k using structural k-sector contraction
+    maps.  The result is returned as complex128 to match the C kernel.
+    '''
+    return _contract_1e_k_lib(
+        h1e, fcivec, norb, nelec, nkpts, kindx,
+        link_index=link_index, contract_map=contract_map, plan=plan,
+    )
 
 
 def _get_ci_sectors(fcivec, blocks, nkpts):

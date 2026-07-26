@@ -7,7 +7,7 @@ import numpy as np
 from mrh.my_pyscf.pbc.fci.direct_spin1_kfci import (
     _unpack,
     contract_1e_k,
-    contract_1e_k_c,
+    contract_1e_k_py,
     make_kfci_contract_map,
     sector_size,
 )
@@ -15,7 +15,7 @@ from mrh.my_pyscf.pbc.fci.direct_spin1_kfci import (
 
 class KnownValues(unittest.TestCase):
 
-    def test_contract_1e_k_c_matches_python(self):
+    def test_contract_1e_k_matches_python_reference(self):
         test_cases = [
             (1, 4, (2, 2)),
             (2, 3, (2, 2)),
@@ -44,11 +44,11 @@ class KnownValues(unittest.TestCase):
                     ci0 = rng.normal(size=ndet) + 1j * rng.normal(size=ndet)
                     ci0 = np.asarray(ci0, dtype=np.complex128, order="C")
 
-                    sigma_ref = contract_1e_k(
+                    sigma_ref = contract_1e_k_py(
                         h1e, ci0, norb, nelec, nkpts, target_k,
                         link_index=link_index,
                     )
-                    sigma_c = contract_1e_k_c(
+                    sigma_c = contract_1e_k(
                         h1e, ci0, norb, nelec, nkpts, target_k,
                         contract_map=contract_map,
                     )
