@@ -17,6 +17,7 @@ from mrh.my_pyscf.pbc.fci.kcistrings import (
 )
 from mrh.my_pyscf.pbc.fci.kfci_helper import (
     KFCIContractMap,
+    _unpack_contract_link_index as _unpack,
     build_ab_pair_tables,
     build_k_links_spin,
     build_links_by_global_source_array,
@@ -269,29 +270,6 @@ def _as_contract_map(norb, nelec, nkpts, target_k, link_index=None,
         return contract_map
     _timer_debug1(log_obj, "k-FCI validate contract map", t0)
     return contract_map
-
-def _unpack(norb, nelec, link_index, nkpts, spin=None, log_obj=None,
-            kmom=None):
-    t0 = _timer_start()
-    assert norb % nkpts == 0
-    if link_index is None:
-        neleca, nelecb = _unpack_nelec(nelec, spin)
-        norb_k = norb // nkpts
-        orb_k = (np.arange(norb, dtype=np.int32) // norb_k).astype(np.int32)
-        if spin == 0 and neleca == nelecb:
-            link_indexa = link_indexb = kcistrings.gen_linkstr_index_k(
-                range(norb), neleca, orb_k, nkpts, kmom=kmom)
-        else:
-            link_indexa = kcistrings.gen_linkstr_index_k(
-                range(norb), neleca, orb_k, nkpts, kmom=kmom)
-            link_indexb = kcistrings.gen_linkstr_index_k(
-                range(norb), nelecb, orb_k, nkpts, kmom=kmom)
-        _timer_debug1(log_obj, "k-FCI generate link_index", t0)
-        return link_indexa, link_indexb
-    else:
-        assert link_index[0].shape[2] == link_index[1].shape[2] == 8
-        _timer_debug1(log_obj, "k-FCI reuse link_index", t0)
-        return link_index
 
 def contract_1e_k_py(h1e, fcivec, norb, nelec, nkpts, kindx,
                      link_index=None, kmom=None):
@@ -1307,7 +1285,7 @@ def kernel_ms1(fci, h1e, eri, norb, nelec, nkpts, target_k=0, ci0=None,
     target_k = int(target_k) % nkpts
     kmom = fci.get_kmom(nkpts) if hasattr(fci, "get_kmom") else None
     link_index = _unpack(norb, nelec, link_index, nkpts, spin=fci.spin,
-                         log_obj=fci, kmom=kmom)
+                         kmom=kmom)
     t0 = log.timer_debug1("k-FCI kernel setup options/link_index", *t0)
     contract_map = _as_contract_map(
         norb, nelec, nkpts, target_k, link_index=link_index,
@@ -1420,9 +1398,6 @@ class SpinPenaltyFCISolver:
         del obj.ss_penalty
         return obj
 
-    def base_contract_2e(self, *args, **kwargs):
-        return super().contract_2e(*args, **kwargs)
-
     def contract_spin_penalty(self, fcivec, norb, nelec, nkpts=None,
                               target_k=None, link_index=None):
         if nkpts is None: nkpts = self.nkpts
@@ -1458,7 +1433,7 @@ class SpinPenaltyFCISolver:
         kmom = self.get_kmom(nkpts) if hasattr(self, "get_kmom") else None
         nelec = _unpack_nelec(nelec, self.spin)
         link_index = _unpack(norb, nelec, link_index, nkpts, spin=self.spin,
-                             log_obj=self, kmom=kmom)
+                             kmom=kmom)
         contract_map = _as_contract_map(
             norb, nelec, nkpts, target_k, link_index=link_index,
             contract_map=contract_map, log_obj=self, kmom=kmom)
@@ -1495,7 +1470,7 @@ class SpinPenaltyFCISolver:
         kmom = self.get_kmom(nkpts) if hasattr(self, "get_kmom") else None
         nelec = _unpack_nelec(nelec, self.spin)
         link_index = _unpack(norb, nelec, link_index, nkpts, spin=self.spin,
-                             log_obj=self, kmom=kmom)
+                             kmom=kmom)
         contract_map = _as_contract_map(
             norb, nelec, nkpts, target_k, link_index=link_index,
             contract_map=contract_map, log_obj=self, kmom=kmom)
@@ -1780,7 +1755,7 @@ class FCISolver(direct_spin1.FCISolver):
 
         kmom = self.get_kmom(nkpts)
         link_index = _unpack(norb, nelec, None, nkpts, spin=self.spin,
-                             log_obj=self, kmom=kmom)
+                             kmom=kmom)
         e, c = kernel_ms1(self, h1e, eri, norb, nelec, nkpts, target_k,
                           ci0=ci0, link_index=link_index, tol=tol,
                           lindep=lindep, max_cycle=max_cycle,
@@ -1815,421 +1790,3 @@ class FCISolver(direct_spin1.FCISolver):
         return e, ci
 
 FCI = FCISolver
-
-if __name__ == '__main__':
-    
-    TEST1 = False
-    TEST2 = False
-    TEST3 = False
-    TEST4 = True
-    if TEST1:
-        ncastot = 8
-        nelectot = (4, 4)
-        nkpts = 2 #(3, 3, 1)
-        link_indexa, link_indexb = _unpack(ncastot, nelectot, None, nkpts, spin=None)
-        print("link_indexa shape:", link_indexa.shape)
-        print("link_indexb shape:", link_indexb.shape)
-        print("----")
-
-        # Possible k0 sectors:
-        print("Possible k0 sectors: alpha str", np.unique(link_indexa[:, :, 4]))
-        print("Possible k0 sectors: beta str", np.unique(link_indexb[:, :, 4])) 
-        print("----")
-        # Compare the alpha and beta string counts per k0 sector. 
-        # They should be the same for spin-0 cases.
-        det_count = kcistrings._count_det_per_k((link_indexa, link_indexb))
-        print("Determinant count alpha:", det_count[0])
-        print("Determinant count  beta:", det_count[1])
-        print("----")
-        # Now for det_alpha * det_beta, the total number of determinants 
-        # would be k0 = (Ka + Kb) % nkpts. 
-        # Let's count how many determinants we have in each k0 sector.
-        counts_det = {k: 0 for k in range(nkpts)}
-        for Ka, Na in det_count[0].items():
-            for Kb, Nb in det_count[1].items():
-                Kdet = (Ka + Kb) % nkpts
-                if Kdet == 0:
-                    print(f"Ka={Ka}, Kb={Kb}, Na={Na}, Nb={Nb}, Kdet={Kdet}")
-                counts_det[Kdet] += Na * Nb
-        
-        print(counts_det)
-        print("----")
-        # When I will solve the kFCI problem, I will be solving it for the one of
-        # the k0 sectors. Overall, the total number of determinants would be appro.
-        # ntot_det / nkpts. Which is reduction in total number of determinants, but 
-        # this will be huge headache to workout the proper vectorization.
-        
-        # Anyways:
-        # Now compare with the total number of determinants from cistring.
-        from pyscf.fci import cistring
-        na, nb = _unpack_nelec(nelectot, spin=None)
-        strsa = cistring.gen_linkstr_index(range(ncastot), na)
-        strsb = cistring.gen_linkstr_index(range(ncastot), nb)
-        tot_det = len(strsa) * len(strsb)
-
-        print("Total determinants from cistring:", tot_det)
-        print("Total determinants from link_index:", sum(counts_det.values()))
-        print("Comparison at one of k-pts:", tot_det/list(counts_det.values())[0]) # Almost an order of magnitude.
-        print("----")
-    
-
-    if TEST2:
-        rng = np.random.default_rng(12)
-
-        nkpts = 4
-        ncas = 4
-        norb = nkpts * ncas
-
-        nelec = (2, 2)
-        kindx = 0
-
-        h1e = (
-            rng.normal(size=(nkpts, ncas, ncas))
-            + 1j * rng.normal(size=(nkpts, ncas, ncas))
-        )
-
-        # Optional: make each h1e[k] Hermitian
-        for k in range(nkpts):
-            h1e[k] = 0.5 * (h1e[k] + h1e[k].conj().T)
-
-        link_index = None
-        link_indexa, link_indexb = _unpack(norb, nelec, link_index, nkpts)
-
-        for kindx in range(nkpts):
-            blocks = gen_k_sector_linkstr_info(link_indexa, link_indexb, nkpts, kindx)
-            sector_size = int(blocks[:, 5].sum())
-
-            fcivec = (
-                rng.normal(size=sector_size)
-                + 1j * rng.normal(size=sector_size)
-            )
-            fcivec /= np.linalg.norm(fcivec)
-
-            sigma_ci = contract_1e_k(
-                h1e,
-                fcivec,
-                norb,
-                nelec,
-                nkpts,
-                kindx,
-                link_index=None
-            )
-
-            print("blocks:")
-            print(blocks)
-            print("sector_size =", sector_size)
-            print("fcivec shape   =", fcivec.shape)
-            print("sigma_ci shape =", sigma_ci.shape)
-            print("||fcivec||     =", np.linalg.norm(fcivec))
-            print("||sigma_ci||   =", np.linalg.norm(sigma_ci))
-            # print("sigma_ci[:10]  =", sigma_ci[:10])
-
-
-    if TEST3:
-        rng = np.random.default_rng(12)
-
-        nkpts = 3
-        ncas = 2
-        norb = nkpts * ncas
-
-        nelec = (1*nkpts, 1*nkpts)
-
-        link_index = None
-        link_indexa, link_indexb = _unpack(norb, nelec, link_index, nkpts)
-
-        eri = (
-            rng.normal(size=(nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas))
-            + 1j * rng.normal(size=(nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas))
-        )
-
-        for kindx in range(nkpts):
-            blocks = gen_k_sector_linkstr_info(
-                link_indexa,
-                link_indexb,
-                nkpts,
-                kindx,
-            )
-
-            sector_size = int(blocks[:, 5].sum())
-
-            fcivec = (
-                rng.normal(size=sector_size)
-                + 1j * rng.normal(size=sector_size)
-            )
-
-            fcivec /= np.linalg.norm(fcivec)
-
-            sigma_ci = contract_2e_k(
-                eri,
-                fcivec,
-                norb,
-                nelec,
-                nkpts,
-                kindx,
-                link_index=None,
-            )
-
-            print("=" * 80)
-            print("target momentum sector kindx =", kindx)
-            print("blocks:")
-            print(blocks)
-            print("sector_size      =", sector_size)
-            print("fcivec shape     =", fcivec.shape)
-            print("sigma_ci shape   =", sigma_ci.shape)
-            print("||fcivec||       =", np.linalg.norm(fcivec))
-            print("||sigma_ci||     =", np.linalg.norm(sigma_ci))
-            print("finite sigma?    =", np.all(np.isfinite(sigma_ci)))
-    
-
-        from pyscf import fci
-
-        from mrh.my_pyscf.pbc.fci import direct_spin1_cplx_opt
-        # from mrh.my_pyscf.pbc.fci.direct_spin1_kfci import contract_2e_k
-        # from mrh.my_pyscf.pbc.fci.direct_spin1_kfci import _unpack
-        # from mrh.my_pyscf.pbc.fci.kcistrings import gen_k_sector_maps
-        # from mrh.my_pyscf.pbc.fci.kcistrings import gen_k_sector_linkstr_info
-
-        def eri_k_to_full(eri_k):
-            nkpts, ncas = eri_k.shape[0], eri_k.shape[-1]
-            norb = nkpts * ncas
-            kmom = kcistrings.make_kpoint_momentum(nkpts)
-            eri_full = np.zeros((norb, norb, norb, norb), dtype=eri_k.dtype)
-            for kp, kq, kr in np.ndindex(nkpts, nkpts, nkpts):
-                ks = int(kmom.kconserv[kp, kq, kr])
-                P, Q, R, S = kp * ncas, kq * ncas, kr * ncas, ks * ncas
-                eri_full[P:P + ncas, Q:Q + ncas, R:R + ncas, S:S + ncas] = eri_k[kp, kq, kr]
-            return eri_full
-        
-        def eri_full_to_k(eri_full, nkpts, ncas):
-            ef = eri_full.reshape(nkpts, ncas, nkpts, ncas, nkpts, ncas, nkpts, ncas)
-            kmom = kcistrings.make_kpoint_momentum(nkpts)
-            eri_k = np.zeros((nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas), dtype=eri_full.dtype)
-            for kp, kq, kr in np.ndindex(nkpts, nkpts, nkpts):
-                ks = int(kmom.kconserv[kp, kq, kr])
-                eri_k[kp, kq, kr] = ef[kp, :, kq, :, kr, :, ks, :]
-            return eri_k
-      
-        def embed_sector_fcivec_to_full_ci(fcivec_k, blocks, straid_k, strbid_k, 
-                                   nstra_total, nstrb_total):
-            '''
-            In this function, I will create the full CI vector (as zeros) and then only
-            fill in the specific block corresponding to each (ka, kb) sector with the sector-wise CI vector.
-            '''
-            
-            ci_full = np.zeros( (nstra_total, nstrb_total), dtype=fcivec_k.dtype)
-
-            for blk in blocks:
-                ka, kb, nstra, nstrb, offset, size = map(int, blk)
-                block_ka_kb = fcivec_k[offset:offset + size].reshape(nstra, nstrb)
-
-                astrs = straid_k[ka]
-                bstrs = strbid_k[kb]
-
-                ci_full[np.ix_(astrs, bstrs)] = block_ka_kb
-
-            return ci_full
-
-        
-        def extract_sector_from_full_ci(ci_full, blocks, straid_k, strbid_k):
-            '''
-            This function extracts the sector-wise CI vector from the full CI vector.
-            '''
-
-            sector_size = int(blocks[:, 5].sum())
-
-            fcivec_k = np.zeros(sector_size, dtype=ci_full.dtype)
-
-            for blk in blocks:
-                ka, kb, nstra, nstrb, offset, size = map(int, blk)
-            
-                astrs = straid_k[ka]
-                bstrs = strbid_k[kb]
-
-                block = ci_full[np.ix_(astrs, bstrs)]
-
-                fcivec_k[offset:offset + size] = block.reshape(-1)
-
-            return fcivec_k
-    
-
-        def compare_kfci_nkpts_gt1_vs_full_mol(
-            nkpts=3,
-            ncas=3,
-            nelec=(2, 1),
-            target_k=0,
-            seed=12,
-        ):
-            rng = np.random.default_rng(seed)
-
-            norb = nkpts * ncas
-
-            link_index = None
-
-            link_indexa, link_indexb = _unpack(
-                norb,
-                nelec,
-                link_index,
-                nkpts,
-            )
-
-            straid_k, strbid_k, str2tot_a, str2tot_b = gen_k_sector_maps(
-                link_indexa,
-                link_indexb,
-                nkpts,
-            )
-
-            blocks = gen_k_sector_linkstr_info(
-                link_indexa,
-                link_indexb,
-                nkpts,
-                target_k,
-            )
-
-            sector_size = int(blocks[:, 5].sum())
-
-            fcivec_k = (
-                rng.normal(size=sector_size)
-                + 1j * rng.normal(size=sector_size)
-            )
-            fcivec_k /= np.linalg.norm(fcivec_k)
-
-            eri_k = (
-                rng.normal(
-                    size=(nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas)
-                )
-                + 1j * rng.normal(
-                    size=(nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas)
-                )
-            )
-
-            eri_full = eri_k_to_full(eri_k)
-
-            eri_full = 0.5 * (
-                eri_full
-                + eri_full.transpose(2, 3, 0, 1)
-            )
-
-            eri_k = eri_full_to_k(
-                eri_full,
-                nkpts,
-                ncas,
-            )
-
-            eri_full = eri_k_to_full(eri_k)
-
-            nstra_total = fci.cistring.num_strings(norb, nelec[0])
-            nstrb_total = fci.cistring.num_strings(norb, nelec[1])
-
-            ci_full = embed_sector_fcivec_to_full_ci(
-                fcivec_k,
-                blocks,
-                straid_k,
-                strbid_k,
-                nstra_total,
-                nstrb_total,
-            )
-
-            sigma_k = contract_2e_k(
-                eri_k,
-                fcivec_k,
-                norb,
-                nelec,
-                nkpts,
-                target_k,
-                link_index=None,
-            )
-
-            sigma_full = direct_spin1_cplx_opt.contract_2e(
-                eri_full,
-                ci_full,
-                norb,
-                nelec,
-                link_index=None,
-            )
-
-            sigma_ref_k = extract_sector_from_full_ci(
-                sigma_full,
-                blocks,
-                straid_k,
-                strbid_k,
-            )
-
-            diff = sigma_k - sigma_ref_k
-
-            return sigma_k, sigma_ref_k, diff
-    
-
-        import unittest
-
-        class KnownValues(unittest.TestCase):
-
-            def test_contract_2e_k_nkpts_gt1_vs_full_mol(self):
-                test_cases = [
-                    (2, 3, (1, 1)),
-                    (2, 3, (2, 0)),
-                    (2, 3, (0, 2)),
-                    (2, 3, (2, 1)),
-                    (2, 3, (2, 2)),
-                    (3, 2, (1, 1)),
-                    (3, 2, (2, 1)),
-                    (3, 4, (2, 2)),
-                    (4, 2, (1, 1)),
-                    (5, 2, (1, 1)),
-                ]
-
-                for nkpts, ncas, nelec in test_cases:
-                    for target_k in range(nkpts):
-                        with self.subTest(
-                            nkpts=nkpts,
-                            ncas=ncas,
-                            nelec=nelec,
-                            target_k=target_k,
-                        ):
-                            sigma_k, sigma_ref_k, diff = (
-                                compare_kfci_nkpts_gt1_vs_full_mol(
-                                    nkpts=nkpts,
-                                    ncas=ncas,
-                                    nelec=nelec,
-                                    target_k=target_k,
-                                    seed=12,
-                                )
-                            )
-
-                            self.assertEqual(
-                                sigma_k.shape,
-                                sigma_ref_k.shape,
-                            )
-
-                            print("=" * 80)
-                            print(
-                                    f"contract_2e_k failed nkpts>1 full-space "
-                                    f"reference test for "
-                                    f"nkpts={nkpts}, ncas={ncas}, "
-                                    f"nelec={nelec}, target_k={target_k}. "
-                                    f"||diff||={np.linalg.norm(diff)}, "
-                                    f"||ref||={np.linalg.norm(sigma_ref_k)}, "
-                                    f"rel={np.linalg.norm(diff) / max(np.linalg.norm(sigma_ref_k), 1e-14)}, "
-                                    f"max_abs={np.max(np.abs(diff))}"
-                                )
-                            self.assertTrue(
-                                np.allclose(
-                                    sigma_k,
-                                    sigma_ref_k,
-                                    atol=1e-12,
-                                    rtol=1e-12,
-                                ),
-                                msg=(
-                                    f"contract_2e_k failed nkpts>1 full-space "
-                                    f"reference test for "
-                                    f"nkpts={nkpts}, ncas={ncas}, "
-                                    f"nelec={nelec}, target_k={target_k}. "
-                                    f"||diff||={np.linalg.norm(diff)}, "
-                                    f"||ref||={np.linalg.norm(sigma_ref_k)}, "
-                                    f"rel={np.linalg.norm(diff) / max(np.linalg.norm(sigma_ref_k), 1e-14)}, "
-                                    f"max_abs={np.max(np.abs(diff))}"
-                                ),
-                            )
-
-
-        # if __name__ == "__main__":
-        unittest.main()
