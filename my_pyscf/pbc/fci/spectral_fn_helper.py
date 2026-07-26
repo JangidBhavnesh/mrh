@@ -104,6 +104,7 @@ class KSectorLayout:
     blocks: np.ndarray
     block_map: dict
     sector_size: int
+    kmom: object
 
 
 @dataclass
@@ -123,6 +124,7 @@ class KOpContext:
     source: KSectorLayout
     target: KSectorLayout
     op_index: np.ndarray
+    kmom: object
 
 
 @dataclass
@@ -140,6 +142,10 @@ class KCASCISpectralRoots:
     nelecastot: tuple
     target_k: int
     mo_coeff: object
+    kpts: object = None
+    kmesh: object = None
+    kconserv: object = None
+    kmom: object = None
     spin_sector_mode: str = 'representative'
 
 
@@ -188,7 +194,7 @@ def _target_nelec(nelec, spin, cre):
     return tuple(target)
 
 
-def _make_link_index(norb, nelec, nkpts):
+def _make_link_index(norb, nelec, nkpts, kmom=None):
     '''
     Build k-aware link indices.  Only the K0 labels are used here.
     '''
@@ -196,32 +202,38 @@ def _make_link_index(norb, nelec, nkpts):
     ncas = int(norb) // int(nkpts)
     orb_k = np.arange(int(norb), dtype=np.int32) // ncas
     link_indexa = kcistrings.gen_linkstr_index_k(
-        range(int(norb)), neleca, orb_k, int(nkpts))
+        range(int(norb)), neleca, orb_k, int(nkpts), kmom=kmom)
     if neleca == nelecb:
         link_indexb = link_indexa
     else:
         link_indexb = kcistrings.gen_linkstr_index_k(
-            range(int(norb)), nelecb, orb_k, int(nkpts))
+            range(int(norb)), nelecb, orb_k, int(nkpts), kmom=kmom)
     return link_indexa, link_indexb
 
 
 def make_k_sector_layout(norb, nelec, nkpts, target_k=0,
-                         link_index=None, nelec_spin=None):
+                         link_index=None, nelec_spin=None, kmom=None,
+                         kconserv=None, cell=None, kpts=None, kmesh=None,
+                         kmf=None, kmc=None):
     '''
     Build the packed determinant layout for one total momentum sector.
     '''
     nelec = _unpack_nelec(nelec, nelec_spin)
+    kmom = kcistrings._as_kmom(
+        nkpts, kmom=kmom, kconserv=kconserv, cell=cell, kpts=kpts,
+        kmesh=kmesh, kmf=kmf, kmc=kmc)
     target_k = int(target_k) % int(nkpts)
 
     if link_index is None:
-        link_index = _make_link_index(norb, nelec, nkpts)
+        link_index = _make_link_index(norb, nelec, nkpts, kmom=kmom)
     else:
         assert link_index[0].shape[2] == link_index[1].shape[2] == 8
 
     stra_id, strb_id, str2loc_a, str2loc_b = \
-        kcistrings.gen_k_sector_maps(link_index[0], link_index[1], nkpts)
+        kcistrings.gen_k_sector_maps(link_index[0], link_index[1], nkpts,
+                                     kmom=kmom)
     blocks = kcistrings.gen_k_sector_linkstr_info(
-        link_index[0], link_index[1], nkpts, target_k)
+        link_index[0], link_index[1], nkpts, target_k, kmom=kmom)
     sector_size = int(blocks[:, 5].sum()) if blocks.size else 0
 
     block_map = {}
@@ -233,16 +245,21 @@ def make_k_sector_layout(norb, nelec, nkpts, target_k=0,
                          link_index=link_index, stra_id=stra_id,
                          strb_id=strb_id, str2loc_a=str2loc_a,
                          str2loc_b=str2loc_b, blocks=blocks,
-                         block_map=block_map, sector_size=sector_size)
+                         block_map=block_map, sector_size=sector_size,
+                         kmom=kmom)
 
 
 def make_k_op_context(norb, nelec, nkpts, target_k, k, p, spin, cre=False,
                       source_link_index=None, target_link_index=None,
-                      nelec_spin=None):
+                      nelec_spin=None, kmom=None, kconserv=None, cell=None,
+                      kpts=None, kmesh=None, kmf=None, kmc=None):
     '''
     Build source and target layouts for a_{kp spin} or a^dagger_{kp spin}.
     '''
     nkpts = int(nkpts)
+    kmom = kcistrings._as_kmom(
+        nkpts, kmom=kmom, kconserv=kconserv, cell=cell, kpts=kpts,
+        kmesh=kmesh, kmf=kmf, kmc=kmc)
     spin = _as_spin_id(spin)
     nelec = _unpack_nelec(nelec, nelec_spin)
     orb = _orbital_id(norb, nkpts, k, p)
@@ -254,24 +271,25 @@ def make_k_op_context(norb, nelec, nkpts, target_k, k, p, spin, cre=False,
         raise ValueError("creation requested into a full spin sector")
     target_k = int(target_k) % nkpts
     if cre:
-        charged_target_k = (target_k + k) % nkpts
+        charged_target_k = kcistrings._kadd(kmom, target_k, k)
         op_index = cistring.gen_cre_str_index(range(int(norb)), nelec[spin])
     else:
-        charged_target_k = (target_k - k) % nkpts
+        charged_target_k = kcistrings._ksub(kmom, target_k, k)
         op_index = cistring.gen_des_str_index(range(int(norb)), nelec[spin])
 
     source = make_k_sector_layout(
         norb, nelec, nkpts, target_k=target_k,
-        link_index=source_link_index, nelec_spin=nelec_spin)
+        link_index=source_link_index, nelec_spin=nelec_spin, kmom=kmom)
     target = make_k_sector_layout(
         norb, target_nelec, nkpts, target_k=charged_target_k,
-        link_index=target_link_index, nelec_spin=nelec_spin)
+        link_index=target_link_index, nelec_spin=nelec_spin, kmom=kmom)
 
     return KOpContext(cre=bool(cre), spin=spin, k=k, p=p, orb=orb,
                       source_nelec=nelec, target_nelec=target_nelec,
                       source_target_k=target_k,
                       target_target_k=charged_target_k,
-                      source=source, target=target, op_index=op_index)
+                      source=source, target=target, op_index=op_index,
+                      kmom=kmom)
 
 
 def _apply_alpha_op(fcivec, out, ctx):
@@ -285,9 +303,9 @@ def _apply_alpha_op(fcivec, out, ctx):
     for blk in ctx.source.blocks:
         ka, kb, nstra, nstrb, offset, size = map(int, blk)
         if ctx.cre:
-            ka1 = (ka + ctx.k) % len(ctx.target.stra_id)
+            ka1 = kcistrings._kadd(ctx.kmom, ka, ctx.k)
         else:
-            ka1 = (ka - ctx.k) % len(ctx.target.stra_id)
+            ka1 = kcistrings._ksub(ctx.kmom, ka, ctx.k)
         target_blk = ctx.target.block_map.get((ka1, kb))
         if target_blk is None:
             continue
@@ -319,9 +337,9 @@ def _apply_beta_op(fcivec, out, ctx):
     for blk in ctx.source.blocks:
         ka, kb, nstra, nstrb, offset, size = map(int, blk)
         if ctx.cre:
-            kb1 = (kb + ctx.k) % len(ctx.target.strb_id)
+            kb1 = kcistrings._kadd(ctx.kmom, kb, ctx.k)
         else:
-            kb1 = (kb - ctx.k) % len(ctx.target.strb_id)
+            kb1 = kcistrings._ksub(ctx.kmom, kb, ctx.k)
         target_blk = ctx.target.block_map.get((ka, kb1))
         if target_blk is None:
             continue
@@ -344,7 +362,8 @@ def _apply_beta_op(fcivec, out, ctx):
 def apply_k_op_py(fcivec, norb, nelec, nkpts, target_k, k, p, spin,
                   cre=False, context=None, return_info=False,
                   source_link_index=None, target_link_index=None,
-                  nelec_spin=None):
+                  nelec_spin=None, kmom=None, kconserv=None, cell=None,
+                  kpts=None, kmesh=None, kmf=None, kmc=None):
     '''
     Apply a single k-resolved creation or annihilation operator.
     '''
@@ -352,7 +371,9 @@ def apply_k_op_py(fcivec, norb, nelec, nkpts, target_k, k, p, spin,
         context = make_k_op_context(
             norb, nelec, nkpts, target_k, k, p, spin, cre=cre,
             source_link_index=source_link_index,
-            target_link_index=target_link_index, nelec_spin=nelec_spin)
+            target_link_index=target_link_index, nelec_spin=nelec_spin,
+            kmom=kmom, kconserv=kconserv, cell=cell, kpts=kpts,
+            kmesh=kmesh, kmf=kmf, kmc=kmc)
 
     fcivec = np.asarray(fcivec)
     assert fcivec.size == context.source.sector_size, (
@@ -417,6 +438,9 @@ def _apply_k_op_c(fcivec, context):
     '''
     Apply one k-resolved operator through the native C helper.
     '''
+    if not getattr(context.kmom, 'scalar', True):
+        return None
+
     lib = _load_spectral_lib()
     if lib is None:
         return None
@@ -466,7 +490,8 @@ def _apply_k_op_c(fcivec, context):
 def apply_k_op(fcivec, norb, nelec, nkpts, target_k, k, p, spin,
                cre=False, context=None, return_info=False,
                source_link_index=None, target_link_index=None,
-               nelec_spin=None, use_c=True):
+               nelec_spin=None, use_c=True, kmom=None, kconserv=None,
+               cell=None, kpts=None, kmesh=None, kmf=None, kmc=None):
     '''
     Apply a single k-resolved creation or annihilation operator.
     '''
@@ -474,7 +499,9 @@ def apply_k_op(fcivec, norb, nelec, nkpts, target_k, k, p, spin,
         context = make_k_op_context(
             norb, nelec, nkpts, target_k, k, p, spin, cre=cre,
             source_link_index=source_link_index,
-            target_link_index=target_link_index, nelec_spin=nelec_spin)
+            target_link_index=target_link_index, nelec_spin=nelec_spin,
+            kmom=kmom, kconserv=kconserv, cell=cell, kpts=kpts,
+            kmesh=kmesh, kmf=kmf, kmc=kmc)
 
     if use_c:
         out = _apply_k_op_c(fcivec, context)
@@ -485,7 +512,9 @@ def apply_k_op(fcivec, norb, nelec, nkpts, target_k, k, p, spin,
             fcivec, norb, nelec, nkpts, target_k, k, p, spin,
             cre=cre, context=context, return_info=return_info,
             source_link_index=source_link_index,
-            target_link_index=target_link_index, nelec_spin=nelec_spin)
+            target_link_index=target_link_index, nelec_spin=nelec_spin,
+            kmom=kmom, kconserv=kconserv, cell=cell, kpts=kpts,
+            kmesh=kmesh, kmf=kmf, kmc=kmc)
 
     if return_info:
         info = {
@@ -642,12 +671,26 @@ def compute_kcasci_spectral_roots(kmf, ncas, nelecas, ncore=None,
     if mo_coeff is None:
         mo_coeff = np.asarray(kmf.mo_coeff)
     nelecas = _unpack_nelec(nelecas, kmf.cell.spin)
-    nkpts = len(kmf.kpts)
+    kpts = kcistrings._safe_getattr(kmf, 'kpts', None)
+    kmesh = kcistrings._safe_getattr(kmf, 'kmesh', None)
+    if kpts is None:
+        if kmesh is None:
+            raise ValueError("kmf.kpts or kmf.kmesh is required for "
+                             "k-CASCI spectral roots")
+        nkpts = int(np.prod(kmesh))
+    else:
+        nkpts = len(kpts)
     ncastot = nkpts * int(ncas)
     nelecastot = (nkpts * nelecas[0], nkpts * nelecas[1])
+    kmom = kcistrings.make_kpoint_momentum(
+        nkpts, cell=kmf.cell, kpts=kpts, kmesh=kmesh, kmf=kmf)
 
     kmc_neutral = mcscf.KCASCI(kmf, ncas, nelecas, ncore=ncore,
                               target_k=target_k)
+    kmc_neutral.kmom = kmom
+    kmc_neutral.kconserv = kmom.kconserv
+    kmc_neutral.fcisolver.kmom = kmom
+    kmc_neutral.fcisolver.kconserv = kmom.kconserv
     kmc_neutral.canonicalization = False
     _set_solver_nroots(kmc_neutral, nroots_neutral)
     if solver_setup is not None:
@@ -665,6 +708,10 @@ def compute_kcasci_spectral_roots(kmf, ncas, nelecas, ncore=None,
             kmc_hole = mcscf.KCASCI(kmf, ncas, nelecas, ncore=ncore,
                                     charge=1, target_k=None,
                                     charged_spin=charged_spin)
+            kmc_hole.kmom = kmom
+            kmc_hole.kconserv = kmom.kconserv
+            kmc_hole.fcisolver.kmom = kmom
+            kmc_hole.fcisolver.kconserv = kmom.kconserv
             kmc_hole.canonicalization = False
             _set_solver_nroots(kmc_hole, nroots_hole)
             if solver_setup is not None:
@@ -680,6 +727,10 @@ def compute_kcasci_spectral_roots(kmf, ncas, nelecas, ncore=None,
             kmc_particle = mcscf.KCASCI(kmf, ncas, nelecas, ncore=ncore,
                                         charge=-1, target_k=None,
                                         charged_spin=charged_spin)
+            kmc_particle.kmom = kmom
+            kmc_particle.kconserv = kmom.kconserv
+            kmc_particle.fcisolver.kmom = kmom
+            kmc_particle.fcisolver.kconserv = kmom.kconserv
             kmc_particle.canonicalization = False
             _set_solver_nroots(kmc_particle, nroots_particle)
             if solver_setup is not None:
@@ -698,6 +749,10 @@ def compute_kcasci_spectral_roots(kmf, ncas, nelecas, ncore=None,
                                nelecastot=nelecastot,
                                target_k=int(target_k) % nkpts,
                                mo_coeff=mo_coeff,
+                               kpts=kpts,
+                               kmesh=kmesh,
+                               kconserv=kmom.kconserv,
+                               kmom=kmom,
                                spin_sector_mode=spin_sector_mode)
 
 
@@ -798,6 +853,7 @@ def make_spectral_poles(spectral_roots, neutral_root=0, neutral_target_k=None,
     if isinstance(spectral_roots, KCASCISpectralRoots):
         nkpts = spectral_roots.nkpts
         ncas = spectral_roots.ncas
+        kmom = spectral_roots.kmom
         neutral_target_k = (spectral_roots.target_k if neutral_target_k is None
                             else neutral_target_k)
     else:
@@ -805,6 +861,7 @@ def make_spectral_poles(spectral_roots, neutral_root=0, neutral_target_k=None,
                                        target_k=neutral_target_k)
         nkpts = neutral0['nkpts']
         ncas = neutral0['ncastot'] // neutral0['nkpts']
+        kmom = kcistrings.make_kpoint_momentum(nkpts)
 
     neutral = _select_neutral_root(rows, neutral_root,
                                   target_k=neutral_target_k)
@@ -826,7 +883,7 @@ def make_spectral_poles(spectral_roots, neutral_root=0, neutral_target_k=None,
                 if include_hole and nelec[spin] > 0:
                     op_vec, info = des_k(
                         neutral['ci'], norb, nelec, nkpts, target_k,
-                        k, p, spin, return_info=True)
+                        k, p, spin, return_info=True, kmom=kmom)
                     key = ('hole', int(info['target_k']),
                            tuple(map(int, info['nelec'])))
                     charged_rows = charged_index.get(key, ())
@@ -838,7 +895,7 @@ def make_spectral_poles(spectral_roots, neutral_root=0, neutral_target_k=None,
                 if include_particle and nelec[spin] < norb:
                     op_vec, info = cre_k(
                         neutral['ci'], norb, nelec, nkpts, target_k,
-                        k, p, spin, return_info=True)
+                        k, p, spin, return_info=True, kmom=kmom)
                     key = ('particle', int(info['target_k']),
                            tuple(map(int, info['nelec'])))
                     charged_rows = charged_index.get(key, ())
@@ -1183,6 +1240,7 @@ def spectral_weight_sum_rules(spectral_roots, poles=None, neutral_root=0,
     if isinstance(spectral_roots, KCASCISpectralRoots):
         nkpts = spectral_roots.nkpts
         ncas = spectral_roots.ncas
+        kmom = spectral_roots.kmom
         neutral_target_k = (spectral_roots.target_k if neutral_target_k is None
                             else neutral_target_k)
     else:
@@ -1190,6 +1248,7 @@ def spectral_weight_sum_rules(spectral_roots, poles=None, neutral_root=0,
                                        target_k=neutral_target_k)
         nkpts = neutral0['nkpts']
         ncas = neutral0['ncastot'] // neutral0['nkpts']
+        kmom = kcistrings.make_kpoint_momentum(nkpts)
 
     neutral = _select_neutral_root(rows, neutral_root,
                                   target_k=neutral_target_k)
@@ -1228,11 +1287,11 @@ def spectral_weight_sum_rules(spectral_roots, poles=None, neutral_root=0,
                 particle_norm = None if not do_particle else 0.0
                 if do_hole and nelec[spin] > 0:
                     vec = des_k(neutral['ci'], norb, nelec, nkpts,
-                                target_k, k, p, spin)
+                                target_k, k, p, spin, kmom=kmom)
                     hole_norm = float(np.real_if_close(np.vdot(vec, vec)).real)
                 if do_particle and nelec[spin] < norb:
                     vec = cre_k(neutral['ci'], norb, nelec, nkpts,
-                                target_k, k, p, spin)
+                                target_k, k, p, spin, kmom=kmom)
                     particle_norm = float(
                         np.real_if_close(np.vdot(vec, vec)).real)
 
@@ -1303,7 +1362,9 @@ def plot_spectral_function(spectrum, kind='total', k=0, orbital=0, spin=0,
 
 def des_k_py(fcivec, norb, nelec, nkpts, target_k, k, p, spin,
              context=None, return_info=False, source_link_index=None,
-             target_link_index=None, nelec_spin=None):
+             target_link_index=None, nelec_spin=None, kmom=None,
+             kconserv=None, cell=None, kpts=None, kmesh=None, kmf=None,
+             kmc=None):
     '''
     Return a_{k p spin} |Psi_N> in the N-1 target momentum sector.
     '''
@@ -1311,12 +1372,16 @@ def des_k_py(fcivec, norb, nelec, nkpts, target_k, k, p, spin,
                          cre=False, context=context, return_info=return_info,
                          source_link_index=source_link_index,
                          target_link_index=target_link_index,
-                         nelec_spin=nelec_spin)
+                         nelec_spin=nelec_spin, kmom=kmom,
+                         kconserv=kconserv, cell=cell, kpts=kpts,
+                         kmesh=kmesh, kmf=kmf, kmc=kmc)
 
 
 def cre_k_py(fcivec, norb, nelec, nkpts, target_k, k, p, spin,
              context=None, return_info=False, source_link_index=None,
-             target_link_index=None, nelec_spin=None):
+             target_link_index=None, nelec_spin=None, kmom=None,
+             kconserv=None, cell=None, kpts=None, kmesh=None, kmf=None,
+             kmc=None):
     '''
     Return a^dagger_{k p spin} |Psi_N> in the N+1 target momentum sector.
     '''
@@ -1324,12 +1389,16 @@ def cre_k_py(fcivec, norb, nelec, nkpts, target_k, k, p, spin,
                          cre=True, context=context, return_info=return_info,
                          source_link_index=source_link_index,
                          target_link_index=target_link_index,
-                         nelec_spin=nelec_spin)
+                         nelec_spin=nelec_spin, kmom=kmom,
+                         kconserv=kconserv, cell=cell, kpts=kpts,
+                         kmesh=kmesh, kmf=kmf, kmc=kmc)
 
 
 def des_k(fcivec, norb, nelec, nkpts, target_k, k, p, spin,
           context=None, return_info=False, source_link_index=None,
-          target_link_index=None, nelec_spin=None, use_c=True):
+          target_link_index=None, nelec_spin=None, use_c=True, kmom=None,
+          kconserv=None, cell=None, kpts=None, kmesh=None, kmf=None,
+          kmc=None):
     '''
     Return a_{k p spin} |Psi_N> in the N-1 target momentum sector.
     '''
@@ -1337,12 +1406,16 @@ def des_k(fcivec, norb, nelec, nkpts, target_k, k, p, spin,
                       cre=False, context=context, return_info=return_info,
                       source_link_index=source_link_index,
                       target_link_index=target_link_index,
-                      nelec_spin=nelec_spin, use_c=use_c)
+                      nelec_spin=nelec_spin, use_c=use_c, kmom=kmom,
+                      kconserv=kconserv, cell=cell, kpts=kpts,
+                      kmesh=kmesh, kmf=kmf, kmc=kmc)
 
 
 def cre_k(fcivec, norb, nelec, nkpts, target_k, k, p, spin,
           context=None, return_info=False, source_link_index=None,
-          target_link_index=None, nelec_spin=None, use_c=True):
+          target_link_index=None, nelec_spin=None, use_c=True, kmom=None,
+          kconserv=None, cell=None, kpts=None, kmesh=None, kmf=None,
+          kmc=None):
     '''
     Return a^dagger_{k p spin} |Psi_N> in the N+1 target momentum sector.
     '''
@@ -1350,7 +1423,9 @@ def cre_k(fcivec, norb, nelec, nkpts, target_k, k, p, spin,
                       cre=True, context=context, return_info=return_info,
                       source_link_index=source_link_index,
                       target_link_index=target_link_index,
-                      nelec_spin=nelec_spin, use_c=use_c)
+                      nelec_spin=nelec_spin, use_c=use_c, kmom=kmom,
+                      kconserv=kconserv, cell=cell, kpts=kpts,
+                      kmesh=kmesh, kmf=kmf, kmc=kmc)
 
 
 __all__ = [

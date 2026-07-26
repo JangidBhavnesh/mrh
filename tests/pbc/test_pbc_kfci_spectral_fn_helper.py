@@ -7,7 +7,9 @@ import numpy as np
 
 from pyscf.fci import cistring
 from pyscf.fci.addons import _unpack_nelec
+from pyscf.pbc import gto
 
+from mrh.my_pyscf.pbc.fci import kcistrings
 from mrh.my_pyscf.pbc.fci import krdm_helper
 from mrh.my_pyscf.pbc.fci import spectral_fn_helper as sfh
 
@@ -118,6 +120,21 @@ def _one_alpha_roots():
 
 class KnownValues(unittest.TestCase):
 
+    @staticmethod
+    def _make_2d_kmom():
+        '''
+        Build a small non-scalar 2D k-point table.
+        '''
+        cell = gto.Cell()
+        cell.a = np.eye(3) * 4.0
+        cell.atom = 'He 0 0 0'
+        cell.basis = 'sto-3g'
+        cell.verbose = 0
+        cell.build()
+        kpts = cell.make_kpts([2, 2, 1], wrap_around=True)
+        return kcistrings.make_kpoint_momentum(len(kpts), cell=cell,
+                                               kpts=kpts)
+
     def test_des_k_matches_full_ci_operator(self):
         self._check_k_operator(cre=False)
 
@@ -169,6 +186,63 @@ class KnownValues(unittest.TestCase):
                                 self.assertTrue(np.allclose(test, ref,
                                                             rtol=1e-13,
                                                             atol=1e-13))
+
+    def test_k_operators_match_full_ci_on_2d_kmesh(self):
+        kmom = self._make_2d_kmom()
+        self.assertFalse(kmom.scalar)
+
+        nkpts = kmom.nkpts
+        ncas = 2
+        norb = nkpts * ncas
+        nelec = (2, 1)
+        rng = np.random.default_rng(31)
+
+        for cre in (False, True):
+            for target_k in range(nkpts):
+                src_layout = sfh.make_k_sector_layout(
+                    norb, nelec, nkpts, target_k=target_k, kmom=kmom)
+                fcivec = (rng.normal(size=src_layout.sector_size)
+                          + 1j * rng.normal(size=src_layout.sector_size))
+                ci_full = krdm_helper.embed_ksector_ci_to_full(
+                    fcivec, norb, nelec, nkpts, target_k=target_k,
+                    link_index=src_layout.link_index, kmom=kmom)
+
+                for k in range(nkpts):
+                    for spin in (0, 1):
+                        with self.subTest(cre=cre, target_k=target_k,
+                                          k=k, spin=spin):
+                            if cre:
+                                test, info = sfh.cre_k(
+                                    fcivec, norb, nelec, nkpts, target_k,
+                                    k, 0, spin, return_info=True,
+                                    source_link_index=src_layout.link_index,
+                                    kmom=kmom)
+                            else:
+                                test, info = sfh.des_k(
+                                    fcivec, norb, nelec, nkpts, target_k,
+                                    k, 0, spin, return_info=True,
+                                    source_link_index=src_layout.link_index,
+                                    kmom=kmom)
+
+                            orb = k * ncas
+                            ref_full, target_nelec = _apply_full_op(
+                                ci_full, norb, nelec, orb, spin, cre=cre)
+                            target_layout = sfh.make_k_sector_layout(
+                                norb, target_nelec, nkpts,
+                                target_k=info['target_k'], kmom=kmom)
+                            ref = krdm_helper.extract_ksector_ci_from_full(
+                                ref_full, norb, target_nelec, nkpts,
+                                target_k=info['target_k'],
+                                link_index=target_layout.link_index,
+                                kmom=kmom)
+
+                            self.assertEqual(info['nelec'], target_nelec)
+                            self.assertEqual(info['target_k'],
+                                             (kcistrings._kadd(kmom, target_k, k)
+                                              if cre else
+                                              kcistrings._ksub(kmom, target_k, k)))
+                            self.assertEqual(test.shape, ref.shape)
+                            self.assertTrue(np.allclose(test, ref))
 
     def test_make_spectral_poles_from_charged_roots(self):
         roots = _one_alpha_roots()

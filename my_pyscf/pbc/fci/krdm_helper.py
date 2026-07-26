@@ -55,17 +55,19 @@ def _init_kci_lib():
 
 
 def _as_contract_map(norb, nelec, nkpts, target_k=0, link_index=None,
-                     spin=None, contract_map=None):
+                     spin=None, contract_map=None, kmom=None,
+                     kconserv=None):
     if contract_map is not None:
         return contract_map
 
     link_index = _unpack_k(norb, nelec, nkpts, link_index=link_index,
-                           spin=spin)
+                           spin=spin, kmom=kmom, kconserv=kconserv)
     return kcistrings.make_kfci_contract_map(
         norb, nelec, nkpts, target_k, link_index=link_index,
-        build_pair_tables=False)
+        build_pair_tables=False, kmom=kmom, kconserv=kconserv)
 
-def _unpack_k(norb, nelec, nkpts, link_index=None, spin=None):
+def _unpack_k(norb, nelec, nkpts, link_index=None, spin=None, kmom=None,
+              kconserv=None):
     '''
     Generate or unpack the k-aware link indices.
     '''
@@ -77,19 +79,23 @@ def _unpack_k(norb, nelec, nkpts, link_index=None, spin=None):
 
         if spin == 0 and neleca == nelecb:
             link_indexa = link_indexb = kcistrings.gen_linkstr_index_k(
-                range(norb), neleca, orb_k, nkpts)
+                range(norb), neleca, orb_k, nkpts, kmom=kmom,
+                kconserv=kconserv)
         else:
             link_indexa = kcistrings.gen_linkstr_index_k(
-                range(norb), neleca, orb_k, nkpts)
+                range(norb), neleca, orb_k, nkpts, kmom=kmom,
+                kconserv=kconserv)
             link_indexb = kcistrings.gen_linkstr_index_k(
-                range(norb), nelecb, orb_k, nkpts)
+                range(norb), nelecb, orb_k, nkpts, kmom=kmom,
+                kconserv=kconserv)
         return link_indexa, link_indexb
 
     assert link_index[0].shape[2] == link_index[1].shape[2] == 8
     return link_index
 
 def _embed_ksector_ci_to_full_python(fcivec, norb, nelec, nkpts, target_k=0,
-                                     link_index=None, spin=None):
+                                     link_index=None, spin=None, kmom=None,
+                                     kconserv=None):
     '''
     Embed a k-FCI sector vector into the full spin-string CI matrix.
     args:
@@ -115,11 +121,14 @@ def _embed_ksector_ci_to_full_python(fcivec, norb, nelec, nkpts, target_k=0,
     target_k = int(target_k) % nkpts
 
     link_indexa, link_indexb = _unpack_k(norb, (neleca, nelecb), nkpts,
-                                         link_index=link_index, spin=spin)
+                                         link_index=link_index, spin=spin,
+                                         kmom=kmom, kconserv=kconserv)
     straid_k, strbid_k = kcistrings.gen_k_sector_maps(
-        link_indexa, link_indexb, nkpts)[:2]
+        link_indexa, link_indexb, nkpts, kmom=kmom,
+        kconserv=kconserv)[:2]
     blocks = kcistrings.gen_k_sector_linkstr_info(
-        link_indexa, link_indexb, nkpts, target_k)
+        link_indexa, link_indexb, nkpts, target_k, kmom=kmom,
+        kconserv=kconserv)
 
     sector_size = int(blocks[:, 5].sum()) if blocks.size else 0
     assert fcivec.size == sector_size, (fcivec.size, sector_size)
@@ -141,7 +150,8 @@ def _embed_ksector_ci_to_full_python(fcivec, norb, nelec, nkpts, target_k=0,
 
 
 def embed_ksector_ci_to_full(fcivec, norb, nelec, nkpts, target_k=0,
-                             link_index=None, spin=None, contract_map=None):
+                             link_index=None, spin=None, contract_map=None,
+                             kmom=None, kconserv=None):
     '''
     Embed a k-FCI sector vector into the full spin-string CI matrix using the
     backend C mapping helper.
@@ -149,7 +159,8 @@ def embed_ksector_ci_to_full(fcivec, norb, nelec, nkpts, target_k=0,
     neleca, nelecb = _unpack_nelec(nelec, spin)
     contract_map = _as_contract_map(
         norb, (neleca, nelecb), nkpts, target_k=target_k,
-        link_index=link_index, spin=spin, contract_map=contract_map)
+        link_index=link_index, spin=spin, contract_map=contract_map,
+        kmom=kmom, kconserv=kconserv)
     assert fcivec.size == contract_map.sector_size, (
         fcivec.size, contract_map.sector_size)
 
@@ -175,7 +186,8 @@ def embed_ksector_ci_to_full(fcivec, norb, nelec, nkpts, target_k=0,
 
 def _extract_ksector_ci_from_full_python(ci_full, norb, nelec, nkpts,
                                          target_k=0, link_index=None,
-                                         spin=None):
+                                         spin=None, kmom=None,
+                                         kconserv=None):
     '''
     Extract a k-FCI sector vector from the full spin-string CI matrix.
     args:
@@ -201,11 +213,14 @@ def _extract_ksector_ci_from_full_python(ci_full, norb, nelec, nkpts,
     target_k = int(target_k) % nkpts
 
     link_indexa, link_indexb = _unpack_k(norb, (neleca, nelecb), nkpts,
-                                         link_index=link_index, spin=spin)
+                                         link_index=link_index, spin=spin,
+                                         kmom=kmom, kconserv=kconserv)
     straid_k, strbid_k = kcistrings.gen_k_sector_maps(
-        link_indexa, link_indexb, nkpts)[:2]
+        link_indexa, link_indexb, nkpts, kmom=kmom,
+        kconserv=kconserv)[:2]
     blocks = kcistrings.gen_k_sector_linkstr_info(
-        link_indexa, link_indexb, nkpts, target_k)
+        link_indexa, link_indexb, nkpts, target_k, kmom=kmom,
+        kconserv=kconserv)
 
     ci_full = np.asarray(ci_full)
     sector_size = int(blocks[:, 5].sum()) if blocks.size else 0
@@ -225,7 +240,8 @@ def _extract_ksector_ci_from_full_python(ci_full, norb, nelec, nkpts,
 
 def extract_ksector_ci_from_full(ci_full, norb, nelec, nkpts, target_k=0,
                                  link_index=None, spin=None,
-                                 contract_map=None):
+                                 contract_map=None, kmom=None,
+                                 kconserv=None):
     '''
     Extract a k-FCI sector vector from the full spin-string CI matrix using the
     backend C mapping helper.
@@ -233,7 +249,8 @@ def extract_ksector_ci_from_full(ci_full, norb, nelec, nkpts, target_k=0,
     neleca, nelecb = _unpack_nelec(nelec, spin)
     contract_map = _as_contract_map(
         norb, (neleca, nelecb), nkpts, target_k=target_k,
-        link_index=link_index, spin=spin, contract_map=contract_map)
+        link_index=link_index, spin=spin, contract_map=contract_map,
+        kmom=kmom, kconserv=kconserv)
 
     nstrb = cistring.num_strings(norb, nelecb)
     ci_full = np.asarray(ci_full, dtype=np.complex128, order="C")
@@ -254,30 +271,31 @@ def extract_ksector_ci_from_full(ci_full, norb, nelec, nkpts, target_k=0,
     return fcivec
 
 def make_rdm1s(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
-               spin=None):
+               spin=None, kmom=None, kconserv=None):
     '''
     Spin-separated 1-RDMs for a k-FCI vector.
     '''
     ci_full = embed_ksector_ci_to_full(fcivec, norb, nelec, nkpts,
                                        target_k=target_k,
-                                       link_index=link_index, spin=spin)
+                                       link_index=link_index, spin=spin,
+                                       kmom=kmom, kconserv=kconserv)
     return direct_spin1_cplx.make_rdm1s(ci_full, norb,
                                         _unpack_nelec(nelec, spin),
                                         link_index=None)
 
 def make_rdm1(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
-              spin=None):
+              spin=None, kmom=None, kconserv=None):
     '''
     Spin-summed 1-RDM for a k-FCI vector.
     '''
     rdm1a, rdm1b = make_rdm1s(fcivec, norb, nelec, nkpts,
                               target_k=target_k, link_index=link_index,
-                              spin=spin)
+                              spin=spin, kmom=kmom, kconserv=kconserv)
     rdm1 = rdm1a + rdm1b
     return rdm1.conj().T
 
 def make_rdm12s(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
-                reorder=True, spin=None):
+                reorder=True, spin=None, kmom=None, kconserv=None):
     '''
     Spin-separated 1-RDMs and 2-RDMs for a k-FCI vector.
     returns:
@@ -285,25 +303,27 @@ def make_rdm12s(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
     '''
     ci_full = embed_ksector_ci_to_full(fcivec, norb, nelec, nkpts,
                                        target_k=target_k,
-                                       link_index=link_index, spin=spin)
+                                       link_index=link_index, spin=spin,
+                                       kmom=kmom, kconserv=kconserv)
     return direct_spin1_cplx.make_rdm12s(ci_full, norb,
                                          _unpack_nelec(nelec, spin),
                                          link_index=None, reorder=reorder)
 
 def make_rdm12(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
-               reorder=True, spin=None):
+               reorder=True, spin=None, kmom=None, kconserv=None):
     '''
     Spin-summed 1-RDM and 2-RDM for a k-FCI vector.
     '''
     (dm1a, dm1b), (dm2aa, dm2ab, dm2bb) = make_rdm12s(
         fcivec, norb, nelec, nkpts, target_k=target_k,
-        link_index=link_index, reorder=reorder, spin=spin)
+        link_index=link_index, reorder=reorder, spin=spin, kmom=kmom,
+        kconserv=kconserv)
     rdm1 = dm1a + dm1b
     rdm2 = dm2aa + dm2bb + dm2ab + dm2ab.transpose(2, 3, 0, 1)
     return rdm1.conj().T, rdm2
 
 def contract_ss(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
-                spin=None):
+                spin=None, kmom=None, kconserv=None):
     '''
     Apply S^2 to a k-FCI vector in a fixed total momentum sector.
     The S^2 operator does not change the spatial total momentum sector, so the
@@ -311,21 +331,24 @@ def contract_ss(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
     '''
     ci_full = embed_ksector_ci_to_full(fcivec, norb, nelec, nkpts,
                                        target_k=target_k,
-                                       link_index=link_index, spin=spin)
+                                       link_index=link_index, spin=spin,
+                                       kmom=kmom, kconserv=kconserv)
     ci_full = np.asarray(ci_full, dtype=np.complex128, order="C")
     ci1_full = spin_op.contract_ss0(ci_full, norb, _unpack_nelec(nelec, spin))
     return extract_ksector_ci_from_full(ci1_full, norb, nelec, nkpts,
                                         target_k=target_k,
-                                        link_index=link_index, spin=spin)
+                                        link_index=link_index, spin=spin,
+                                        kmom=kmom, kconserv=kconserv)
 
 def spin_square(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
-                spin=None, **kwargs):
+                spin=None, kmom=None, kconserv=None, **kwargs):
     '''
     Spin square for a k-FCI vector in a fixed total momentum sector.
     '''
     ci_full = embed_ksector_ci_to_full(fcivec, norb, nelec, nkpts,
                                        target_k=target_k,
-                                       link_index=link_index, spin=spin)
+                                       link_index=link_index, spin=spin,
+                                       kmom=kmom, kconserv=kconserv)
     ci_full = np.asarray(ci_full, dtype=np.complex128, order="C")
     return spin_op.spin_square0(ci_full, norb, _unpack_nelec(nelec, spin),
                                 **kwargs)

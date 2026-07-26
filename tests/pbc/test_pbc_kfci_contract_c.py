@@ -2,6 +2,7 @@
 import unittest
 import numpy as np
 from pyscf import lib
+from pyscf.pbc import gto
 
 from mrh.my_pyscf.pbc.fci.direct_spin1_kfci import _unpack
 from mrh.my_pyscf.pbc.fci.direct_spin1_kfci import (
@@ -14,8 +15,21 @@ from mrh.my_pyscf.pbc.fci import direct_spin1_kfci
 from mrh.my_pyscf.pbc.fci.kcistrings import (
     _raise_if_contract_structure_too_large,
 )
+from mrh.my_pyscf.pbc.fci import kcistrings
 
 class KnownValues(unittest.TestCase):
+
+    @staticmethod
+    def _make_2d_kmom():
+        cell = gto.Cell()
+        cell.a = np.eye(3) * 4.0
+        cell.atom = 'He 0 0 0'
+        cell.basis = 'sto-3g'
+        cell.verbose = 0
+        cell.build()
+        kpts = cell.make_kpts([2, 2, 1], wrap_around=True)
+        return kcistrings.make_kpoint_momentum(len(kpts), cell=cell,
+                                               kpts=kpts)
 
     def test_contract_2e_k_matches_python_reference(self):
         test_cases = [
@@ -60,6 +74,77 @@ class KnownValues(unittest.TestCase):
                     np.testing.assert_allclose(
                         sigma_c, sigma_ref, atol=1e-10, rtol=1e-10
                     )
+
+    def test_contract_2e_k_matches_python_reference_2d_kmesh(self):
+        kmom = self._make_2d_kmom()
+        self.assertFalse(kmom.scalar)
+
+        nkpts = kmom.nkpts
+        ncas = 2
+        nelec = (2, 1)
+        norb = nkpts * ncas
+        rng = np.random.default_rng(52)
+        link_index = _unpack(norb, nelec, None, nkpts, kmom=kmom)
+        eri = rng.normal(
+            size=(nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas)
+        )
+        eri = eri + 1j * rng.normal(size=eri.shape)
+
+        for target_k in range(nkpts):
+            with self.subTest(target_k=target_k):
+                contract_map = make_kfci_contract_map(
+                    norb, nelec, nkpts, target_k, link_index=link_index,
+                    explicit_ab=True, kmom=kmom)
+                ci0 = rng.normal(size=contract_map.sector_size)
+                ci0 = ci0 + 1j * rng.normal(size=contract_map.sector_size)
+                ci0 = np.asarray(ci0, dtype=np.complex128, order="C")
+
+                sigma_ref = contract_2e_k_py(
+                    eri, ci0, norb, nelec, nkpts, target_k,
+                    link_index=link_index, kmom=kmom)
+                sigma_c = contract_2e_k(
+                    eri, ci0, norb, nelec, nkpts, target_k,
+                    contract_map=contract_map, kmom=kmom)
+
+                np.testing.assert_allclose(
+                    sigma_c, sigma_ref, atol=1e-10, rtol=1e-10
+                )
+
+    def test_contract_2e_k_streamed_ab_2d_kmesh(self):
+        kmom = self._make_2d_kmom()
+        nkpts = kmom.nkpts
+        ncas = 2
+        nelec = (2, 1)
+        norb = nkpts * ncas
+        target_k = 3
+        rng = np.random.default_rng(53)
+        link_index = _unpack(norb, nelec, None, nkpts, kmom=kmom)
+        contract_map = make_kfci_contract_map(
+            norb, nelec, nkpts, target_k, link_index=link_index,
+            explicit_ab=False, kmom=kmom)
+        self.assertFalse(contract_map.explicit_ab)
+
+        eri = rng.normal(
+            size=(nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas)
+        )
+        eri = eri + 1j * rng.normal(size=eri.shape)
+        ci0 = rng.normal(size=contract_map.sector_size)
+        ci0 = ci0 + 1j * rng.normal(size=contract_map.sector_size)
+        ci0 = np.asarray(ci0, dtype=np.complex128, order="C")
+
+        ref_map = make_kfci_contract_map(
+            norb, nelec, nkpts, target_k, link_index=link_index,
+            explicit_ab=True, kmom=kmom)
+        sigma_ref = contract_2e_k(
+            eri, ci0, norb, nelec, nkpts, target_k,
+            contract_map=ref_map, kmom=kmom)
+        sigma_test = contract_2e_k(
+            eri, ci0, norb, nelec, nkpts, target_k,
+            contract_map=contract_map, kmom=kmom)
+
+        np.testing.assert_allclose(
+            sigma_test, sigma_ref, atol=1e-10, rtol=1e-10
+        )
 
     def test_contract_2e_k_thread_consistency(self):
         nkpts = 4
