@@ -936,6 +936,8 @@ def build_contract_structures_c(link_indexa, link_indexb, str2tot_a,
     naa_groups, naa_entries = int(dims[2]), int(dims[3])
     nbb_groups, nbb_entries = int(dims[4]), int(dims[5])
     table_size = nkpts * nkpts
+    _raise_if_contract_structure_too_large(
+        nab_entries, naa_entries, nbb_entries)
 
     arrays = {
         "ab_group_tab": np.empty((nab_groups, 3), dtype=np.int32,
@@ -1003,6 +1005,28 @@ def build_contract_structures_c(link_indexa, link_indexb, str2tot_a,
         raise RuntimeError("FCIfill_contract_k_structures failed")
 
     return arrays
+
+
+def _raise_if_contract_structure_too_large(nab_entries, naa_entries,
+                                           nbb_entries):
+    max_int32 = np.iinfo(np.int32).max
+    if max(nab_entries, naa_entries, nbb_entries) <= max_int32:
+        return
+
+    # The explicit structural map stores entry offsets/cursors as int32.
+    # Building it beyond this limit would overflow in C and can also imply
+    # hundreds of GB of sparse-map arrays.
+    entry_bytes = (
+        4 * (nab_entries + naa_entries + nbb_entries) * 3
+        + 8 * (2 * nab_entries + naa_entries + nbb_entries)
+    )
+    raise MemoryError(
+        "k-FCI explicit contract map is too large for the current "
+        "int32 sparse-entry representation: "
+        f"ab_entries={nab_entries}, aa_entries={naa_entries}, "
+        f"bb_entries={nbb_entries}, estimated_entry_storage="
+        f"{entry_bytes / 1024**3:.2f} GiB"
+    )
 
 
 def build_contract_pair_tables(link_indexa, link_indexb, norb, nkpts):

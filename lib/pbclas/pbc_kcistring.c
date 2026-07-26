@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdint.h>
+#include <limits.h>
 #include <omp.h>
 #include <complex.h>
 #include "config.h"
@@ -723,6 +724,9 @@ int FCIfill_contract_k_structures(int *linka, int nstra, int nlinka,
                 linka, nstra, nlinka, linkb, nstrb, nlinkb,
                 blocks, nblocks, nkpts, dims,
                 &ab_counts, &aa_counts, &bb_counts) != 0) {
+        goto done;
+    }
+    if (dims[1] > INT_MAX || dims[3] > INT_MAX || dims[5] > INT_MAX) {
         goto done;
     }
 

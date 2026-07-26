@@ -10,6 +10,9 @@ from mrh.my_pyscf.pbc.fci.direct_spin1_kfci import (
     make_kfci_contract_map,
     sector_size,
 )
+from mrh.my_pyscf.pbc.fci.kcistrings import (
+    _raise_if_contract_structure_too_large,
+)
 
 class KnownValues(unittest.TestCase):
 
@@ -93,6 +96,13 @@ class KnownValues(unittest.TestCase):
             lib.num_threads(saved_threads)
 
         np.testing.assert_allclose(sigma_4, sigma_1, atol=1e-10, rtol=1e-10)
+
+    def test_contract_structure_size_guard(self):
+        max_int32 = np.iinfo(np.int32).max
+        with self.assertRaisesRegex(MemoryError, "ab_entries"):
+            _raise_if_contract_structure_too_large(max_int32 + 1, 0, 0)
+
+        _raise_if_contract_structure_too_large(max_int32, 0, 0)
 
 
 if __name__ == "__main__":
