@@ -272,12 +272,23 @@ def _select_root_energy(energy, root=0):
 
 
 def compute_band_energies(charged_results, reference_energy, charge=None,
-                          root=0, kpts=None, nkpts=None, per_cell=False):
+                          root=0, kpts=None, nkpts=None, per_cell=False,
+                          reference_target_k=None, kmom=None, cell=None,
+                          kconserv=None):
     '''
-    Convert charged-sector KCASCI energies into hole/particle band energies.
-    Note: here we are using the same per-cell convention as KCASCI.kernel.
-    IP = E(charged) - E(neutral)
-    EA = E(neutral) - E(charged)
+    Convert charged-sector KCASCI energies into quasiparticle band energies.
+
+    The returned removal (hole) pole is E(N) - E(N-1) = -IP, while the
+    addition (particle) pole is E(N+1) - E(N) = -EA.  The charged KCASCI
+    ``target_k`` labels the total momentum of the N+/-1 state, not directly
+    the momentum of the removed or added electron.  For a reference-sector
+    momentum K0,
+
+        k_hole = K0 - K(N-1)
+        k_particle = K(N+1) - K0
+
+    Momentum subtraction uses the table-driven k-point arithmetic so this
+    also works for nontrivial k-point orderings and multidimensional meshes.
 
     args:
         charged_results : list of dict
@@ -290,6 +301,12 @@ def compute_band_energies(charged_results, reference_energy, charge=None,
             -1 means: particle
         root : int
             The root index of the charged sector to use for the band energy.
+        reference_target_k : int or None
+            Total-momentum sector of the neutral reference.  Defaults to the
+            Gamma index from the k-point momentum table.
+        kmom : kcistrings.KPointMomentum or None
+            Explicit k-point arithmetic.  This is inferred from a charged
+            KCASCI object when possible.
     '''
     if hasattr(charged_results, 'charged_results'):
 
@@ -297,6 +314,9 @@ def compute_band_energies(charged_results, reference_energy, charge=None,
         if charge is None: charge = mc.charge
         if nkpts is None: nkpts = mc.nkpts
         if kpts is None: kpts = getattr(mc._scf, 'kpts', None)
+        if cell is None: cell = mc.cell
+        if kconserv is None: kconserv = getattr(mc, 'kconserv', None)
+        if kmom is None: kmom = _get_kmom_for_kcasci(mc)
 
         charged_results = mc.charged_results
 
@@ -309,7 +329,6 @@ def compute_band_energies(charged_results, reference_energy, charge=None,
         raise ValueError("charged band energies require a nonzero charge")
 
     kind = 'hole' if int(charge) > 0 else 'particle'
-    energy_sign = -1 if kind == 'hole' else 1
     momentum_key = f'{kind}_momentum'
 
     bands = []
@@ -321,14 +340,34 @@ def compute_band_energies(charged_results, reference_energy, charge=None,
                              "store it")
         result_nkpts = int(result_nkpts)
         scale = 1 if per_cell else result_nkpts
-        momentum = target_k
+
+        result_kmom = kmom
+        if result_kmom is None or result_kmom.nkpts != result_nkpts:
+            result_kmom = kcistrings.make_kpoint_momentum(
+                result_nkpts, cell=cell, kpts=kpts, kconserv=kconserv)
+        if reference_target_k is None:
+            reference_k = int(result_kmom.zero)
+        else:
+            reference_k = int(reference_target_k) % result_nkpts
+
+        if kind == 'hole':
+            band_k = int(result_kmom.ksub[reference_k, target_k])
+        else:
+            band_k = int(result_kmom.ksub[target_k, reference_k])
+
+        momentum = band_k
         if kpts is not None:
-            momentum = np.asarray(kpts[target_k]).copy()
+            momentum = np.asarray(kpts[band_k]).copy()
         e_charged = _select_root_energy(result['e_tot'], root=root)
         e_ref = _select_root_energy(reference_energy, root=0)
+        if kind == 'hole':
+            energy = scale * (e_ref - e_charged)
+        else:
+            energy = scale * (e_charged - e_ref)
         bands.append({'target_k': target_k,
+            'momentum_index': band_k,
             momentum_key: momentum,
-            'energy': scale * energy_sign * (e_charged - e_ref),
+            'energy': energy,
             'root': int(root),
             'charge': int(charge),
             'kind': kind,
@@ -977,9 +1016,10 @@ class ChargedPBCKCASCI(PBCKCASCI):
         return self.e_tot, self.e_cas, self.ci, self.mo_coeff, self.mo_energy
 
     def band_energies(self, reference_energy, root=0, kpts=None,
-                      per_cell=False):
+                      per_cell=False, reference_target_k=None):
         return compute_band_energies(self, reference_energy, root=root, 
-                                     kpts=kpts, per_cell=per_cell)
+                                     kpts=kpts, per_cell=per_cell,
+                                     reference_target_k=reference_target_k)
 
     get_band_energy = band_energies
     band_energy = band_energies

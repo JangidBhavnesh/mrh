@@ -53,45 +53,67 @@ class KnownValues(unittest.TestCase):
 
     def test_charged_active_nelecas(self):
         self.assertEqual(
-            kcasci.charged_active_nelecas(2, 8, 2, 0, charge=1),
+            kcasci._get_nelecas_for_charged_kcasci(
+                2, 8, 2, 0, charge=1),
             (8, 7))
         self.assertEqual(
-            kcasci.charged_active_nelecas(2, 8, 2, 0, charge=-1),
+            kcasci._get_nelecas_for_charged_kcasci(
+                2, 8, 2, 0, charge=-1),
             (9, 8))
         self.assertEqual(
-            kcasci.charged_active_nelecas(2, 8, (1, 1), 0,
-                                          charge=1, spin=-1),
+            kcasci._get_nelecas_for_charged_kcasci(
+                2, 8, (1, 1), 0, charge=1, spin=-1),
             (7, 8))
 
     def test_charged_band_energies(self):
         results = [
-            {'target_k': 0, 'charge': 1, 'nkpts': 2,
+            {'target_k': 0, 'charge': 1, 'nkpts': 3,
              'e_tot': np.asarray([-1.0, -0.8])},
-            {'target_k': 1, 'charge': 1, 'nkpts': 2,
+            {'target_k': 1, 'charge': 1, 'nkpts': 3,
              'e_tot': np.asarray([-0.9, -0.7])},
+            {'target_k': 2, 'charge': 1, 'nkpts': 3,
+             'e_tot': np.asarray([-0.85, -0.65])},
         ]
-        kpts = np.asarray([[0.0, 0.0, 0.0], [0.5, 0.0, 0.0]])
-        bands = kcasci.charged_band_energies(
+        kpts = np.asarray([
+            [0.0, 0.0, 0.0],
+            [0.25, 0.0, 0.0],
+            [-0.25, 0.0, 0.0],
+        ])
+        bands = kcasci.compute_band_energies(
             results, reference_energy=-1.2, root=1, kpts=kpts)
 
-        self.assertEqual([b['target_k'] for b in bands], [0, 1])
+        self.assertEqual([b['target_k'] for b in bands], [0, 1, 2])
+        self.assertEqual([b['momentum_index'] for b in bands], [0, 2, 1])
         self.assertIn('hole_momentum', bands[0])
-        self.assertTrue(np.allclose(bands[1]['hole_momentum'], kpts[1]))
-        self.assertAlmostEqual(bands[0]['energy'], -0.8)
-        self.assertAlmostEqual(bands[1]['energy'], -1.0)
+        self.assertTrue(np.allclose(bands[1]['hole_momentum'], kpts[2]))
+        self.assertTrue(np.allclose(bands[2]['hole_momentum'], kpts[1]))
+        self.assertAlmostEqual(bands[0]['energy'], -1.2)
+        self.assertAlmostEqual(bands[1]['energy'], -1.5)
+        self.assertAlmostEqual(bands[2]['energy'], -1.65)
 
         particle_results = [
-            {'target_k': 0, 'charge': -1, 'nkpts': 2,
+            {'target_k': 0, 'charge': -1, 'nkpts': 3,
              'e_tot': np.asarray([-1.1, -0.9])},
-            {'target_k': 1, 'charge': -1, 'nkpts': 2,
+            {'target_k': 1, 'charge': -1, 'nkpts': 3,
              'e_tot': np.asarray([-1.0, -0.8])},
+            {'target_k': 2, 'charge': -1, 'nkpts': 3,
+             'e_tot': np.asarray([-0.95, -0.75])},
         ]
-        particle_bands = kcasci.charged_band_energies(
+        particle_bands = kcasci.compute_band_energies(
             particle_results, reference_energy=-1.2, root=1, kpts=kpts)
 
+        self.assertEqual(
+            [b['momentum_index'] for b in particle_bands], [0, 1, 2])
         self.assertIn('particle_momentum', particle_bands[0])
-        self.assertAlmostEqual(particle_bands[0]['energy'], 0.6)
-        self.assertAlmostEqual(particle_bands[1]['energy'], 0.8)
+        self.assertAlmostEqual(particle_bands[0]['energy'], 0.9)
+        self.assertAlmostEqual(particle_bands[1]['energy'], 1.2)
+        self.assertAlmostEqual(particle_bands[2]['energy'], 1.35)
+
+        shifted_reference = kcasci.compute_band_energies(
+            results, reference_energy=-1.2, root=1, kpts=kpts,
+            reference_target_k=1)
+        self.assertEqual(
+            [b['momentum_index'] for b in shifted_reference], [1, 0, 2])
 
     def test_kcasci_target_k0_vs_casci(self):
         intraH = 0.74
