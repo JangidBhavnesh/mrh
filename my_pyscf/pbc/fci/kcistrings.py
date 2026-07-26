@@ -5,6 +5,7 @@ import numpy as np
 from dataclasses import dataclass
 from collections import defaultdict
 
+from pyscf import lib, __config__
 from pyscf.fci.cistring import OIndexList, make_strings
 from pyscf.fci.addons import _unpack_nelec
 
@@ -12,6 +13,10 @@ from mrh.lib.helper import load_library
 
 libpbckcistring = load_library('libpbc_kcistring')
 _contract_structure_builder_configured = False
+contract_map_threads = getattr(
+    __config__, "pbc_k_contract_map_threads",
+    getattr(__config__, "pbc_k_contract_2e_threads",
+            getattr(__config__, "pbc_contract_2e_threads", None)))
 
 # Author: Bhavnesh Jangid
 
@@ -915,18 +920,19 @@ def build_contract_structures_c(link_indexa, link_indexb, str2tot_a,
     nstrb, nlinkb, _ = link_indexb.shape
     dims = np.zeros(6, dtype=np.int64)
 
-    status = libpbckcistring.FCIcount_contract_k_structures(
-        link_indexa.ctypes.data_as(ctypes.c_void_p),
-        ctypes.c_int(nstra),
-        ctypes.c_int(nlinka),
-        link_indexb.ctypes.data_as(ctypes.c_void_p),
-        ctypes.c_int(nstrb),
-        ctypes.c_int(nlinkb),
-        blocks.ctypes.data_as(ctypes.c_void_p),
-        ctypes.c_int(blocks.shape[0]),
-        ctypes.c_int(nkpts),
-        dims.ctypes.data_as(ctypes.c_void_p),
-    )
+    with lib.with_omp_threads(contract_map_threads):
+        status = libpbckcistring.FCIcount_contract_k_structures(
+            link_indexa.ctypes.data_as(ctypes.c_void_p),
+            ctypes.c_int(nstra),
+            ctypes.c_int(nlinka),
+            link_indexb.ctypes.data_as(ctypes.c_void_p),
+            ctypes.c_int(nstrb),
+            ctypes.c_int(nlinkb),
+            blocks.ctypes.data_as(ctypes.c_void_p),
+            ctypes.c_int(blocks.shape[0]),
+            ctypes.c_int(nkpts),
+            dims.ctypes.data_as(ctypes.c_void_p),
+        )
     if status != 0:
         raise RuntimeError("FCIcount_contract_k_structures failed")
 
@@ -963,39 +969,40 @@ def build_contract_structures_c(link_indexa, link_indexb, str2tot_a,
         "bb_eri_idx": np.empty(nbb_entries, dtype=np.int64, order="C"),
     }
 
-    status = libpbckcistring.FCIfill_contract_k_structures(
-        link_indexa.ctypes.data_as(ctypes.c_void_p),
-        ctypes.c_int(nstra),
-        ctypes.c_int(nlinka),
-        link_indexb.ctypes.data_as(ctypes.c_void_p),
-        ctypes.c_int(nstrb),
-        ctypes.c_int(nlinkb),
-        str2tot_a.ctypes.data_as(ctypes.c_void_p),
-        str2tot_b.ctypes.data_as(ctypes.c_void_p),
-        blocks.ctypes.data_as(ctypes.c_void_p),
-        ctypes.c_int(blocks.shape[0]),
-        ctypes.c_int(nkpts),
-        ctypes.c_int(ncas),
-        arrays["ab_group_tab"].ctypes.data_as(ctypes.c_void_p),
-        arrays["ab_group_offsets"].ctypes.data_as(ctypes.c_void_p),
-        arrays["ab_src_addr"].ctypes.data_as(ctypes.c_void_p),
-        arrays["ab_dst_addr"].ctypes.data_as(ctypes.c_void_p),
-        arrays["ab_sign"].ctypes.data_as(ctypes.c_void_p),
-        arrays["ab_eri_idx_ab"].ctypes.data_as(ctypes.c_void_p),
-        arrays["ab_eri_idx_ba"].ctypes.data_as(ctypes.c_void_p),
-        arrays["aa_group_tab"].ctypes.data_as(ctypes.c_void_p),
-        arrays["aa_group_offsets"].ctypes.data_as(ctypes.c_void_p),
-        arrays["aa_src_addr"].ctypes.data_as(ctypes.c_void_p),
-        arrays["aa_dst_addr"].ctypes.data_as(ctypes.c_void_p),
-        arrays["aa_sign"].ctypes.data_as(ctypes.c_void_p),
-        arrays["aa_eri_idx"].ctypes.data_as(ctypes.c_void_p),
-        arrays["bb_group_tab"].ctypes.data_as(ctypes.c_void_p),
-        arrays["bb_group_offsets"].ctypes.data_as(ctypes.c_void_p),
-        arrays["bb_src_addr"].ctypes.data_as(ctypes.c_void_p),
-        arrays["bb_dst_addr"].ctypes.data_as(ctypes.c_void_p),
-        arrays["bb_sign"].ctypes.data_as(ctypes.c_void_p),
-        arrays["bb_eri_idx"].ctypes.data_as(ctypes.c_void_p),
-    )
+    with lib.with_omp_threads(contract_map_threads):
+        status = libpbckcistring.FCIfill_contract_k_structures(
+            link_indexa.ctypes.data_as(ctypes.c_void_p),
+            ctypes.c_int(nstra),
+            ctypes.c_int(nlinka),
+            link_indexb.ctypes.data_as(ctypes.c_void_p),
+            ctypes.c_int(nstrb),
+            ctypes.c_int(nlinkb),
+            str2tot_a.ctypes.data_as(ctypes.c_void_p),
+            str2tot_b.ctypes.data_as(ctypes.c_void_p),
+            blocks.ctypes.data_as(ctypes.c_void_p),
+            ctypes.c_int(blocks.shape[0]),
+            ctypes.c_int(nkpts),
+            ctypes.c_int(ncas),
+            arrays["ab_group_tab"].ctypes.data_as(ctypes.c_void_p),
+            arrays["ab_group_offsets"].ctypes.data_as(ctypes.c_void_p),
+            arrays["ab_src_addr"].ctypes.data_as(ctypes.c_void_p),
+            arrays["ab_dst_addr"].ctypes.data_as(ctypes.c_void_p),
+            arrays["ab_sign"].ctypes.data_as(ctypes.c_void_p),
+            arrays["ab_eri_idx_ab"].ctypes.data_as(ctypes.c_void_p),
+            arrays["ab_eri_idx_ba"].ctypes.data_as(ctypes.c_void_p),
+            arrays["aa_group_tab"].ctypes.data_as(ctypes.c_void_p),
+            arrays["aa_group_offsets"].ctypes.data_as(ctypes.c_void_p),
+            arrays["aa_src_addr"].ctypes.data_as(ctypes.c_void_p),
+            arrays["aa_dst_addr"].ctypes.data_as(ctypes.c_void_p),
+            arrays["aa_sign"].ctypes.data_as(ctypes.c_void_p),
+            arrays["aa_eri_idx"].ctypes.data_as(ctypes.c_void_p),
+            arrays["bb_group_tab"].ctypes.data_as(ctypes.c_void_p),
+            arrays["bb_group_offsets"].ctypes.data_as(ctypes.c_void_p),
+            arrays["bb_src_addr"].ctypes.data_as(ctypes.c_void_p),
+            arrays["bb_dst_addr"].ctypes.data_as(ctypes.c_void_p),
+            arrays["bb_sign"].ctypes.data_as(ctypes.c_void_p),
+            arrays["bb_eri_idx"].ctypes.data_as(ctypes.c_void_p),
+        )
     if status != 0:
         raise RuntimeError("FCIfill_contract_k_structures failed")
 

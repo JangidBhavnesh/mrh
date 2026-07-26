@@ -172,6 +172,9 @@ static void count_ab_struct_k(int *linka, int nlinka,
 {
     int table_size = nkpts * nkpts;
 
+#pragma omp parallel for schedule(dynamic) default(none) \
+    shared(linka, nlinka, linkb, order_a, order_b, block_offset, block_nb, \
+           nkpts, counts, table_size)
     for (int src_key = 0; src_key < table_size; src_key++) {
         int ka = src_key / nkpts;
         int kb = src_key % nkpts;
@@ -232,6 +235,9 @@ static void count_same_spin_struct_k(int *link_index, int nstr, int nlink,
         return;
     }
 
+#pragma omp parallel for schedule(dynamic) default(none) \
+    shared(link_index, nstr, nlink, order, block_offset, block_na, block_nb, \
+           nkpts, spin, counts, table_size)
     for (int src_key = 0; src_key < table_size; src_key++) {
         int ka = src_key / nkpts;
         int kb = src_key % nkpts;
@@ -475,6 +481,11 @@ static void fill_ab_struct_k(int *linka, int nstra, int nlinka,
 {
     int table_size = nkpts * nkpts;
 
+#pragma omp parallel for schedule(dynamic) default(none) \
+    shared(linka, nstra, nlinka, linkb, nstrb, nlinkb, str2tot_a, str2tot_b, \
+           order_a, order_b, block_offset, block_nb, nkpts, ncas, \
+           group_index, cursor, src_addr, dst_addr, sign, eri_idx_ab, \
+           eri_idx_ba, table_size)
     for (int src_key = 0; src_key < table_size; src_key++) {
         int ka = src_key / nkpts;
         int kb = src_key % nkpts;
@@ -567,6 +578,10 @@ static void fill_same_spin_struct_k(int *link_index, int nstr, int nlink,
         return;
     }
 
+#pragma omp parallel for schedule(dynamic) default(none) \
+    shared(link_index, nstr, nlink, str2tot, order, block_offset, block_na, \
+           block_nb, nkpts, ncas, spin, group_index, cursor, src_addr, \
+           dst_addr, sign, eri_idx, table_size)
     for (int src_key = 0; src_key < table_size; src_key++) {
         int ka = src_key / nkpts;
         int kb = src_key % nkpts;
