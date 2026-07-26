@@ -1,5 +1,9 @@
 import os
 import numpy as np
+
+os.environ["MPLCONFIGDIR"] = "/tmp/matplotlib"
+os.environ["XDG_CACHE_HOME"] = "/tmp"
+
 import matplotlib
 
 from pyscf import lib
@@ -82,7 +86,8 @@ poles = sfh.label_pole_momenta(poles, kpts)
 spectrum = sfh.make_spectral_function(
     poles, eta=0.05, npts=401, spin_resolved=False,
     orbital_resolved=False)
-checks = sfh.spectral_weight_sum_rules(roots, poles=poles)
+checks = sfh.spectral_weight_sum_rules(roots, poles=poles,
+                                       available_only=True)
 
 print("")
 print("kind          k  target_k  root  orb  spin       omega        weight")
@@ -108,7 +113,7 @@ for k in range(roots.nkpts):
 
 max_missing = max(abs(row['total_missing']) for row in checks)
 print("")
-print(f"max spectral weight missing from supplied roots: {max_missing:.3e}")
+print(f"max supplied-sector spectral weight missing: {max_missing:.3e}")
 
 fig = None
 ax = None

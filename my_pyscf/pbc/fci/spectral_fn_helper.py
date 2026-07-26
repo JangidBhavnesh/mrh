@@ -68,6 +68,7 @@ class KCASCISpectralRoots:
     nelecastot: tuple
     target_k: int
     mo_coeff: object
+    spin_sector_mode: str = 'representative'
 
 
 def _as_spin_id(spin):
@@ -382,9 +383,10 @@ def _set_solver_nroots(kmc, nroots):
         kmc.fcisolver.nroots = int(nroots)
 
 
-def _charged_spin_list(nelecastot, norb, kind, charged_spin):
+def _charged_spin_list(nelecastot, norb, kind, charged_spin,
+                       spin_sector_mode='representative'):
     '''
-    Return charged spin sectors needed for alpha/beta spectral operators.
+    Return charged spin sectors for the charged KCASCI jobs.
     '''
     if isinstance(charged_spin, str) and charged_spin == 'default':
         return [None]
@@ -392,6 +394,12 @@ def _charged_spin_list(nelecastot, norb, kind, charged_spin):
         if isinstance(charged_spin, (list, tuple, np.ndarray)):
             return list(charged_spin)
         return [charged_spin]
+
+    key = spin_sector_mode.lower()
+    if key in ('representative', 'default', 'spin_free'):
+        return [None]
+    if key not in ('spin_resolved', 'separate', 'all'):
+        raise ValueError(f"unknown spin_sector_mode {spin_sector_mode}")
 
     neleca, nelecb = map(int, nelecastot)
     spin0 = neleca - nelecb
@@ -422,15 +430,17 @@ def compute_kcasci_spectral_roots(kmf, ncas, nelecas, ncore=None,
                                   with_particle=True,
                                   charged_spin_hole=None,
                                   charged_spin_particle=None,
+                                  spin_sector_mode='representative',
                                   solver_setup=None, verbose=None):
     '''
     Run neutral, hole, and particle k-CASCI jobs and collect their roots.
 
     The returned root table is the input needed for spectral-function transition
     amplitudes.  Energies follow KCASCI's per-cell convention, with supercell
-    values also stored for pole-energy differences.  By default both charged
-    spin sectors needed by alpha/beta spectral operators are computed; pass
-    charged_spin_hole/particle='default' to use KCASCI's lowest-spin default.
+    values also stored for pole-energy differences.  The default uses one
+    representative charged spin sector, consistent with spin-free MCSCF/CASCI.
+    Set spin_sector_mode='spin_resolved' to run the alpha/beta sectors
+    separately.
     '''
     from mrh.my_pyscf.pbc import mcscf
 
@@ -455,7 +465,8 @@ def compute_kcasci_spectral_roots(kmf, ncas, nelecas, ncore=None,
 
     if with_hole:
         for charged_spin in _charged_spin_list(
-                nelecastot, ncastot, 'hole', charged_spin_hole):
+                nelecastot, ncastot, 'hole', charged_spin_hole,
+                spin_sector_mode=spin_sector_mode):
             kmc_hole = mcscf.KCASCI(kmf, ncas, nelecas, ncore=ncore,
                                     charge=1, target_k=None,
                                     charged_spin=charged_spin)
@@ -469,7 +480,8 @@ def compute_kcasci_spectral_roots(kmf, ncas, nelecas, ncore=None,
 
     if with_particle:
         for charged_spin in _charged_spin_list(
-                nelecastot, ncastot, 'particle', charged_spin_particle):
+                nelecastot, ncastot, 'particle', charged_spin_particle,
+                spin_sector_mode=spin_sector_mode):
             kmc_particle = mcscf.KCASCI(kmf, ncas, nelecas, ncore=ncore,
                                         charge=-1, target_k=None,
                                         charged_spin=charged_spin)
@@ -490,7 +502,8 @@ def compute_kcasci_spectral_roots(kmf, ncas, nelecas, ncore=None,
                                ncastot=ncastot,
                                nelecastot=nelecastot,
                                target_k=int(target_k) % nkpts,
-                               mo_coeff=mo_coeff)
+                               mo_coeff=mo_coeff,
+                               spin_sector_mode=spin_sector_mode)
 
 
 def _root_table(spectral_roots):
@@ -842,12 +855,14 @@ def project_poles_to_band_basis(poles, coeff, band_indices=None,
 
 def spectral_weight_sum_rules(spectral_roots, poles=None, neutral_root=0,
                               neutral_target_k=None, k_indices=None,
-                              orbital_indices=None, spins=(0, 1)):
+                              orbital_indices=None, spins=(0, 1),
+                              available_only=False):
     '''
     Compare accumulated pole weights with exact operator norms.
 
     Missing weight reports the contribution absent from the charged roots that
-    were supplied to make_spectral_poles.
+    were supplied to make_spectral_poles.  If available_only is True, spin
+    channels with no supplied poles are not counted as missing weight.
     '''
     rows = _root_table(spectral_roots)
     if isinstance(spectral_roots, KCASCISpectralRoots):
@@ -889,33 +904,46 @@ def spectral_weight_sum_rules(spectral_roots, poles=None, neutral_root=0,
     for k in k_list:
         for p in p_list:
             for spin in spin_list:
-                hole_norm = 0.0
-                particle_norm = 0.0
-                if nelec[spin] > 0:
+                h_key = ('hole', k, p, spin)
+                p_key = ('particle', k, p, spin)
+                do_hole = not available_only or h_key in pole_weight
+                do_particle = not available_only or p_key in pole_weight
+
+                hole_norm = None if not do_hole else 0.0
+                particle_norm = None if not do_particle else 0.0
+                if do_hole and nelec[spin] > 0:
                     vec = des_k(neutral['ci'], norb, nelec, nkpts,
                                 target_k, k, p, spin)
                     hole_norm = float(np.real_if_close(np.vdot(vec, vec)).real)
-                if nelec[spin] < norb:
+                if do_particle and nelec[spin] < norb:
                     vec = cre_k(neutral['ci'], norb, nelec, nkpts,
                                 target_k, k, p, spin)
                     particle_norm = float(
                         np.real_if_close(np.vdot(vec, vec)).real)
 
-                h_wt = pole_weight.get(('hole', k, p, spin), 0.0)
-                p_wt = pole_weight.get(('particle', k, p, spin), 0.0)
+                h_wt = None if not do_hole else pole_weight.get(h_key, 0.0)
+                p_wt = (None if not do_particle
+                        else pole_weight.get(p_key, 0.0))
+                h_miss = None if not do_hole else hole_norm - h_wt
+                p_miss = (None if not do_particle
+                          else particle_norm - p_wt)
+                total_norm = sum(x for x in (hole_norm, particle_norm)
+                                 if x is not None)
+                total_weight = sum(x for x in (h_wt, p_wt)
+                                   if x is not None)
                 checks.append({
                     'k': int(k),
                     'orbital': int(p),
                     'spin': int(spin),
                     'hole_norm': hole_norm,
                     'hole_weight': h_wt,
-                    'hole_missing': hole_norm - h_wt,
+                    'hole_missing': h_miss,
                     'particle_norm': particle_norm,
                     'particle_weight': p_wt,
-                    'particle_missing': particle_norm - p_wt,
-                    'total_norm': hole_norm + particle_norm,
-                    'total_weight': h_wt + p_wt,
-                    'total_missing': hole_norm + particle_norm - h_wt - p_wt,
+                    'particle_missing': p_miss,
+                    'total_norm': total_norm,
+                    'total_weight': total_weight,
+                    'total_missing': total_norm - total_weight,
                 })
     return checks
 
