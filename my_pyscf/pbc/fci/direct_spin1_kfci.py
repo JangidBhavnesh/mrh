@@ -114,6 +114,24 @@ def _load_k_contract_lib():
             ctypes.c_void_p,
         ]
         libpbcfci_k.FCIcontract_2e_k.restype = None
+        libpbcfci_k.FCIcontract_2e_k_stream_ab.argtypes = [
+            ctypes.c_void_p,  # eri
+            ctypes.c_void_p,  # ci0
+            ctypes.c_void_p,  # ci1
+            ctypes.c_int,     # nkpts
+            ctypes.c_int,     # ncas
+            ctypes.c_int,     # nblocks
+            ctypes.c_void_p,  # blocks
+            ctypes.c_void_p,  # linka
+            ctypes.c_int,     # nstra
+            ctypes.c_int,     # nlinka
+            ctypes.c_void_p,  # linkb
+            ctypes.c_int,     # nstrb
+            ctypes.c_int,     # nlinkb
+            ctypes.c_void_p,  # str2tot_a
+            ctypes.c_void_p,  # str2tot_b
+        ]
+        libpbcfci_k.FCIcontract_2e_k_stream_ab.restype = None
         libpbcfci_k.FCIhdiag_k.argtypes = [
             ctypes.c_void_p,  # hdiag
             ctypes.c_void_p,  # h1e
@@ -156,7 +174,7 @@ def _load_k_contract_lib():
 
 def _as_contract_map(norb, nelec, nkpts, target_k, link_index=None,
                      contract_map=None, need_pair_tables=False,
-                     log_obj=None):
+                     explicit_ab="auto", log_obj=None):
     '''
     Helper function to ensure that a KFCIContractMap is available for the given
     k-FCI contraction. If a contract_map is provided, it checks for consistency
@@ -186,7 +204,8 @@ def _as_contract_map(norb, nelec, nkpts, target_k, link_index=None,
     if contract_map is None:
         contract_map = make_kfci_contract_map(norb, nelec, nkpts, target_k,
                                               link_index=link_index,
-                                              build_pair_tables=need_pair_tables)
+                                              build_pair_tables=need_pair_tables,
+                                              explicit_ab=explicit_ab)
         _timer_debug1(log_obj, "k-FCI build contract map", t0)
         return contract_map
 
@@ -199,8 +218,16 @@ def _as_contract_map(norb, nelec, nkpts, target_k, link_index=None,
     if need_pair_tables and not getattr(contract_map, "has_pair_tables", True):
         contract_map = make_kfci_contract_map(norb, nelec, nkpts, target_k,
                                               link_index=contract_map.link_index,
-                                              build_pair_tables=True)
+                                              build_pair_tables=True,
+                                              explicit_ab=explicit_ab)
         _timer_debug1(log_obj, "k-FCI rebuild contract map with pair tables", t0)
+        return contract_map
+    if explicit_ab is True and not getattr(contract_map, "explicit_ab", True):
+        contract_map = make_kfci_contract_map(norb, nelec, nkpts, target_k,
+                                              link_index=contract_map.link_index,
+                                              build_pair_tables=need_pair_tables,
+                                              explicit_ab=True)
+        _timer_debug1(log_obj, "k-FCI rebuild contract map with explicit AB", t0)
         return contract_map
     _timer_debug1(log_obj, "k-FCI validate contract map", t0)
     return contract_map
@@ -612,6 +639,25 @@ def contract_2e_k(eri, fcivec, norb, nelec, nkpts, target_k,
             contract_map.bb_sign.ctypes.data_as(ctypes.c_void_p),
             contract_map.bb_eri_idx.ctypes.data_as(ctypes.c_void_p),
         )
+        if not getattr(contract_map, "explicit_ab", True):
+            link_indexa, link_indexb = contract_map.link_index
+            libpbcfci.FCIcontract_2e_k_stream_ab(
+                eri.ctypes.data_as(ctypes.c_void_p),
+                fcivec.ctypes.data_as(ctypes.c_void_p),
+                sigma_ci.ctypes.data_as(ctypes.c_void_p),
+                ctypes.c_int(nkpts),
+                ctypes.c_int(ncas),
+                ctypes.c_int(contract_map.blocks.shape[0]),
+                contract_map.blocks.ctypes.data_as(ctypes.c_void_p),
+                link_indexa.ctypes.data_as(ctypes.c_void_p),
+                ctypes.c_int(link_indexa.shape[0]),
+                ctypes.c_int(link_indexa.shape[1]),
+                link_indexb.ctypes.data_as(ctypes.c_void_p),
+                ctypes.c_int(link_indexb.shape[0]),
+                ctypes.c_int(link_indexb.shape[1]),
+                contract_map.str2tot_a.ctypes.data_as(ctypes.c_void_p),
+                contract_map.str2tot_b.ctypes.data_as(ctypes.c_void_p),
+            )
     _timer_debug1(log_obj, "k-FCI contract_2e C kernel", t0)
     return sigma_ci
 
@@ -743,7 +789,7 @@ def make_hdiag_py(h1e, eri, norb, nelec, nkpts, target_k=0, link_index=None,
     t0 = _timer_start()
     contract_map = _as_contract_map(
         norb, nelec, nkpts, target_k, link_index=link_index,
-        contract_map=contract_map, log_obj=log_obj)
+        contract_map=contract_map, explicit_ab=True, log_obj=log_obj)
     link_index = contract_map.link_index
     ndet = contract_map.sector_size
     dtype = np.result_type(h1e, eri)
@@ -862,7 +908,7 @@ def make_hdiag(h1e, eri, norb, nelec, nkpts, target_k=0, link_index=None,
 
     contract_map = _as_contract_map(
         norb, nelec, nkpts, target_k, link_index=link_index,
-        contract_map=contract_map, log_obj=log_obj)
+        contract_map=contract_map, explicit_ab=True, log_obj=log_obj)
     ndet = contract_map.sector_size
     t0 = _timer_debug1(log_obj, "k-FCI make_hdiag map setup", t0)
 
