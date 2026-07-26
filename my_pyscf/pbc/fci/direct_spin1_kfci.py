@@ -130,6 +130,8 @@ def _load_k_contract_lib():
             ctypes.c_int,     # nlinkb
             ctypes.c_void_p,  # str2tot_a
             ctypes.c_void_p,  # str2tot_b
+            ctypes.c_void_p,  # ksub
+            ctypes.c_void_p,  # kneg
         ]
         libpbcfci_k.FCIcontract_2e_k_stream_ab.restype = None
         libpbcfci_k.FCIhdiag_k.argtypes = [
@@ -191,7 +193,7 @@ def _load_k_contract_lib():
 
 def _as_contract_map(norb, nelec, nkpts, target_k, link_index=None,
                      contract_map=None, need_pair_tables=False,
-                     explicit_ab="auto", log_obj=None):
+                     explicit_ab="auto", log_obj=None, kmom=None):
     '''
     Helper function to ensure that a KFCIContractMap is available for the given
     k-FCI contraction. If a contract_map is provided, it checks for consistency
@@ -222,7 +224,8 @@ def _as_contract_map(norb, nelec, nkpts, target_k, link_index=None,
         contract_map = make_kfci_contract_map(norb, nelec, nkpts, target_k,
                                               link_index=link_index,
                                               build_pair_tables=need_pair_tables,
-                                              explicit_ab=explicit_ab)
+                                              explicit_ab=explicit_ab,
+                                              kmom=kmom)
         _timer_debug1(log_obj, "k-FCI build contract map", t0)
         return contract_map
 
@@ -236,20 +239,23 @@ def _as_contract_map(norb, nelec, nkpts, target_k, link_index=None,
         contract_map = make_kfci_contract_map(norb, nelec, nkpts, target_k,
                                               link_index=contract_map.link_index,
                                               build_pair_tables=True,
-                                              explicit_ab=explicit_ab)
+                                              explicit_ab=explicit_ab,
+                                              kmom=kmom)
         _timer_debug1(log_obj, "k-FCI rebuild contract map with pair tables", t0)
         return contract_map
     if explicit_ab is True and not getattr(contract_map, "explicit_ab", True):
         contract_map = make_kfci_contract_map(norb, nelec, nkpts, target_k,
                                               link_index=contract_map.link_index,
                                               build_pair_tables=need_pair_tables,
-                                              explicit_ab=True)
+                                              explicit_ab=True,
+                                              kmom=kmom)
         _timer_debug1(log_obj, "k-FCI rebuild contract map with explicit AB", t0)
         return contract_map
     _timer_debug1(log_obj, "k-FCI validate contract map", t0)
     return contract_map
 
-def _unpack(norb, nelec, link_index, nkpts, spin=None, log_obj=None):
+def _unpack(norb, nelec, link_index, nkpts, spin=None, log_obj=None,
+            kmom=None):
     t0 = _timer_start()
     assert norb % nkpts == 0
     if link_index is None:
@@ -257,10 +263,13 @@ def _unpack(norb, nelec, link_index, nkpts, spin=None, log_obj=None):
         norb_k = norb // nkpts
         orb_k = (np.arange(norb, dtype=np.int32) // norb_k).astype(np.int32)
         if spin == 0 and neleca == nelecb:
-            link_indexa = link_indexb = kcistrings.gen_linkstr_index_k(range(norb), neleca, orb_k, nkpts)
+            link_indexa = link_indexb = kcistrings.gen_linkstr_index_k(
+                range(norb), neleca, orb_k, nkpts, kmom=kmom)
         else:
-            link_indexa = kcistrings.gen_linkstr_index_k(range(norb), neleca, orb_k, nkpts)
-            link_indexb = kcistrings.gen_linkstr_index_k(range(norb), nelecb, orb_k, nkpts)
+            link_indexa = kcistrings.gen_linkstr_index_k(
+                range(norb), neleca, orb_k, nkpts, kmom=kmom)
+            link_indexb = kcistrings.gen_linkstr_index_k(
+                range(norb), nelecb, orb_k, nkpts, kmom=kmom)
         _timer_debug1(log_obj, "k-FCI generate link_index", t0)
         return link_indexa, link_indexb
     else:
@@ -268,7 +277,8 @@ def _unpack(norb, nelec, link_index, nkpts, spin=None, log_obj=None):
         _timer_debug1(log_obj, "k-FCI reuse link_index", t0)
         return link_index
 
-def contract_1e_k_py(h1e, fcivec, norb, nelec, nkpts, kindx, link_index=None):
+def contract_1e_k_py(h1e, fcivec, norb, nelec, nkpts, kindx,
+                     link_index=None, kmom=None):
     '''
     Contract one-electron Hamiltonian with a k-FCI vector in a fixed 
     total momentum sector.
@@ -297,7 +307,8 @@ def contract_1e_k_py(h1e, fcivec, norb, nelec, nkpts, kindx, link_index=None):
     '''
 
     t0 = _timer_start()
-    link_indexa, link_indexb = _unpack(norb, nelec, link_index, nkpts)
+    link_indexa, link_indexb = _unpack(norb, nelec, link_index, nkpts,
+                                       kmom=kmom)
     t0 = _timer_debug1(None, "k-FCI contract_1e_py link_index", t0)
     dtype = np.result_type(h1e, fcivec)
 
@@ -313,13 +324,15 @@ def contract_1e_k_py(h1e, fcivec, norb, nelec, nkpts, kindx, link_index=None):
     # Generate the k-sector blocks and the corresponding alpha/beta string
     # lists and global-to-local (specific k-sector) maps.
     # rows are [ka, kb, na, nb, offset, size]
-    blocks = gen_k_sector_linkstr_info(link_indexa, link_indexb, nkpts, kindx)
+    blocks = gen_k_sector_linkstr_info(link_indexa, link_indexb, nkpts,
+                                       kindx, kmom=kmom)
     sector_size = int(blocks[:, 5].sum())
     t0 = _timer_debug1(None, "k-FCI contract_1e_py sector blocks", t0)
 
     assert fcivec.size == sector_size
 
-    straid_k, strbid_k, tota_2k, totb_2k = gen_k_sector_maps(link_indexa, link_indexb, nkpts)
+    straid_k, strbid_k, tota_2k, totb_2k = gen_k_sector_maps(
+        link_indexa, link_indexb, nkpts, kmom=kmom)
     t0 = _timer_debug1(None, "k-FCI contract_1e_py sector maps", t0)
 
     # Making sure fcivec is in the right dtype and C-contiguous.
@@ -399,7 +412,8 @@ def contract_1e_k_py(h1e, fcivec, norb, nelec, nkpts, kindx, link_index=None):
     return sigma_ci
 
 def contract_1e_k(h1e, fcivec, norb, nelec, nkpts, kindx,
-                  link_index=None, contract_map=None, log_obj=None):
+                  link_index=None, contract_map=None, log_obj=None,
+                  kmom=None):
     '''
     C implementation of contract_1e_k using structural k-sector contraction
     maps.  The result is returned as complex128 to match the C kernel.
@@ -434,7 +448,7 @@ def contract_1e_k(h1e, fcivec, norb, nelec, nkpts, kindx,
     t0 = _timer_start()
     contract_map = _as_contract_map(
         norb, nelec, nkpts, kindx, link_index=link_index,
-        contract_map=contract_map, log_obj=log_obj)
+        contract_map=contract_map, log_obj=log_obj, kmom=kmom)
     assert fcivec.size == contract_map.sector_size
     t0 = _timer_debug1(log_obj, "k-FCI contract_1e map setup", t0)
 
@@ -484,7 +498,7 @@ def _get_ci_sectors(fcivec, blocks, nkpts):
     return ci_blocks
 
 def contract_2e_k_py(eri, fcivec, norb, nelec, nkpts, target_k,
-                     link_index=None):
+                     link_index=None, kmom=None):
     '''
     Contract two-electron Hamiltonian with a k-FCI vector in a fixed total momentum sector.
     args:
@@ -512,22 +526,26 @@ def contract_2e_k_py(eri, fcivec, norb, nelec, nkpts, target_k,
     nkpts = eri.shape[0]
     dtype = np.result_type(eri.dtype, fcivec.dtype)
 
-    link_indexa, link_indexb = _unpack(norb, nelec, link_index, nkpts)
-    straid_k, strbid_k, str2tot_a, str2tot_b = gen_k_sector_maps(link_indexa, link_indexb, nkpts)
+    link_indexa, link_indexb = _unpack(norb, nelec, link_index, nkpts,
+                                       kmom=kmom)
+    straid_k, strbid_k, str2tot_a, str2tot_b = gen_k_sector_maps(
+        link_indexa, link_indexb, nkpts, kmom=kmom)
     t0 = _timer_debug1(None, "k-FCI contract_2e_py link and sector maps", t0)
     
     
-    links_a = build_k_links_spin(link_indexa, norb, nkpts, straid_k, str2tot_a)
-    links_b = build_k_links_spin(link_indexb, norb, nkpts, strbid_k, str2tot_b)
+    links_a = build_k_links_spin(link_indexa, norb, nkpts, straid_k,
+                                 str2tot_a, kmom=kmom)
+    links_b = build_k_links_spin(link_indexb, norb, nkpts, strbid_k,
+                                 str2tot_b, kmom=kmom)
     t0 = _timer_debug1(None, "k-FCI contract_2e_py spin link tables", t0)
     
     links_a = build_links_by_global_source_array(links_a)
     links_b = build_links_by_global_source_array(links_b)
     t0 = _timer_debug1(None, "k-FCI contract_2e_py source link indices", t0)
 
-    ab_pairs = build_ab_pair_tables(links_a, links_b, nkpts)
-    aa_pairs = build_same_spin_pair_tables(links_a, nkpts)
-    bb_pairs = build_same_spin_pair_tables(links_b, nkpts)
+    ab_pairs = build_ab_pair_tables(links_a, links_b, nkpts, kmom=kmom)
+    aa_pairs = build_same_spin_pair_tables(links_a, nkpts, kmom=kmom)
+    bb_pairs = build_same_spin_pair_tables(links_b, nkpts, kmom=kmom)
     t0 = _timer_debug1(None, "k-FCI contract_2e_py pair tables", t0)
 
     straid_k = strbid_k = str2tot_a = str2tot_b = None # free up some memory
@@ -536,7 +554,8 @@ def contract_2e_k_py(eri, fcivec, norb, nelec, nkpts, target_k,
 
     sigma_ci = np.zeros(fcivec.shape, dtype=dtype, order="C")
     
-    blocks = gen_k_sector_linkstr_info(link_indexa, link_indexb, nkpts, target_k)
+    blocks = gen_k_sector_linkstr_info(link_indexa, link_indexb, nkpts,
+                                       target_k, kmom=kmom)
 
     # sanity check: the total size of the k-sector blocks should match the size of the fcivec.
     sector_size = int(blocks[:, 5].sum())
@@ -551,8 +570,9 @@ def contract_2e_k_py(eri, fcivec, norb, nelec, nkpts, target_k,
     # Free up some memory.
     blocks = None
 
+    kmom = kcistrings._as_kmom(nkpts, kmom=kmom)
     for ka in range(nkpts):
-        kb = (target_k - ka) % nkpts
+        kb = kcistrings._ksub(kmom, target_k, ka)
 
         if ci0_blocks[ka][kb] is None:
             continue
@@ -578,7 +598,8 @@ def contract_2e_k_py(eri, fcivec, norb, nelec, nkpts, target_k,
     return sigma_ci
 
 def contract_2e_k(eri, fcivec, norb, nelec, nkpts, target_k,
-                  link_index=None, contract_map=None, log_obj=None):
+                  link_index=None, contract_map=None, log_obj=None,
+                  kmom=None):
     '''
     C implementation of contract_2e_k using structural k-sector contraction maps.
     The alpha-alpha and beta-beta same-spin contractions are applied with zgemm
@@ -613,7 +634,7 @@ def contract_2e_k(eri, fcivec, norb, nelec, nkpts, target_k,
     t0 = _timer_start()
     contract_map = _as_contract_map(
         norb, nelec, nkpts, target_k, link_index=link_index,
-        contract_map=contract_map, log_obj=log_obj)
+        contract_map=contract_map, log_obj=log_obj, kmom=kmom)
     assert fcivec.size == contract_map.sector_size
     t0 = _timer_debug1(log_obj, "k-FCI contract_2e map setup", t0)
 
@@ -674,11 +695,14 @@ def contract_2e_k(eri, fcivec, norb, nelec, nkpts, target_k,
                 ctypes.c_int(link_indexb.shape[1]),
                 contract_map.str2tot_a.ctypes.data_as(ctypes.c_void_p),
                 contract_map.str2tot_b.ctypes.data_as(ctypes.c_void_p),
+                contract_map.kmom.ksub.ctypes.data_as(ctypes.c_void_p),
+                contract_map.kmom.kneg.ctypes.data_as(ctypes.c_void_p),
             )
     _timer_debug1(log_obj, "k-FCI contract_2e C kernel", t0)
     return sigma_ci
 
-def sector_size(norb, nelec, nkpts, target_k=0, link_index=None):
+def sector_size(norb, nelec, nkpts, target_k=0, link_index=None,
+                kmom=None):
     '''
     Number of determinants in a fixed total momentum sector.
     args:
@@ -697,8 +721,10 @@ def sector_size(norb, nelec, nkpts, target_k=0, link_index=None):
             Number of determinants in the target momentum sector.
     '''
     t0 = _timer_start()
-    link_indexa, link_indexb = _unpack(norb, nelec, link_index, nkpts)
-    blocks = gen_k_sector_linkstr_info(link_indexa, link_indexb, nkpts, target_k)
+    link_indexa, link_indexb = _unpack(norb, nelec, link_index, nkpts,
+                                       kmom=kmom)
+    blocks = gen_k_sector_linkstr_info(link_indexa, link_indexb, nkpts,
+                                       target_k, kmom=kmom)
     t0 = _timer_debug1(None, "k-FCI sector_size setup", t0)
     if blocks.size == 0:
         return 0
@@ -707,7 +733,8 @@ def sector_size(norb, nelec, nkpts, target_k=0, link_index=None):
     return size
 
 def contract_ham_k(h1e, eri, fcivec, norb, nelec, nkpts, target_k=0,
-                   link_index=None, contract_map=None, log_obj=None):
+                   link_index=None, contract_map=None, log_obj=None,
+                   kmom=None):
     '''
     Contract the k-FCI Hamiltonian with a CI vector.
     Currently, I am keeping the one-electron and two-electron
@@ -741,17 +768,19 @@ def contract_ham_k(h1e, eri, fcivec, norb, nelec, nkpts, target_k=0,
     fcivec = np.asarray(fcivec, dtype=dtype, order="C")
     contract_map = _as_contract_map(
         norb, nelec, nkpts, target_k, link_index=link_index,
-        contract_map=contract_map, log_obj=log_obj)
+        contract_map=contract_map, log_obj=log_obj, kmom=kmom)
     link_index = contract_map.link_index
     t0 = _timer_debug1(log_obj, "k-FCI contract_ham setup", t0)
 
     sigma_ci = contract_1e_k(h1e, fcivec, norb, nelec, nkpts, target_k,
                              link_index=link_index,
-                             contract_map=contract_map, log_obj=log_obj)
+                             contract_map=contract_map, log_obj=log_obj,
+                             kmom=kmom)
     t0 = _timer_debug1(log_obj, "k-FCI contract_ham 1e", t0)
     sigma_ci += contract_2e_k(eri, fcivec, norb, nelec, nkpts, target_k,
                               link_index=link_index,
-                              contract_map=contract_map, log_obj=log_obj)
+                              contract_map=contract_map, log_obj=log_obj,
+                              kmom=kmom)
     _timer_debug1(log_obj, "k-FCI contract_ham 2e", t0)
     return sigma_ci
 
@@ -797,7 +826,7 @@ def _add_same_spin_hdiag_py(hdiag, eri_flat, blocks, group_tab, group_offsets,
 
 
 def make_hdiag_py(h1e, eri, norb, nelec, nkpts, target_k=0, link_index=None,
-                  contract_map=None, log_obj=None):
+                  contract_map=None, log_obj=None, kmom=None):
     '''
     Diagonal of the k-FCI Hamiltonian in a fixed total momentum sector.
     The diagonal is assembled from diagonal one-electron links and diagonal
@@ -806,7 +835,8 @@ def make_hdiag_py(h1e, eri, norb, nelec, nkpts, target_k=0, link_index=None,
     t0 = _timer_start()
     contract_map = _as_contract_map(
         norb, nelec, nkpts, target_k, link_index=link_index,
-        contract_map=contract_map, explicit_ab=True, log_obj=log_obj)
+        contract_map=contract_map, explicit_ab=True, log_obj=log_obj,
+        kmom=kmom)
     link_index = contract_map.link_index
     ndet = contract_map.sector_size
     dtype = np.result_type(h1e, eri)
@@ -912,7 +942,7 @@ def make_hdiag_py(h1e, eri, norb, nelec, nkpts, target_k=0, link_index=None,
     return hdiag
 
 def make_hdiag(h1e, eri, norb, nelec, nkpts, target_k=0, link_index=None,
-               contract_map=None, log_obj=None):
+               contract_map=None, log_obj=None, kmom=None):
     '''
     C implementation of the diagonal of the k-FCI Hamiltonian in a fixed total
     momentum sector.  The result is returned as complex128 to match the C
@@ -925,7 +955,7 @@ def make_hdiag(h1e, eri, norb, nelec, nkpts, target_k=0, link_index=None,
 
     contract_map = _as_contract_map(
         norb, nelec, nkpts, target_k, link_index=link_index,
-        contract_map=contract_map, log_obj=log_obj)
+        contract_map=contract_map, log_obj=log_obj, kmom=kmom)
     ndet = contract_map.sector_size
     t0 = _timer_debug1(log_obj, "k-FCI make_hdiag map setup", t0)
 
@@ -1028,7 +1058,8 @@ def get_init_guess_k(norb, nelec, nkpts, target_k, nroots, hdiag,
     return ci0
 
 def make_hamiltonian_k(h1e, eri, norb, nelec, nkpts, target_k=0,
-                       link_index=None, contract_map=None, log_obj=None):
+                       link_index=None, contract_map=None, log_obj=None,
+                       kmom=None):
     '''
     Construct the explicit k-FCI Hamiltonian in a fixed total momentum sector.
     This routine is intended for small determinant spaces and for debugging.
@@ -1037,7 +1068,7 @@ def make_hamiltonian_k(h1e, eri, norb, nelec, nkpts, target_k=0,
     t0 = _timer_start()
     contract_map = _as_contract_map(
         norb, nelec, nkpts, target_k, link_index=link_index,
-        contract_map=contract_map, log_obj=log_obj)
+        contract_map=contract_map, log_obj=log_obj, kmom=kmom)
     link_index = contract_map.link_index
     ndet = contract_map.sector_size
     dtype = np.result_type(h1e, eri)
@@ -1050,13 +1081,13 @@ def make_hamiltonian_k(h1e, eri, norb, nelec, nkpts, target_k=0,
         hmat[:, i] = contract_ham_k(h1e, eri, ci0, norb, nelec, nkpts,
                                     target_k, link_index=link_index,
                                     contract_map=contract_map,
-                                    log_obj=log_obj)
+                                    log_obj=log_obj, kmom=kmom)
 
     _timer_debug1(log_obj, "k-FCI make_hamiltonian columns", t0)
     return hmat
 
 def energy(h1e, eri, fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
-           contract_map=None, log_obj=None):
+           contract_map=None, log_obj=None, kmom=None):
     '''
     Compute the k-FCI electronic energy for a CI vector.
     The one-electron and two-electron Hamiltonian contractions are evaluated
@@ -1066,43 +1097,47 @@ def energy(h1e, eri, fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
     ci0 = np.asarray(fcivec)
     sigma = contract_ham_k(h1e, eri, ci0, norb, nelec, nkpts, target_k,
                            link_index=link_index, contract_map=contract_map,
-                           log_obj=log_obj)
+                           log_obj=log_obj, kmom=kmom)
     t0 = _timer_debug1(log_obj, "k-FCI energy contract_ham", t0)
     e = np.vdot(ci0, sigma)
     _timer_debug1(log_obj, "k-FCI energy dot", t0)
     return e
 
 def make_rdm1s(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
-               spin=None):
+               spin=None, kmom=None, kconserv=None):
     '''
     Python implementation of spin-separated 1-RDMs for a k-FCI vector.
     '''
     return krdm_helper.make_rdm1s(fcivec, norb, nelec, nkpts,
                                   target_k=target_k,
-                                  link_index=link_index, spin=spin)
+                                  link_index=link_index, spin=spin,
+                                  kmom=kmom, kconserv=kconserv)
 
 def make_rdm1(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
-              spin=None):
+              spin=None, kmom=None, kconserv=None):
     return krdm_helper.make_rdm1(fcivec, norb, nelec, nkpts,
                                  target_k=target_k,
-                                 link_index=link_index, spin=spin)
+                                 link_index=link_index, spin=spin,
+                                 kmom=kmom, kconserv=kconserv)
 
 def make_rdm12s(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
-                reorder=True, spin=None):
+                reorder=True, spin=None, kmom=None, kconserv=None):
     return krdm_helper.make_rdm12s(fcivec, norb, nelec, nkpts,
                                    target_k=target_k,
                                    link_index=link_index,
-                                   reorder=reorder, spin=spin)
+                                   reorder=reorder, spin=spin, kmom=kmom,
+                                   kconserv=kconserv)
 
 def make_rdm12(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
-               reorder=True, spin=None):
+               reorder=True, spin=None, kmom=None, kconserv=None):
     return krdm_helper.make_rdm12(fcivec, norb, nelec, nkpts,
                                   target_k=target_k,
                                   link_index=link_index,
-                                  reorder=reorder, spin=spin)
+                                  reorder=reorder, spin=spin, kmom=kmom,
+                                  kconserv=kconserv)
 
 def contract_ss(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
-                spin=None):
+                spin=None, kmom=None, kconserv=None):
     r'''
     Apply S^2 to a k-FCI vector in a fixed total momentum sector.
     ``` \psi' = S^2 \psi ```
@@ -1110,21 +1145,22 @@ def contract_ss(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
     '''
     return krdm_helper.contract_ss(fcivec, norb, nelec, nkpts,
                                    target_k=target_k,
-                                   link_index=link_index, spin=spin)
+                                   link_index=link_index, spin=spin,
+                                   kmom=kmom, kconserv=kconserv)
 
 def spin_square(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
-                spin=None, **kwargs):
+                spin=None, kmom=None, kconserv=None, **kwargs):
     '''
     Spin square for a k-FCI vector in a fixed total momentum sector.
     '''
     return krdm_helper.spin_square(fcivec, norb, nelec, nkpts,
                                    target_k=target_k,
                                    link_index=link_index, spin=spin,
-                                   **kwargs)
+                                   kmom=kmom, kconserv=kconserv, **kwargs)
 
 def _get_spin_penalty(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
                       spin=None, ss_value=None, ss_penalty=0.1,
-                      log_obj=None):
+                      log_obj=None, kmom=None, kconserv=None):
     '''
     Apply the spin penalty operator to a k-FCI vector in one momentum sector.
     This follows the same logic as pyscf.fci.addons.SpinPenaltyFCISolver.
@@ -1142,20 +1178,23 @@ def _get_spin_penalty(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
         # (S^2-ss)|Psi> to shift state other than the lowest state.
         ci1 = contract_ss(fcivec, norb, nelec, nkpts,
                           target_k=target_k,
-                          link_index=link_index, spin=spin).reshape(fcivec.shape)
+                          link_index=link_index, spin=spin, kmom=kmom,
+                          kconserv=kconserv).reshape(fcivec.shape)
         ci1 -= ss * fcivec
         t0 = _timer_debug1(log_obj, "k-FCI spin penalty contract_ss", t0)
     else:
         # (S^2-ss)^2|Psi> to shift states except the given spin.
         tmp = contract_ss(fcivec, norb, nelec, nkpts,
                           target_k=target_k,
-                          link_index=link_index, spin=spin).reshape(fcivec.shape)
+                          link_index=link_index, spin=spin, kmom=kmom,
+                          kconserv=kconserv).reshape(fcivec.shape)
         tmp -= ss * fcivec
         t0 = _timer_debug1(log_obj, "k-FCI spin penalty first contract_ss", t0)
         ci1 = -ss * tmp
         ci1 += contract_ss(tmp, norb, nelec, nkpts,
                            target_k=target_k,
-                           link_index=link_index, spin=spin).reshape(fcivec.shape)
+                           link_index=link_index, spin=spin, kmom=kmom,
+                           kconserv=kconserv).reshape(fcivec.shape)
         tmp = None
         t0 = _timer_debug1(log_obj, "k-FCI spin penalty second contract_ss", t0)
     ci1 *= ss_penalty
@@ -1163,14 +1202,14 @@ def _get_spin_penalty(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
     return ci1
 
 def _spin_square_diag_k(norb, nelec, nkpts, target_k=0, link_index=None,
-                        contract_map=None):
+                        contract_map=None, kmom=None):
     '''
     Diagonal of S^2 in a packed k-FCI sector.
     '''
     nelec = _unpack_nelec(nelec)
     contract_map = _as_contract_map(
         norb, nelec, nkpts, target_k, link_index=link_index,
-        contract_map=contract_map)
+        contract_map=contract_map, kmom=kmom)
     strs_a = np.asarray(cistring.make_strings(range(norb), nelec[0]),
                         dtype=np.uint64)
     strs_b = np.asarray(cistring.make_strings(range(norb), nelec[1]),
@@ -1249,13 +1288,15 @@ def kernel_ms1(fci, h1e, eri, norb, nelec, nkpts, target_k=0, ci0=None,
     log = logger.new_logger(fci, verbose)
     nelec = _unpack_nelec(nelec, fci.spin)
     target_k = int(target_k) % nkpts
+    kmom = fci.get_kmom(nkpts) if hasattr(fci, "get_kmom") else None
     link_index = _unpack(norb, nelec, link_index, nkpts, spin=fci.spin,
-                         log_obj=fci)
+                         log_obj=fci, kmom=kmom)
     t0 = log.timer_debug1("k-FCI kernel setup options/link_index", *t0)
     contract_map = _as_contract_map(
         norb, nelec, nkpts, target_k, link_index=link_index,
-        log_obj=fci)
+        log_obj=fci, kmom=kmom)
     link_index = contract_map.link_index
+    kmom = contract_map.kmom
     t0 = log.timer_debug1("k-FCI kernel contract map", *t0)
 
     assert norb % nkpts == 0
@@ -1369,18 +1410,20 @@ class SpinPenaltyFCISolver:
                               target_k=None, link_index=None):
         if nkpts is None: nkpts = self.nkpts
         if target_k is None: target_k = self.target_k
+        kmom = self.get_kmom(nkpts) if hasattr(self, "get_kmom") else None
         nelec = _unpack_nelec(nelec, self.spin)
         return _get_spin_penalty(fcivec, norb, nelec, nkpts,
                                  target_k=target_k,
                                  link_index=link_index, spin=self.spin,
                                  ss_value=self.ss_value,
                                  ss_penalty=self.ss_penalty,
-                                 log_obj=self)
+                                 log_obj=self, kmom=kmom)
 
     def contract_2e(self, eri, fcivec, norb, nelec, nkpts=None,
                      target_k=None, link_index=None, contract_map=None):
         if nkpts is None: nkpts = self.nkpts
         if target_k is None: target_k = self.target_k
+        kmom = self.get_kmom(nkpts) if hasattr(self, "get_kmom") else None
         ci0 = super().contract_2e(eri, fcivec, norb, nelec,
                                   nkpts=nkpts, target_k=target_k,
                                   link_index=link_index,
@@ -1395,13 +1438,15 @@ class SpinPenaltyFCISolver:
                    link_index=None, compress=False, contract_map=None):
         if nkpts is None: nkpts = self.nkpts
         if target_k is None: target_k = self.target_k
+        kmom = self.get_kmom(nkpts) if hasattr(self, "get_kmom") else None
         nelec = _unpack_nelec(nelec, self.spin)
         link_index = _unpack(norb, nelec, link_index, nkpts, spin=self.spin,
-                             log_obj=self)
+                             log_obj=self, kmom=kmom)
         contract_map = _as_contract_map(
             norb, nelec, nkpts, target_k, link_index=link_index,
-            contract_map=contract_map, log_obj=self)
+            contract_map=contract_map, log_obj=self, kmom=kmom)
         link_index = contract_map.link_index
+        kmom = contract_map.kmom
 
         hdiag = super().make_hdiag(h1e, eri, norb, nelec, nkpts=nkpts,
                                    target_k=target_k,
@@ -1416,7 +1461,7 @@ class SpinPenaltyFCISolver:
             ss = self.ss_value
         diag_ss = _spin_square_diag_k(norb, nelec, nkpts, target_k=target_k,
                                       link_index=link_index,
-                                      contract_map=contract_map)
+                                      contract_map=contract_map, kmom=kmom)
         if ss < sz * (sz + 1) + 0.1:
             hdiag = hdiag + self.ss_penalty * (diag_ss - ss)
         else:
@@ -1430,13 +1475,15 @@ class SpinPenaltyFCISolver:
                          target_k=None, link_index=None, contract_map=None):
         if nkpts is None: nkpts = self.nkpts
         if target_k is None: target_k = self.target_k
+        kmom = self.get_kmom(nkpts) if hasattr(self, "get_kmom") else None
         nelec = _unpack_nelec(nelec, self.spin)
         link_index = _unpack(norb, nelec, link_index, nkpts, spin=self.spin,
-                             log_obj=self)
+                             log_obj=self, kmom=kmom)
         contract_map = _as_contract_map(
             norb, nelec, nkpts, target_k, link_index=link_index,
-            contract_map=contract_map, log_obj=self)
+            contract_map=contract_map, log_obj=self, kmom=kmom)
         link_index = contract_map.link_index
+        kmom = contract_map.kmom
         ndet = contract_map.sector_size
         dtype = np.result_type(h1e, eri, np.complex128)
         hmat = np.empty((ndet, ndet), dtype=dtype, order="F")
@@ -1498,20 +1545,47 @@ class FCISolver(direct_spin1.FCISolver):
     def __init__(self, *args, **kwargs):
         nkpts = kwargs.pop("nkpts", None)
         target_k = kwargs.pop("target_k", 0)
+        kpts = kwargs.pop("kpts", None)
+        kmesh = kwargs.pop("kmesh", None)
+        kconserv = kwargs.pop("kconserv", None)
         direct_spin1.FCISolver.__init__(self, *args, **kwargs)
         self.nkpts = nkpts
         self.target_k = target_k
+        self.kpts = kpts
+        self.kmesh = kmesh
+        self.kconserv = kconserv
+        self.kmom = None
         self.davidson_only = False
+
+    def get_kmom(self, nkpts=None):
+        '''
+        Return cached table-driven k-point arithmetic for this solver.
+        '''
+        if nkpts is None:
+            nkpts = self.nkpts
+        nkpts = int(nkpts)
+        if self.kmom is not None and self.kmom.nkpts == nkpts:
+            return self.kmom
+        cell = getattr(self, "cell", None)
+        if cell is None:
+            cell = getattr(self, "mol", None)
+        self.kmom = kcistrings.make_kpoint_momentum(
+            nkpts, cell=cell, kpts=getattr(self, "kpts", None),
+            kmesh=getattr(self, "kmesh", None),
+            kconserv=getattr(self, "kconserv", None))
+        self.kconserv = self.kmom.kconserv
+        return self.kmom
 
     def contract_1e(self, h1e, fcivec, norb, nelec, nkpts=None,
                     target_k=None, link_index=None, contract_map=None):
         if nkpts is None: nkpts = self.nkpts
         if target_k is None: target_k = self.target_k
+        kmom = self.get_kmom(nkpts)
         t0 = _timer_start()
         ci1 = contract_1e_k(h1e, fcivec, norb, nelec, nkpts, target_k,
                             link_index=link_index,
                             contract_map=contract_map,
-                            log_obj=self)
+                            log_obj=self, kmom=kmom)
         _timer_debug1(self, "k-FCI contract_1e", t0)
         return ci1
 
@@ -1519,11 +1593,12 @@ class FCISolver(direct_spin1.FCISolver):
                     target_k=None, link_index=None, contract_map=None):
         if nkpts is None: nkpts = self.nkpts
         if target_k is None: target_k = self.target_k
+        kmom = self.get_kmom(nkpts)
         t0 = _timer_start()
         ci1 = contract_2e_k(eri, fcivec, norb, nelec, nkpts, target_k,
                             link_index=link_index,
                             contract_map=contract_map,
-                            log_obj=self)
+                            log_obj=self, kmom=kmom)
         _timer_debug1(self, "k-FCI contract_2e", t0)
         return ci1
 
@@ -1531,11 +1606,13 @@ class FCISolver(direct_spin1.FCISolver):
                      target_k=None, link_index=None, contract_map=None):
         if nkpts is None: nkpts = self.nkpts
         if target_k is None: target_k = self.target_k
+        kmom = self.get_kmom(nkpts)
         t0 = _timer_start()
         contract_map = _as_contract_map(
             norb, nelec, nkpts, target_k, link_index=link_index,
-            contract_map=contract_map, log_obj=self)
+            contract_map=contract_map, log_obj=self, kmom=kmom)
         link_index = contract_map.link_index
+        kmom = contract_map.kmom
         ci1 = self.contract_1e(h1e, fcivec, norb, nelec,
                                nkpts=nkpts, target_k=target_k,
                                link_index=link_index,
@@ -1551,11 +1628,12 @@ class FCISolver(direct_spin1.FCISolver):
                    link_index=None, compress=False, contract_map=None):
         if nkpts is None: nkpts = self.nkpts
         if target_k is None: target_k = self.target_k
+        kmom = self.get_kmom(nkpts)
         t0 = _timer_start()
         nelec = _unpack_nelec(nelec, self.spin)
         hdiag = make_hdiag(h1e, eri, norb, nelec, nkpts, target_k,
                            link_index=link_index, contract_map=contract_map,
-                           log_obj=self)
+                           log_obj=self, kmom=kmom)
         _timer_debug1(self, "k-FCI make_hdiag", t0)
         return hdiag
 
@@ -1563,12 +1641,13 @@ class FCISolver(direct_spin1.FCISolver):
                          target_k=None, link_index=None, contract_map=None):
         if nkpts is None: nkpts = self.nkpts
         if target_k is None: target_k = self.target_k
+        kmom = self.get_kmom(nkpts)
         t0 = _timer_start()
         nelec = _unpack_nelec(nelec, self.spin)
         hmat = make_hamiltonian_k(h1e, eri, norb, nelec, nkpts, target_k,
                                   link_index=link_index,
                                   contract_map=contract_map,
-                                  log_obj=self)
+                                  log_obj=self, kmom=kmom)
         _timer_debug1(self, "k-FCI make_hamiltonian", t0)
         return hmat
 
@@ -1576,11 +1655,12 @@ class FCISolver(direct_spin1.FCISolver):
                target_k=None, link_index=None, contract_map=None):
         if nkpts is None: nkpts = self.nkpts
         if target_k is None: target_k = self.target_k
+        kmom = self.get_kmom(nkpts)
         t0 = _timer_start()
         nelec = _unpack_nelec(nelec, self.spin)
         e = energy(h1e, eri, fcivec, norb, nelec, nkpts, target_k,
                    link_index=link_index, contract_map=contract_map,
-                   log_obj=self)
+                   log_obj=self, kmom=kmom)
         _timer_debug1(self, "k-FCI energy", t0)
         return e
 
@@ -1588,10 +1668,12 @@ class FCISolver(direct_spin1.FCISolver):
                    link_index=None):
         if nkpts is None: nkpts = self.nkpts
         if target_k is None: target_k = self.target_k
+        kmom = self.get_kmom(nkpts) if hasattr(self, "get_kmom") else None
         t0 = _timer_start()
         nelec = _unpack_nelec(nelec, self.spin)
         rdm1s = make_rdm1s(fcivec, norb, nelec, nkpts=nkpts,
-                           target_k=target_k, link_index=link_index)
+                           target_k=target_k, link_index=link_index,
+                           kmom=kmom)
         _timer_debug1(self, "k-FCI make_rdm1s", t0)
         return rdm1s
 
@@ -1599,10 +1681,12 @@ class FCISolver(direct_spin1.FCISolver):
                   link_index=None):
         if nkpts is None: nkpts = self.nkpts
         if target_k is None: target_k = self.target_k
+        kmom = self.get_kmom(nkpts) if hasattr(self, "get_kmom") else None
         t0 = _timer_start()
         nelec = _unpack_nelec(nelec, self.spin)
         rdm1 = make_rdm1(fcivec, norb, nelec, nkpts=nkpts,
-                         target_k=target_k, link_index=link_index)
+                         target_k=target_k, link_index=link_index,
+                         kmom=kmom)
         _timer_debug1(self, "k-FCI make_rdm1", t0)
         return rdm1
 
@@ -1610,11 +1694,12 @@ class FCISolver(direct_spin1.FCISolver):
                     link_index=None, reorder=True):
         if nkpts is None: nkpts = self.nkpts
         if target_k is None: target_k = self.target_k
+        kmom = self.get_kmom(nkpts) if hasattr(self, "get_kmom") else None
         t0 = _timer_start()
         nelec = _unpack_nelec(nelec, self.spin)
         rdm12s = make_rdm12s(fcivec, norb, nelec, nkpts=nkpts,
                              target_k=target_k, link_index=link_index,
-                             reorder=reorder)
+                             reorder=reorder, kmom=kmom)
         _timer_debug1(self, "k-FCI make_rdm12s", t0)
         return rdm12s
 
@@ -1622,11 +1707,12 @@ class FCISolver(direct_spin1.FCISolver):
                    link_index=None, reorder=True):
         if nkpts is None: nkpts = self.nkpts
         if target_k is None: target_k = self.target_k
+        kmom = self.get_kmom(nkpts) if hasattr(self, "get_kmom") else None
         t0 = _timer_start()
         nelec = _unpack_nelec(nelec, self.spin)
         rdm12 = make_rdm12(fcivec, norb, nelec, nkpts=nkpts,
                            target_k=target_k, link_index=link_index,
-                           reorder=reorder)
+                           reorder=reorder, kmom=kmom)
         _timer_debug1(self, "k-FCI make_rdm12", t0)
         return rdm12
 
@@ -1634,10 +1720,11 @@ class FCISolver(direct_spin1.FCISolver):
                     link_index=None):
         if nkpts is None: nkpts = self.nkpts
         if target_k is None: target_k = self.target_k
+        kmom = self.get_kmom(nkpts) if hasattr(self, "get_kmom") else None
         t0 = _timer_start()
         nelec = _unpack_nelec(nelec, self.spin)
         ci1 = contract_ss(fcivec, norb, nelec, nkpts, target_k,
-                          link_index=link_index, spin=self.spin)
+                          link_index=link_index, spin=self.spin, kmom=kmom)
         _timer_debug1(self, "k-FCI contract_ss", t0)
         return ci1
 
@@ -1645,10 +1732,12 @@ class FCISolver(direct_spin1.FCISolver):
                     link_index=None, **kwargs):
         if nkpts is None: nkpts = self.nkpts
         if target_k is None: target_k = self.target_k
+        kmom = self.get_kmom(nkpts) if hasattr(self, "get_kmom") else None
         t0 = _timer_start()
         nelec = _unpack_nelec(nelec, self.spin)
         ss = spin_square(fcivec, norb, nelec, nkpts, target_k,
-                         link_index=link_index, spin=self.spin, **kwargs)
+                         link_index=link_index, spin=self.spin, kmom=kmom,
+                         **kwargs)
         _timer_debug1(self, "k-FCI spin_square", t0)
         return ss
 
@@ -1672,8 +1761,9 @@ class FCISolver(direct_spin1.FCISolver):
         if target_k is None:
             target_k = self.target_k
 
+        kmom = self.get_kmom(nkpts)
         link_index = _unpack(norb, nelec, None, nkpts, spin=self.spin,
-                             log_obj=self)
+                             log_obj=self, kmom=kmom)
         e, c = kernel_ms1(self, h1e, eri, norb, nelec, nkpts, target_k,
                           ci0=ci0, link_index=link_index, tol=tol,
                           lindep=lindep, max_cycle=max_cycle,
