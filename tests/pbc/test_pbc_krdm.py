@@ -7,6 +7,7 @@ from pyscf import fci
 
 from mrh.my_pyscf.pbc.fci import direct_spin1_cplx
 from mrh.my_pyscf.pbc.fci import direct_spin1_kfci
+from mrh.my_pyscf.pbc.fci import krdm_helper
 from mrh.my_pyscf.pbc.fci.direct_spin1_kfci import _unpack
 from mrh.my_pyscf.pbc.fci.kcistrings import gen_k_sector_maps, gen_k_sector_linkstr_info
 
@@ -263,6 +264,62 @@ class KnownValues(unittest.TestCase):
 
                     _compare_two_RDM(rdm1_k, rdm1_ref)
                     _compare_two_RDM(rdm2_k, rdm2_ref)
+
+    def test_krdm_c_backend_and_ham_energy(self):
+        '''
+        Test the C k-sector CI embedding used by k-RDMs and verify that the
+        unreordered RDMs reproduce the current raw k-FCI Hamiltonian energy.
+        '''
+        nkpts = 2
+        ncas = 2
+        nelec = (1, 1)
+        target_k = 0
+        norb = nkpts * ncas
+
+        rng = np.random.default_rng(91)
+        helper = kFCIHelperFunctions()
+        fcivec_k, ci_full_ref, link_indexa, link_indexb, straid_k, strbid_k, blocks = \
+            helper.embed_random_ksector_fcivec_to_full_ci(
+                nkpts, ncas, nelec, target_k=target_k, seed=12)
+
+        ci_full_c = krdm_helper.embed_ksector_ci_to_full(
+            fcivec_k.copy(), norb, nelec, nkpts, target_k=target_k,
+            link_index=(link_indexa, link_indexb))
+        np.testing.assert_allclose(ci_full_c, ci_full_ref,
+                                   atol=1e-12, rtol=1e-12)
+
+        cisolver_k = direct_spin1_kfci.FCISolver(nkpts=nkpts, target_k=target_k)
+        rdm1_k, rdm2_k = cisolver_k.make_rdm12(
+            fcivec_k.copy(), norb, nelec, reorder=True)
+        rdm1_ref, rdm2_ref = direct_spin1_cplx.make_rdm12(
+            ci_full_ref.copy(), norb, nelec, reorder=True)
+        _compare_two_RDM(rdm1_k, rdm1_ref)
+        _compare_two_RDM(rdm2_k, rdm2_ref)
+
+        h1e_k = (rng.normal(size=(nkpts, ncas, ncas))
+                 + 1j * rng.normal(size=(nkpts, ncas, ncas)))
+        for k in range(nkpts):
+            h1e_k[k] = 0.5 * (h1e_k[k] + h1e_k[k].conj().T)
+
+        eri_k = (rng.normal(size=(nkpts, nkpts, nkpts,
+                                  ncas, ncas, ncas, ncas))
+                 + 1j * rng.normal(size=(nkpts, nkpts, nkpts,
+                                         ncas, ncas, ncas, ncas)))
+        eri_full = helper.eri_k_to_full(eri_k)
+        eri_full = 0.5 * (eri_full + eri_full.transpose(2, 3, 0, 1).conj())
+        eri_full = 0.5 * (eri_full + eri_full.transpose(1, 0, 3, 2).conj())
+        eri_full = 0.5 * (eri_full + eri_full.transpose(3, 2, 1, 0).conj())
+        eri_k = helper.eri_full_to_k(eri_full, nkpts, ncas)
+        eri_full = helper.eri_k_to_full(eri_k)
+
+        h1e_full = helper.h1e_k_to_full(h1e_k)
+        rdm1_raw, rdm2_raw = cisolver_k.make_rdm12(
+            fcivec_k.copy(), norb, nelec, reorder=False)
+        e_rdm = (np.einsum("ij,ji", h1e_full, rdm1_raw, optimize=True)
+                 + np.einsum("ijkl,ijkl", eri_full, rdm2_raw, optimize=True))
+        e_direct = cisolver_k.energy(h1e_k, eri_k, fcivec_k.copy(), norb, nelec)
+
+        np.testing.assert_allclose(e_rdm, e_direct, atol=1e-10, rtol=1e-10)
 
 if __name__ == "__main__":
     unittest.main()
