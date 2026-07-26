@@ -53,6 +53,23 @@ class KOpContext:
     op_index: np.ndarray
 
 
+@dataclass
+class KCASCISpectralRoots:
+    '''
+    Neutral and charged k-CASCI roots needed before transition amplitudes.
+    '''
+    neutral: object
+    hole: object
+    particle: object
+    roots: list
+    nkpts: int
+    ncas: int
+    ncastot: int
+    nelecastot: tuple
+    target_k: int
+    mo_coeff: object
+
+
 def _as_spin_id(spin):
     '''
     Convert alpha/beta spin labels to the integer convention used locally.
@@ -288,6 +305,147 @@ def apply_k_op(fcivec, norb, nelec, nkpts, target_k, k, p, spin,
     return out
 
 
+def _iter_roots(e_tot, ci):
+    '''
+    Iterate over roots from the scalar/list conventions returned by k-FCI.
+    '''
+    e = np.asarray(e_tot)
+    if e.ndim == 0:
+        yield 0, e.item(), ci
+        return
+
+    for root, energy in enumerate(e.reshape(-1)):
+        if isinstance(ci, np.ndarray):
+            ci_root = ci[root]
+        else:
+            ci_root = ci[root]
+        yield root, energy.item(), ci_root
+
+
+def _collect_neutral_roots(kmc):
+    '''
+    Collect neutral KCASCI roots into spectral-function records.
+    '''
+    nelecas = _unpack_nelec(kmc.nelecas, kmc._scf.cell.spin)
+    nelecastot = (kmc.nkpts * nelecas[0], kmc.nkpts * nelecas[1])
+    ncastot = kmc.nkpts * kmc.ncas
+    roots = []
+
+    for root, energy, ci in _iter_roots(kmc.e_tot, kmc.ci):
+        roots.append({
+            'kind': 'neutral',
+            'charge': 0,
+            'target_k': int(kmc.target_k) % kmc.nkpts,
+            'root': int(root),
+            'energy': energy,
+            'energy_supercell': energy * kmc.nkpts,
+            'ci': ci,
+            'nelecastot': nelecastot,
+            'ncastot': ncastot,
+            'nkpts': int(kmc.nkpts),
+            'converged': bool(np.all(getattr(kmc, 'converged', True))),
+        })
+
+    return roots
+
+
+def _collect_charged_roots(kmc, kind):
+    '''
+    Collect charged KCASCI roots into spectral-function records.
+    '''
+    roots = []
+    for result in kmc.charged_results:
+        for root, energy, ci in _iter_roots(result['e_tot'], result['ci']):
+            roots.append({
+                'kind': kind,
+                'charge': int(result['charge']),
+                'target_k': int(result['target_k']),
+                'root': int(root),
+                'energy': energy,
+                'energy_supercell': energy * int(result['nkpts']),
+                'ci': ci,
+                'nelecastot': result['nelecastot'],
+                'ncastot': int(result['ncastot']),
+                'nkpts': int(result['nkpts']),
+                'converged': bool(result.get('converged', True)),
+            })
+    return roots
+
+
+def _set_solver_nroots(kmc, nroots):
+    '''
+    Set nroots when requested and leave user-configured defaults otherwise.
+    '''
+    if nroots is not None:
+        kmc.fcisolver.nroots = int(nroots)
+
+
+def compute_kcasci_spectral_roots(kmf, ncas, nelecas, ncore=None,
+                                  mo_coeff=None, target_k=0,
+                                  nroots_neutral=1, nroots_hole=1,
+                                  nroots_particle=1, with_hole=True,
+                                  with_particle=True,
+                                  charged_spin_hole=None,
+                                  charged_spin_particle=None,
+                                  solver_setup=None, verbose=None):
+    '''
+    Run neutral, hole, and particle k-CASCI jobs and collect their roots.
+
+    The returned root table is the input needed for spectral-function transition
+    amplitudes.  Energies follow KCASCI's per-cell convention, with supercell
+    values also stored for pole-energy differences.
+    '''
+    from mrh.my_pyscf.pbc import mcscf
+
+    if mo_coeff is None:
+        mo_coeff = np.asarray(kmf.mo_coeff)
+
+    kmc_neutral = mcscf.KCASCI(kmf, ncas, nelecas, ncore=ncore,
+                              target_k=target_k)
+    kmc_neutral.canonicalization = False
+    _set_solver_nroots(kmc_neutral, nroots_neutral)
+    if solver_setup is not None:
+        solver_setup(kmc_neutral, 'neutral')
+    kmc_neutral.kernel(mo_coeff=mo_coeff, verbose=verbose)
+
+    roots = _collect_neutral_roots(kmc_neutral)
+    kmc_hole = None
+    kmc_particle = None
+
+    if with_hole:
+        kmc_hole = mcscf.KCASCI(kmf, ncas, nelecas, ncore=ncore,
+                                charge=1, target_k=None,
+                                charged_spin=charged_spin_hole)
+        kmc_hole.canonicalization = False
+        _set_solver_nroots(kmc_hole, nroots_hole)
+        if solver_setup is not None:
+            solver_setup(kmc_hole, 'hole')
+        kmc_hole.kernel(mo_coeff=mo_coeff, verbose=verbose)
+        roots.extend(_collect_charged_roots(kmc_hole, 'hole'))
+
+    if with_particle:
+        kmc_particle = mcscf.KCASCI(kmf, ncas, nelecas, ncore=ncore,
+                                    charge=-1, target_k=None,
+                                    charged_spin=charged_spin_particle)
+        kmc_particle.canonicalization = False
+        _set_solver_nroots(kmc_particle, nroots_particle)
+        if solver_setup is not None:
+            solver_setup(kmc_particle, 'particle')
+        kmc_particle.kernel(mo_coeff=mo_coeff, verbose=verbose)
+        roots.extend(_collect_charged_roots(kmc_particle, 'particle'))
+
+    nelecas = _unpack_nelec(nelecas, kmf.cell.spin)
+    nkpts = len(kmf.kpts)
+    return KCASCISpectralRoots(neutral=kmc_neutral, hole=kmc_hole,
+                               particle=kmc_particle, roots=roots,
+                               nkpts=nkpts, ncas=int(ncas),
+                               ncastot=nkpts * int(ncas),
+                               nelecastot=(nkpts * nelecas[0],
+                                           nkpts * nelecas[1]),
+                               target_k=int(target_k) % nkpts,
+                               mo_coeff=mo_coeff)
+
+
 def des_k(fcivec, norb, nelec, nkpts, target_k, k, p, spin,
           context=None, return_info=False, source_link_index=None,
           target_link_index=None, nelec_spin=None):
@@ -317,8 +475,10 @@ def cre_k(fcivec, norb, nelec, nkpts, target_k, k, p, spin,
 __all__ = [
     'KSectorLayout',
     'KOpContext',
+    'KCASCISpectralRoots',
     'make_k_sector_layout',
     'make_k_op_context',
+    'compute_kcasci_spectral_roots',
     'apply_k_op',
     'des_k',
     'cre_k',
