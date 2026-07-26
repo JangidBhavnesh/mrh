@@ -448,6 +448,8 @@ def kernel_chrkcasci(mc, mo_coeff=None, ci0=None, verbose=logger.NOTE,
         conv = getattr(mc.fcisolver, 'converged', True)
         conv = bool(np.all(conv))
         converged.append(conv)
+        # This is temp dictionary to store the results for each target_k sector.  
+        # The final kernel will return the pyscf-standard output.
         results.append({
             'target_k': int(tk),
             'charge': int(charge),
@@ -460,7 +462,6 @@ def kernel_chrkcasci(mc, mo_coeff=None, ci0=None, verbose=logger.NOTE,
             'e_cas': e_cas,
             'e_tot_supercell': e_tot * nkpts,
             'e_cas_supercell': e_cas * nkpts,
-            'ci': fcivec,
             'converged': conv,
         })
         e_tot_all.append(e_tot)
@@ -470,9 +471,19 @@ def kernel_chrkcasci(mc, mo_coeff=None, ci0=None, verbose=logger.NOTE,
     return results, e_tot_all, e_cas_all, ci_all, nelecastot, converged
 
 
-def _casdm1_for_kcasci(mc, ci, stav_dm1=False):
+def make_casdm1(mc, ci, stav_dm1=False):
     '''
     Build the k-basis active-space 1-RDM for KCASCI.
+    args:
+        mc : pbc.mcscf.KCASCI
+            The k-CASCI object.
+        ci : np.ndarray or list of np.ndarray
+            The k-FCI wavefunction(s) for the active space.
+        stav_dm1 : bool
+            If True, compute the state-averaged 1-RDM for multiple roots.
+    returns:
+        casdm1 : np.ndarray
+            The k-basis active-space 1-RDM with shape (nkpts*ncas, nkpts*ncas).
     '''
     from pyscf.mcscf import addons
 
@@ -495,7 +506,7 @@ def _casdm1_for_kcasci(mc, ci, stav_dm1=False):
     return mc.fcisolver.make_rdm1(ci, nkpts * ncas, nelecastot)
 
 
-def _make_rdm1_ao(mc, mo_coeff, ci, ncas, ncore, nelecas, target_k):
+def make_rdm1(mc, mo_coeff, ci, ncas, ncore, nelecas, target_k):
     '''
     Transform a k-FCI active-space 1-RDM to the AO basis at each k-point.
     '''
@@ -504,13 +515,12 @@ def _make_rdm1_ao(mc, mo_coeff, ci, ncas, ncore, nelecas, target_k):
     casdm1 = mc.fcisolver.make_rdm1(
         ci, ncastot, nelecas, nkpts=nkpts, target_k=target_k)
     casdm1 = np.asarray(casdm1)
-    if casdm1.shape != (ncastot, ncastot):
-        raise ValueError(
-            f'Expected an active-space 1-RDM with shape '
-            f'{(ncastot, ncastot)}, got {casdm1.shape}')
+
+    assert casdm1.shape == (ncastot, ncastot), \
+        f'Expected an active-space 1-RDM with shape {(ncastot, ncastot)}, got {casdm1.shape}'
 
     nao = mo_coeff[0].shape[0]
-    dtype = np.result_type(casdm1, *[mo.dtype for mo in mo_coeff])
+    dtype = mo_coeff[0].dtype
     dm1 = np.empty((nkpts, nao, nao), dtype=dtype)
     for k in range(nkpts):
         mocore = mo_coeff[k][:, :ncore]
@@ -534,14 +544,14 @@ def get_fock(mc, mo_coeff=None, ci=None, eris=None, casdm1=None,
     if mo_coeff is None:
         mo_coeff = mc.mo_coeff
     if casdm1 is None:
-        casdm1 = _casdm1_for_kcasci(mc, ci)
+        casdm1 = make_casdm1(mc, ci)
 
     nkpts = mc.nkpts
     ncore = mc.ncore
     ncas = mc.ncas
     nocc = ncore + ncas
     kmf = mc._scf
-    dtype = np.result_type(casdm1, *[mo.dtype for mo in mo_coeff])
+    dtype = mo_coeff[0].dtype
 
     mo_core = [mo[:, :ncore] for mo in mo_coeff]
     dm_k = np.asarray([2.0 * mo_core[k] @ mo_core[k].conj().T
@@ -576,7 +586,7 @@ def canonicalize(mc, mo_coeff=None, ci=None, eris=None, sort=False,
         raise NotImplementedError
 
     if casdm1 is None:
-        casdm1 = _casdm1_for_kcasci(mc, ci, stav_dm1=stav_dm1)
+        casdm1 = make_casdm1(mc, ci, stav_dm1=stav_dm1)
 
     nkpts = mc.nkpts
     ncas = mc.ncas
@@ -712,7 +722,7 @@ class PBCKCASCI(casci.PBCCASCI):
         nelecastot = (self.nkpts * nelecas[0],
                       self.nkpts * nelecas[1])
         target_k = int(self.target_k) % self.nkpts
-        return _make_rdm1_ao(
+        return make_rdm1(
             self, mo_coeff, ci, ncas, ncore, nelecastot, target_k)
 
     get_fock = get_fock
@@ -917,7 +927,7 @@ class ChargedPBCKCASCI(PBCKCASCI):
             raise ValueError('The charged active-electron count is not set')
         nelecas = tuple(nelecas)
 
-        return _make_rdm1_ao(
+        return make_rdm1(
             self, mo_coeff, ci, ncas, ncore, nelecas, target_k)
 
     get_fock = get_fock
