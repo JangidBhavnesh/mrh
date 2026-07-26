@@ -52,7 +52,7 @@ kmc_neutral.kmesh = kmesh
 kmc_neutral.fcisolver.fix_spin_(shift=0.2, ss=0.0)
 e_neutral = kmc_neutral.kernel(mo_coeff)[0]
     
-# Charged state:
+# N-1 charged state:
 # charge=1 means one electron is removed from the complete k-mesh active
 # space.  target_k=None sweeps all charged momentum sectors.
 kmc_hole = mcscf.KCASCI(kmf, 2, 2, charge=1)
@@ -61,12 +61,38 @@ kmc_hole.fcisolver.nroots = 1
 kmc_hole.fcisolver.fix_spin_(shift=0.2, ss=0.75)
 kmc_hole.kernel(mo_coeff)
 
-print(f"charged active space: {sum(kmc_hole.charged_nelecastot)}e, "
-      f"{kmc_hole.nkpts * kmc_hole.ncas}o")
-for band in kmc_hole.band_energies(e_neutral, kpts=kpts):
-    kvec = np.asarray(band["hole_momentum"]).real
-    print("hole momentum: "
-          f"[{kvec[0]:9.6f}, {kvec[1]:9.6f}, {kvec[2]:9.6f}]  "
-          f"target_k = {band['target_k']}  "
-          f"band energy = {band['energy'].real:12.8f}")
+# N+1 charged state:
+# charge=-1 means one electron is added to the complete k-mesh active space.
+kmc_particle = mcscf.KCASCI(kmf, 2, 2, charge=-1)
+kmc_particle.kmesh = kmesh
+kmc_particle.fcisolver.nroots = 1
+kmc_particle.fcisolver.fix_spin_(shift=0.2, ss=0.75)
+kmc_particle.kernel(mo_coeff)
 
+hole_bands = kmc_hole.band_energies(e_neutral, kpts=kpts)
+particle_bands = kmc_particle.band_energies(e_neutral, kpts=kpts)
+hole_by_k = {band["momentum_index"]: band for band in hole_bands}
+particle_by_k = {band["momentum_index"]: band for band in particle_bands}
+
+print(f"N-1 active space: {sum(kmc_hole.charged_nelecastot)}e, "
+      f"{kmc_hole.nkpts * kmc_hole.ncas}o")
+print(f"N+1 active space: {sum(kmc_particle.charged_nelecastot)}e, "
+      f"{kmc_particle.nkpts * kmc_particle.ncas}o")
+print()
+print("Quasiparticle energies (Eh)")
+print("  k     scaled kx    target(N-1)  kHF E-      KCASCI E-   "
+      "target(N+1)  kHF E+      KCASCI E+")
+
+# This active space has one occupied and one virtual kHF orbital per k-point.
+scaled_kpts = cell.get_scaled_kpts(kpts)
+k_order = np.argsort(scaled_kpts[:, 0])
+for k in k_order:
+    hole = hole_by_k[k]
+    particle = particle_by_k[k]
+    e_minus_khf = np.asarray(kmf.mo_energy[k])[0].real
+    e_plus_khf = np.asarray(kmf.mo_energy[k])[1].real
+    print(f"{k:3d}  {scaled_kpts[k, 0]:11.6f}"
+          f"  {hole['target_k']:11d}  {e_minus_khf:11.8f}"
+          f"  {hole['energy'].real:11.8f}"
+          f"  {particle['target_k']:11d}  {e_plus_khf:11.8f}"
+          f"  {particle['energy'].real:11.8f}")
