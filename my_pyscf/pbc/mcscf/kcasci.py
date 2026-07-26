@@ -723,6 +723,46 @@ class ChargedPBCKCASCI(PBCKCASCI):
             return list(range(self.nkpts))
         return [int(target_k) % self.nkpts]
 
+    get_fock = get_fock
+
+    def _finalize(self):
+        log = logger.Logger(self.stdout, self.verbose)
+        spin_square = getattr(self.fcisolver, 'spin_square', None)
+        with_spin = log.verbose >= logger.NOTE and spin_square is not None
+        ncas = self.nkpts * self.ncas
+        nelecas = self.charged_nelecastot
+
+        for result in self.charged_results:
+            target_k = result['target_k']
+            e_tot = np.asarray(result['e_tot'])
+            e_cas = np.asarray(result['e_cas'])
+            ci = result['ci']
+            scalar_energy = e_cas.ndim == 0
+            e_tot = np.atleast_1d(e_tot)
+            e_cas = np.atleast_1d(e_cas)
+
+            for root, e in enumerate(e_cas):
+                if scalar_energy:
+                    msg = ('charged KCASCI E (per k-point) target k %3d'
+                           ' = %#.15g  E(CI) = %#.15g')
+                    args = (target_k, e_tot[root].real, e.real)
+                    ci_root = ci
+                else:
+                    msg = ('charged KCASCI E (per k-point) target k %3d'
+                           ' state %3d  E = %#.15g  E(CI) = %#.15g')
+                    args = (target_k, root, e_tot[root].real, e.real)
+                    ci_root = ci[root]
+
+                if with_spin:
+                    try:
+                        ss = spin_square(ci_root, ncas, nelecas)
+                        log.note(msg + '  S^2 = %.7f', *args, ss[0])
+                        continue
+                    except NotImplementedError:
+                        pass
+                log.note(msg, *args)
+        return self
+
     def kernel(self, mo_coeff=None, ci0=None, verbose=None, target_k=None,
                charge=None, charged_spin=None):
         '''
@@ -767,6 +807,8 @@ class ChargedPBCKCASCI(PBCKCASCI):
         self.converged = bool(np.all(converged))
         if self.converged: log.info('charged KCASCI converged')
         else: log.info('charged KCASCI not converged')
+
+        self._finalize()
 
         return self.e_tot, self.e_cas, self.ci, self.mo_coeff, self.mo_energy
 
