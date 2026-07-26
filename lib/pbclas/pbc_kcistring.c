@@ -672,6 +672,131 @@ int FCIcount_contract_k_structures(int *linka, int nstra, int nlinka,
     return status;
 }
 
+int FCIcount_same_spin_contract_k_structures(int *link_index, int nstr,
+                                             int nlink, int *blocks,
+                                             int nblocks, int nkpts,
+                                             int spin, long long *dims)
+{
+    int table_size = nkpts * nkpts;
+    int *block_offset = malloc(sizeof(int) * (size_t)table_size);
+    int *block_na = malloc(sizeof(int) * (size_t)table_size);
+    int *block_nb = malloc(sizeof(int) * (size_t)table_size);
+    long long *counts = calloc((size_t)table_size * nkpts,
+                               sizeof(long long));
+    LinkOrderK order;
+    int status = 1;
+
+    order.offsets = NULL;
+    order.indices = NULL;
+    order.nlinks_total = 0;
+    dims[0] = 0;
+    dims[1] = 0;
+
+    if (block_offset == NULL || block_na == NULL || block_nb == NULL ||
+        counts == NULL) {
+        goto done;
+    }
+    if (make_block_tables_k(nkpts, nblocks, blocks,
+                            block_offset, block_na, block_nb) != 0) {
+        goto done;
+    }
+    if (make_link_order_k(link_index, nstr, nlink, nkpts, &order) != 0) {
+        goto done;
+    }
+
+    count_same_spin_struct_k(link_index, nstr, nlink, &order,
+                             block_offset, block_na, block_nb,
+                             nkpts, spin, counts);
+    dims[0] = count_groups_k(counts, table_size * nkpts);
+    dims[1] = sum_counts_k(counts, table_size * nkpts);
+    status = 0;
+
+done:
+    free(order.offsets);
+    free(order.indices);
+    free(block_offset);
+    free(block_na);
+    free(block_nb);
+    free(counts);
+    return status;
+}
+
+int FCIfill_same_spin_contract_k_structures(int *link_index, int nstr,
+                                            int nlink, int *str2tot,
+                                            int *blocks, int nblocks,
+                                            int nkpts, int ncas, int spin,
+                                            int *group_tab,
+                                            int *group_offsets,
+                                            int *src_addr,
+                                            int *dst_addr,
+                                            int *sign,
+                                            long long *eri_idx)
+{
+    int table_size = nkpts * nkpts;
+    long long dims[2];
+    int *block_offset = malloc(sizeof(int) * (size_t)table_size);
+    int *block_na = malloc(sizeof(int) * (size_t)table_size);
+    int *block_nb = malloc(sizeof(int) * (size_t)table_size);
+    int *group_index = malloc(sizeof(int) * (size_t)table_size * nkpts);
+    int *cursor = NULL;
+    long long *counts = calloc((size_t)table_size * nkpts,
+                               sizeof(long long));
+    LinkOrderK order;
+    int status = 1;
+
+    order.offsets = NULL;
+    order.indices = NULL;
+    order.nlinks_total = 0;
+    dims[0] = 0;
+    dims[1] = 0;
+
+    if (block_offset == NULL || block_na == NULL || block_nb == NULL ||
+        group_index == NULL || counts == NULL) {
+        goto done;
+    }
+    if (make_block_tables_k(nkpts, nblocks, blocks,
+                            block_offset, block_na, block_nb) != 0) {
+        goto done;
+    }
+    if (make_link_order_k(link_index, nstr, nlink, nkpts, &order) != 0) {
+        goto done;
+    }
+
+    count_same_spin_struct_k(link_index, nstr, nlink, &order,
+                             block_offset, block_na, block_nb,
+                             nkpts, spin, counts);
+    dims[0] = count_groups_k(counts, table_size * nkpts);
+    dims[1] = sum_counts_k(counts, table_size * nkpts);
+    if (dims[1] > INT_MAX) {
+        goto done;
+    }
+
+    cursor = malloc(sizeof(int) * (size_t)(dims[0] > 0 ? dims[0] : 1));
+    if (cursor == NULL) {
+        goto done;
+    }
+
+    setup_same_spin_groups_k(counts, block_offset, block_na, block_nb,
+                             nkpts, spin, group_tab, group_offsets,
+                             group_index, cursor);
+    fill_same_spin_struct_k(link_index, nstr, nlink, str2tot, &order,
+                            block_offset, block_na, block_nb,
+                            nkpts, ncas, spin, group_index, cursor,
+                            src_addr, dst_addr, sign, eri_idx);
+    status = 0;
+
+done:
+    free(order.offsets);
+    free(order.indices);
+    free(block_offset);
+    free(block_na);
+    free(block_nb);
+    free(group_index);
+    free(cursor);
+    free(counts);
+    return status;
+}
+
 int FCIfill_contract_k_structures(int *linka, int nstra, int nlinka,
                                   int *linkb, int nstrb, int nlinkb,
                                   int *str2tot_a, int *str2tot_b,
