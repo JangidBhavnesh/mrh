@@ -471,7 +471,7 @@ def kernel_chrkcasci(mc, mo_coeff=None, ci0=None, verbose=logger.NOTE,
     return results, e_tot_all, e_cas_all, ci_all, nelecastot, converged
 
 
-def make_casdm1(mc, ci, stav_dm1=False):
+def make_casdm1(mc, ci, stav_dm1=False, weights=None, target_k=None):
     '''
     Build the k-basis active-space 1-RDM for KCASCI.
     args:
@@ -481,6 +481,12 @@ def make_casdm1(mc, ci, stav_dm1=False):
             The k-FCI wavefunction(s) for the active space.
         stav_dm1 : bool
             If True, compute the state-averaged 1-RDM for multiple roots.
+        weights : array-like or None
+            State-average weights.  They are normalized to sum to one.  If
+            omitted, equal weights are used when stav_dm1 is True.
+        target_k : int or None
+            Total-momentum sector of the CI vector(s).  Defaults to
+            mc.target_k.
     returns:
         casdm1 : np.ndarray
             The k-basis active-space 1-RDM with shape (nkpts*ncas, nkpts*ncas).
@@ -489,21 +495,56 @@ def make_casdm1(mc, ci, stav_dm1=False):
 
     nkpts = mc.nkpts
     ncas = mc.ncas
-    nelecas = mc.nelecas
+    nelecas = _unpack_nelec(mc.nelecas, mc.cell.spin)
     nelecastot = (nkpts * nelecas[0], nkpts * nelecas[1])
+    if target_k is None:
+        target_k = mc.target_k
+    if target_k is None:
+        raise ValueError('target_k is required to build a KCASCI 1-RDM')
+    target_k = int(target_k) % nkpts
+    rdm_kwargs = {'nkpts': nkpts, 'target_k': target_k}
 
-    if (isinstance(ci, (list, tuple, casci.RANGE_TYPE)) and
-            not isinstance(mc.fcisolver, addons.StateAverageFCISolver)):
-        if not stav_dm1:
-            return mc.fcisolver.make_rdm1(ci[0], nkpts * ncas, nelecastot)
+    is_multiroot = isinstance(ci, (list, tuple, casci.RANGE_TYPE))
+    is_state_average = isinstance(
+        mc.fcisolver, addons.StateAverageFCISolver)
+    if is_multiroot:
+        if weights is None and is_state_average:
+            return mc.fcisolver.make_rdm1(
+                ci, nkpts * ncas, nelecastot, **rdm_kwargs)
+        if weights is None and not stav_dm1:
+            return mc.fcisolver.make_rdm1(
+                ci[0], nkpts * ncas, nelecastot, **rdm_kwargs)
 
-        casdm1 = mc.fcisolver.make_rdm1(ci[0], nkpts * ncas, nelecastot)
-        for root in range(1, len(ci)):
-            casdm1 += mc.fcisolver.make_rdm1(
-                ci[root], nkpts * ncas, nelecastot)
-        return casdm1 / len(ci)
+        if weights is None:
+            weights = np.ones(len(ci), dtype=float) / len(ci)
+        else:
+            weights = np.asarray(weights, dtype=float)
+            if weights.ndim != 1 or weights.size != len(ci):
+                raise ValueError(
+                    'weights must contain one value for each CI root')
+            if not np.all(np.isfinite(weights)) or np.any(weights < 0):
+                raise ValueError('weights must be finite and nonnegative')
+            weight_sum = weights.sum()
+            if weight_sum <= 0:
+                raise ValueError('at least one state-average weight is needed')
+            weights = weights / weight_sum
 
-    return mc.fcisolver.make_rdm1(ci, nkpts * ncas, nelecastot)
+        if is_state_average:
+            dm1_states = mc.fcisolver.states_make_rdm1(
+                ci, nkpts * ncas, nelecastot, **rdm_kwargs)
+        else:
+            dm1_states = [
+                mc.fcisolver.make_rdm1(
+                    ci_root, nkpts * ncas, nelecastot, **rdm_kwargs)
+                for ci_root in ci
+            ]
+        return sum(weight * dm1 for weight, dm1
+                   in zip(weights, dm1_states))
+
+    if weights is not None:
+        raise ValueError('weights require multiple CI roots')
+    return mc.fcisolver.make_rdm1(
+        ci, nkpts * ncas, nelecastot, **rdm_kwargs)
 
 
 def make_rdm1(mc, mo_coeff, ci, ncas, ncore, nelecas, target_k):
@@ -533,25 +574,31 @@ def make_rdm1(mc, mo_coeff, ci, ncas, ncore, nelecas, target_k):
 
 
 def get_fock(mc, mo_coeff=None, ci=None, eris=None, casdm1=None,
-             verbose=None):
+             verbose=None, target_k=None, stav_dm1=False, weights=None):
     '''
     Generalized Fock matrix for KCASCI using the k-basis active-space RDM.
     '''
-    raise NotImplementedError('The Fock matrix is not implemented for KCASCI.')
-
     if ci is None:
         ci = mc.ci
     if mo_coeff is None:
         mo_coeff = mc.mo_coeff
     if casdm1 is None:
-        casdm1 = make_casdm1(mc, ci)
+        casdm1 = make_casdm1(
+            mc, ci, stav_dm1=stav_dm1, weights=weights,
+            target_k=target_k)
 
     nkpts = mc.nkpts
     ncore = mc.ncore
     ncas = mc.ncas
     nocc = ncore + ncas
     kmf = mc._scf
-    dtype = mo_coeff[0].dtype
+    dtype = np.result_type(casdm1, *[mo.dtype for mo in mo_coeff])
+    casdm1 = np.asarray(casdm1, dtype=dtype)
+    ncastot = nkpts * ncas
+    if casdm1.shape != (ncastot, ncastot):
+        raise ValueError(
+            f'Expected casdm1 shape {(ncastot, ncastot)}, '
+            f'got {casdm1.shape}')
 
     mo_core = [mo[:, :ncore] for mo in mo_coeff]
     dm_k = np.asarray([2.0 * mo_core[k] @ mo_core[k].conj().T
@@ -572,9 +619,8 @@ def get_fock(mc, mo_coeff=None, ci=None, eris=None, casdm1=None,
 @lib.with_doc(casci.canonicalize.__doc__)
 def canonicalize(mc, mo_coeff=None, ci=None, eris=None, sort=False,
                  cas_natorb=False, casdm1=None, verbose=logger.NOTE,
-                 with_meta_lowdin=casci.WITH_META_LOWDIN, stav_dm1=False):
-    raise NotImplementedError('Canonicalization is not implemented for KCASCI.')
-
+                 with_meta_lowdin=casci.WITH_META_LOWDIN, stav_dm1=False,
+                 weights=None, target_k=None):
     log = logger.new_logger(mc, verbose)
     log.debug('Canonicalizing KCASCI orbitals')
 
@@ -586,7 +632,9 @@ def canonicalize(mc, mo_coeff=None, ci=None, eris=None, sort=False,
         raise NotImplementedError
 
     if casdm1 is None:
-        casdm1 = make_casdm1(mc, ci, stav_dm1=stav_dm1)
+        casdm1 = make_casdm1(
+            mc, ci, stav_dm1=stav_dm1, weights=weights,
+            target_k=target_k)
 
     nkpts = mc.nkpts
     ncas = mc.ncas
@@ -595,8 +643,8 @@ def canonicalize(mc, mo_coeff=None, ci=None, eris=None, sort=False,
     nmo = mo_coeff[0].shape[1]
 
     fock_ao = get_fock(mc, mo_coeff=mo_coeff, ci=ci, casdm1=casdm1,
-                       verbose=verbose)
-    mo_coeff1 = mo_coeff.copy()
+                       verbose=verbose, target_k=target_k)
+    mo_coeff1 = np.asarray(mo_coeff).copy()
 
     log.info('Density matrix diagonal elements')
     for k in range(nkpts):
@@ -731,10 +779,14 @@ class PBCKCASCI(casci.PBCCASCI):
     @lib.with_doc(canonicalize.__doc__)
     def canonicalize_(self, mo_coeff=None, ci=None, eris=None, sort=False,
                       cas_natorb=False, casdm1=None, verbose=None,
-                      with_meta_lowdin=casci.WITH_META_LOWDIN):
+                      with_meta_lowdin=casci.WITH_META_LOWDIN,
+                      stav_dm1=False, weights=None, target_k=None):
         self.mo_coeff, ci, self.mo_energy = \
-            canonicalize(self, mo_coeff, ci, eris, sort, cas_natorb,
-                         casdm1, verbose, with_meta_lowdin)
+            canonicalize(
+                self, mo_coeff=mo_coeff, ci=ci, eris=eris, sort=sort,
+                cas_natorb=cas_natorb, casdm1=casdm1, verbose=verbose,
+                with_meta_lowdin=with_meta_lowdin, stav_dm1=stav_dm1,
+                weights=weights, target_k=target_k)
         if cas_natorb:
             self.ci = ci
         return self.mo_coeff, ci, self.mo_energy
@@ -930,7 +982,24 @@ class ChargedPBCKCASCI(PBCKCASCI):
         return make_rdm1(
             self, mo_coeff, ci, ncas, ncore, nelecas, target_k)
 
-    get_fock = get_fock
+    def get_fock(self, mo_coeff=None, ci=None, eris=None, casdm1=None,
+                 verbose=None, target_k=None, stav_dm1=False, weights=None):
+        raise NotImplementedError(
+            'The Fock matrix is not implemented for ChargedKCASCI.')
+
+    def canonicalize(self, mo_coeff=None, ci=None, eris=None, sort=False,
+                     cas_natorb=False, casdm1=None, verbose=logger.NOTE,
+                     with_meta_lowdin=casci.WITH_META_LOWDIN,
+                     stav_dm1=False, weights=None, target_k=None):
+        raise NotImplementedError(
+            'Canonicalization is not implemented for ChargedKCASCI.')
+
+    def canonicalize_(self, mo_coeff=None, ci=None, eris=None, sort=False,
+                      cas_natorb=False, casdm1=None, verbose=None,
+                      with_meta_lowdin=casci.WITH_META_LOWDIN,
+                      stav_dm1=False, weights=None, target_k=None):
+        raise NotImplementedError(
+            'Canonicalization is not implemented for ChargedKCASCI.')
 
     def _finalize(self):
         log = logger.Logger(self.stdout, self.verbose)

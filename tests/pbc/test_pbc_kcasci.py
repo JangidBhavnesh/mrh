@@ -14,6 +14,37 @@ from mrh.my_pyscf.pbc.fci import direct_spin1_cplx
 
 class KnownValues(unittest.TestCase):
 
+    def test_make_casdm1_weighted_roots_and_target_k(self):
+        calls = []
+
+        class Cell:
+            spin = 0
+
+        class RecordingSolver:
+            def make_rdm1(self, ci, norb, nelec, **kwargs):
+                calls.append((ci, norb, nelec, kwargs))
+                return float(ci) * np.eye(norb)
+
+        class KMC:
+            nkpts = 3
+            ncas = 2
+            nelecas = (1, 1)
+            target_k = 1
+            cell = Cell()
+            fcisolver = RecordingSolver()
+
+        casdm1 = kcasci.make_casdm1(
+            KMC(), [1.0, 3.0], stav_dm1=True, weights=[1.0, 3.0],
+            target_k=2)
+
+        self.assertTrue(np.allclose(casdm1, 2.5 * np.eye(6)))
+        self.assertEqual(len(calls), 2)
+        for _, norb, nelec, kwargs in calls:
+            self.assertEqual(norb, 6)
+            self.assertEqual(nelec, (3, 3))
+            self.assertEqual(kwargs['nkpts'], 3)
+            self.assertEqual(kwargs['target_k'], 2)
+
     def test_charged_finalize_uses_result_target_k_for_spin_square(self):
         spin_square_calls = []
 
@@ -154,6 +185,10 @@ class KnownValues(unittest.TestCase):
         self.assertIsInstance(kmc_charged, kcasci.ChargedKCASCI)
         self.assertIsNone(kmc_charged.target_k)
         self.assertFalse(hasattr(mcscf, 'ChargedKCASCI'))
+        with self.assertRaisesRegex(NotImplementedError, 'ChargedKCASCI'):
+            kmc_charged.get_fock(target_k=0)
+        with self.assertRaisesRegex(NotImplementedError, 'ChargedKCASCI'):
+            kmc_charged.canonicalize(target_k=0)
 
         kmc_ref = mcscf.CASCI(kmf, 2, 2)
         kmc_ref.kmesh = kmesh
@@ -168,6 +203,18 @@ class KnownValues(unittest.TestCase):
         e_test = kmc.kernel(mo_coeff)[0]
 
         self.assertTrue(np.allclose(e_test, e_ref, atol=1e-10, rtol=1e-10))
+
+        fock = kmc.get_fock(target_k=0)
+        self.assertEqual(fock.shape, mo_coeff.shape)
+        for fock_k in fock:
+            self.assertTrue(np.allclose(
+                fock_k, fock_k.conj().T, atol=1e-10, rtol=1e-10))
+
+        mo_canonical, ci, mo_energy = kmc.canonicalize(target_k=0)
+        self.assertEqual(mo_canonical.shape, mo_coeff.shape)
+        self.assertIs(ci, kmc.ci)
+        self.assertEqual(np.asarray(mo_energy).shape, (len(kpts), 2))
+        self.assertTrue(np.all(np.isfinite(mo_energy)))
 
 
 if __name__ == "__main__":
