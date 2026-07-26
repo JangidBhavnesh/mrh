@@ -112,9 +112,9 @@ for k in k_order:
     e_minus_khf = np.asarray(kmf.mo_energy[k])[0].real
     e_plus_khf = np.asarray(kmf.mo_energy[k])[1].real
     print(f"{k:3d}  {scaled_kpts[k, 0]:11.6f}"
-          f"  {au_to_ev * hole['target_k']:11.6f}  {au_to_ev * e_minus_khf:11.8f}"
+          f"  {hole['target_k']:11.6f}  {au_to_ev * e_minus_khf:11.8f}"
           f"  {au_to_ev * hole['energy'].real:11.8f}"
-          f"  {au_to_ev * particle['target_k']:11.6f}  {au_to_ev * e_plus_khf:11.8f}"
+          f"  {particle['target_k']:11.6f}  {au_to_ev * e_plus_khf:11.8f}"
           f"  {au_to_ev * particle['energy'].real:11.8f}")
 
 # Plot quasiparticle band energies.
