@@ -8,43 +8,11 @@ from pyscf import lib, __config__
 from pyscf.fci import direct_spin1
 from pyscf.fci.addons import _unpack_nelec
 
-from mrh.my_pyscf.pbc.fci import rdm_helper, kcistrings, krdm_helper
+from mrh.my_pyscf.pbc.fci import kfci_helper, kcistrings, krdm_helper
 from mrh.lib.helper import load_library
 
 from mrh.my_pyscf.pbc.fci.kcistrings import (
-    AB_A0,
-    AB_A1,
-    AB_B0,
-    AB_B1,
-    AB_SIGN,
-    AB_KA1,
-    AB_KB1,
-    AB_KPA,
-    AB_KQA,
-    AB_KRB,
-    AB_PA,
-    AB_QA,
-    AB_RB,
-    AB_SB,
-    AB_KPB,
-    AB_KQB,
-    AB_KRA,
-    AB_PB,
-    AB_QB,
-    AB_RA,
-    AB_SA,
     KFCIContractMap,
-    SS_0,
-    SS_1,
-    SS_SIGN,
-    SS_K1,
-    SS_KP,
-    SS_KQ,
-    SS_KR,
-    SS_P,
-    SS_Q,
-    SS_R,
-    SS_S,
     build_ab_pair_tables,
     build_k_links_spin,
     build_links_by_global_source_array,
@@ -418,72 +386,8 @@ def _get_ci_sectors(fcivec, blocks, nkpts):
     return ci_blocks
 
 
-def contract_ab_pairs(eri, ci0_block, ci1_blocks, ab_pairs, ka, kb):
-    pairtab = ab_pairs[ka][kb]
-
-    for row in pairtab:
-        a0 = row[AB_A0]
-        a1 = row[AB_A1]
-        b0 = row[AB_B0]
-        b1 = row[AB_B1]
-        sign = row[AB_SIGN]
-        ka1 = row[AB_KA1]
-        kb1 = row[AB_KB1]
-        ci1_block = ci1_blocks[ka1][kb1]
-
-        if ci1_block is None:
-            continue
-
-        val_ab = eri[row[AB_KPA], row[AB_KQA], row[AB_KRB], row[AB_PA], row[AB_QA], row[AB_RB], row[AB_SB]]
-        
-        val_ba = eri[row[AB_KPB], row[AB_KQB], row[AB_KRA], row[AB_PB], row[AB_QB], row[AB_RA], row[AB_SA]]
-        
-        ci1_block[a1, b1] += ((val_ab + val_ba) * sign * ci0_block[a0, b0])
-
-def contract_aa_pairs(eri, ci0_blocks, ci1_blocks, aa_pairs, ka, kb):
-    ci0_block = ci0_blocks[ka][kb]
-    if ci0_block is None:
-        return
-
-    pairtab = aa_pairs[ka]
-
-    for row in pairtab:
-        a0 = row[SS_0]
-        a1 = row[SS_1]
-        sign = row[SS_SIGN]
-        ka1 = row[SS_K1]
-
-        ci1_block = ci1_blocks[ka1][kb]
-        if ci1_block is None:
-            continue
-
-        val = eri[row[SS_KP], row[SS_KQ], row[SS_KR], row[SS_P], row[SS_Q], row[SS_R], row[SS_S]]
-
-        ci1_block[a1, :] += val * sign * ci0_block[a0, :]
-
-def contract_bb_pairs(eri, ci0_blocks, ci1_blocks, bb_pairs, ka, kb):
-    ci0_block = ci0_blocks[ka][kb]
-    if ci0_block is None:
-        return
-
-    pairtab = bb_pairs[kb]
-
-    for row in pairtab:
-        b0 = row[SS_0]
-        b1 = row[SS_1]
-        sign = row[SS_SIGN]
-        kb1 = row[SS_K1]
-
-        ci1_block = ci1_blocks[ka][kb1]
-        if ci1_block is None:
-            continue
-
-        val = eri[row[SS_KP], row[SS_KQ], row[SS_KR], row[SS_P], row[SS_Q], row[SS_R], row[SS_S]]
-
-        ci1_block[:, b1] += val * sign * ci0_block[:, b0]
-
-def _contract_2e_k_lib(eri, fcivec, norb, nelec, nkpts, target_k,
-                       link_index=None, contract_map=None, plan=None):
+def contract_2e_k(eri, fcivec, norb, nelec, nkpts, target_k,
+                  link_index=None, contract_map=None, plan=None):
     '''
     C implementation of contract_2e_k using structural k-sector contraction maps.
     The alpha-alpha and beta-beta same-spin contractions are applied with zgemm
@@ -562,20 +466,6 @@ def _contract_2e_k_lib(eri, fcivec, norb, nelec, nkpts, target_k,
         )
     return sigma_ci
 
-def contract_2e_k(eri, fcivec, norb, nelec, nkpts, target_k,
-                  link_index=None, contract_map=None, plan=None):
-    '''
-    BLAS-backed C implementation of contract_2e_k using structural k-sector
-    contraction maps.  The alpha-alpha and beta-beta same-spin contractions
-    are applied with zgemm; the alpha-beta terms are packed into sparse
-    source/destination block groups.  OpenMP threads follow
-    pbc_k_contract_2e_threads/pbc_contract_2e_threads.
-    '''
-    return _contract_2e_k_lib(
-        eri, fcivec, norb, nelec, nkpts, target_k,
-        link_index=link_index, contract_map=contract_map, plan=plan,
-    )
-
 def contract_2e_k_py(eri, fcivec, norb, nelec, nkpts, target_k,
                      link_index=None):
     '''
@@ -652,11 +542,14 @@ def contract_2e_k_py(eri, fcivec, norb, nelec, nkpts, target_k,
         
         # # same-spin beta-beta part
         # contract_bb(eri, ci0_blocks, ci1_blocks, links_b, ka, kb)
-        contract_ab_pairs(eri, ci0_blocks[ka][kb], ci1_blocks, ab_pairs, ka, kb)
+        kfci_helper.contract_ab_pairs(
+            eri, ci0_blocks[ka][kb], ci1_blocks, ab_pairs, ka, kb)
 
-        contract_aa_pairs(eri, ci0_blocks, ci1_blocks, aa_pairs, ka, kb)
+        kfci_helper.contract_aa_pairs(eri, ci0_blocks, ci1_blocks,
+                                      aa_pairs, ka, kb)
 
-        contract_bb_pairs(eri, ci0_blocks, ci1_blocks, bb_pairs, ka, kb)
+        kfci_helper.contract_bb_pairs(eri, ci0_blocks, ci1_blocks,
+                                      bb_pairs, ka, kb)
 
     return sigma_ci
 
@@ -803,43 +696,43 @@ def energy(h1e, eri, fcivec, norb, nelec, nkpts, target_k=0, link_index=None):
                            link_index=link_index)
     return np.vdot(ci0, sigma)
 
-def make_rdm1s_py(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
-                  spin=None):
+def make_rdm1s(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
+               spin=None):
     '''
     Python implementation of spin-separated 1-RDMs for a k-FCI vector.
     '''
-    return krdm_helper.make_rdm1s_py(fcivec, norb, nelec, nkpts,
-                                     target_k=target_k,
-                                     link_index=link_index, spin=spin)
+    return krdm_helper.make_rdm1s(fcivec, norb, nelec, nkpts,
+                                  target_k=target_k,
+                                  link_index=link_index, spin=spin)
 
-def make_rdm1_py(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
-                 spin=None):
+def make_rdm1(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
+              spin=None):
     '''
     Python implementation of spin-summed 1-RDM for a k-FCI vector.
     '''
-    return krdm_helper.make_rdm1_py(fcivec, norb, nelec, nkpts,
-                                    target_k=target_k,
-                                    link_index=link_index, spin=spin)
+    return krdm_helper.make_rdm1(fcivec, norb, nelec, nkpts,
+                                 target_k=target_k,
+                                 link_index=link_index, spin=spin)
 
-def make_rdm12s_py(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
-                   reorder=True, spin=None):
+def make_rdm12s(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
+                reorder=True, spin=None):
     '''
     Python implementation of spin-separated 1-RDMs and 2-RDMs for a k-FCI vector.
     '''
-    return krdm_helper.make_rdm12s_py(fcivec, norb, nelec, nkpts,
-                                      target_k=target_k,
-                                      link_index=link_index,
-                                      reorder=reorder, spin=spin)
+    return krdm_helper.make_rdm12s(fcivec, norb, nelec, nkpts,
+                                   target_k=target_k,
+                                   link_index=link_index,
+                                   reorder=reorder, spin=spin)
 
-def make_rdm12_py(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
-                  reorder=True, spin=None):
+def make_rdm12(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
+               reorder=True, spin=None):
     '''
     Python implementation of spin-summed 1-RDM and 2-RDM for a k-FCI vector.
     '''
-    return krdm_helper.make_rdm12_py(fcivec, norb, nelec, nkpts,
-                                     target_k=target_k,
-                                     link_index=link_index,
-                                     reorder=reorder, spin=spin)
+    return krdm_helper.make_rdm12(fcivec, norb, nelec, nkpts,
+                                  target_k=target_k,
+                                  link_index=link_index,
+                                  reorder=reorder, spin=spin)
 
 def contract_ss(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
                 spin=None):
@@ -1199,34 +1092,34 @@ class FCISolver(direct_spin1.FCISolver):
         if nkpts is None: nkpts = self.nkpts
         if target_k is None: target_k = self.target_k
         nelec = _unpack_nelec(nelec, self.spin)
-        return make_rdm1s_py(fcivec, norb, nelec, nkpts=nkpts,
-                                  target_k=target_k, link_index=link_index)
+        return make_rdm1s(fcivec, norb, nelec, nkpts=nkpts,
+                          target_k=target_k, link_index=link_index)
 
     def make_rdm1(self, fcivec, norb, nelec, nkpts=None, target_k=None,
                   link_index=None):
         if nkpts is None: nkpts = self.nkpts
         if target_k is None: target_k = self.target_k
         nelec = _unpack_nelec(nelec, self.spin)
-        return make_rdm1_py(fcivec, norb, nelec, nkpts=nkpts,
-                                 target_k=target_k, link_index=link_index)
+        return make_rdm1(fcivec, norb, nelec, nkpts=nkpts,
+                         target_k=target_k, link_index=link_index)
 
     def make_rdm12s(self, fcivec, norb, nelec, nkpts=None, target_k=None,
                     link_index=None, reorder=True):
         if nkpts is None: nkpts = self.nkpts
         if target_k is None: target_k = self.target_k
         nelec = _unpack_nelec(nelec, self.spin)
-        return make_rdm12s_py(fcivec, norb, nelec, nkpts=nkpts,
-                                   target_k=target_k, link_index=link_index,
-                                   reorder=reorder)
+        return make_rdm12s(fcivec, norb, nelec, nkpts=nkpts,
+                           target_k=target_k, link_index=link_index,
+                           reorder=reorder)
 
     def make_rdm12(self, fcivec, norb, nelec, nkpts=None, target_k=None,
                    link_index=None, reorder=True):
         if nkpts is None: nkpts = self.nkpts
         if target_k is None: target_k = self.target_k
         nelec = _unpack_nelec(nelec, self.spin)
-        return make_rdm12_py(fcivec, norb, nelec, nkpts=nkpts,
-                                  target_k=target_k, link_index=link_index,
-                                  reorder=reorder)
+        return make_rdm12(fcivec, norb, nelec, nkpts=nkpts,
+                          target_k=target_k, link_index=link_index,
+                          reorder=reorder)
 
     def contract_ss(self, fcivec, norb, nelec, nkpts=None, target_k=None,
                     link_index=None):
