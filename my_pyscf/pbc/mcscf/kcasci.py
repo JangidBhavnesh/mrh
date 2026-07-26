@@ -393,6 +393,8 @@ def get_fock(mc, mo_coeff=None, ci=None, eris=None, casdm1=None,
     '''
     Generalized Fock matrix for KCASCI using the k-basis active-space RDM.
     '''
+    raise NotImplementedError('The Fock matrix is not implemented for KCASCI.')
+
     if ci is None:
         ci = mc.ci
     if mo_coeff is None:
@@ -427,6 +429,8 @@ def get_fock(mc, mo_coeff=None, ci=None, eris=None, casdm1=None,
 def canonicalize(mc, mo_coeff=None, ci=None, eris=None, sort=False,
                  cas_natorb=False, casdm1=None, verbose=logger.NOTE,
                  with_meta_lowdin=casci.WITH_META_LOWDIN, stav_dm1=False):
+    raise NotImplementedError('Canonicalization is not implemented for KCASCI.')
+
     log = logger.new_logger(mc, verbose)
     log.debug('Canonicalizing KCASCI orbitals')
 
@@ -535,6 +539,7 @@ class PBCKCASCI(casci.PBCCASCI):
         self.fcisolver.conv_tol = getattr(__config__,
                                           'mcscf_casci_CASCI_fcisolver_conv_tol',
                                           1e-8)
+        self.canonicalization = False
 
     def dump_flags(self, verbose=None):
         casci.PBCCASCI.dump_flags(self, verbose)
@@ -575,6 +580,55 @@ class PBCKCASCI(casci.PBCCASCI):
         if cas_natorb:
             self.ci = ci
         return self.mo_coeff, ci, self.mo_energy
+
+    def _finalize(self):
+        log = logger.Logger(self.stdout, self.verbose)
+        nkpts = self.nkpts
+        if (log.verbose >= logger.NOTE and
+                getattr(self.fcisolver, 'spin_square', None)):
+            if isinstance(self.e_cas, (np.complex128, np.float64)):
+                try:
+                    ss = self.fcisolver.spin_square(
+                        self.ci, nkpts * self.ncas,
+                        (nkpts * self.nelecas[0],
+                         nkpts * self.nelecas[1]))
+                    log.note(
+                        'KCASCI E (per k-point)= %#.15g  '
+                        'E(CI) = %#.15g  S^2 = %.7f',
+                        self.e_tot.real, self.e_cas.real, ss[0])
+                except NotImplementedError:
+                    log.note(
+                        'KCASCI E (per k-point) = %#.15g  E(CI) = %#.15g',
+                        self.e_tot.real, self.e_cas.real)
+            else:
+                for i, e in enumerate(self.e_cas):
+                    try:
+                        nelecastot = (
+                            nkpts * self.nelecas[0],
+                            nkpts * self.nelecas[1])
+                        ss = self.fcisolver.spin_square(
+                            self.ci[i], nkpts * self.ncas, nelecastot)
+                        log.note(
+                            'KCASCI E (per k-point) state %3d  '
+                            'E = %#.15g  E(CI) = %#.15g  S^2 = %.7f',
+                            i, self.e_tot[i].real, e.real, ss[0])
+                    except NotImplementedError:
+                        log.note(
+                            'KCASCI E (per k-point) state %3d  '
+                            'E = %#.15g  E(CI) = %#.15g',
+                            i, self.e_tot[i].real, e.real)
+        else:
+            if isinstance(self.e_cas, (np.complex128, np.float64)):
+                log.note(
+                    'KCASCI E (per k-point)= %#.15g  E(CI) = %#.15g',
+                    self.e_tot.real, self.e_cas.real)
+            else:
+                for i, e in enumerate(self.e_cas):
+                    log.note(
+                        'KCASCI E (per k-point) state %3d  '
+                        'E = %#.15g  E(CI) = %#.15g',
+                        i, self.e_tot[i].real, e.real)
+        return self
 
     def kernel(self, mo_coeff=None, ci0=None, verbose=None):
         '''
