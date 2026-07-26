@@ -93,62 +93,6 @@ def _unpack_k(norb, nelec, nkpts, link_index=None, spin=None, kmom=None,
     assert link_index[0].shape[2] == link_index[1].shape[2] == 8
     return link_index
 
-def _embed_ksector_ci_to_full_python(fcivec, norb, nelec, nkpts, target_k=0,
-                                     link_index=None, spin=None, kmom=None,
-                                     kconserv=None):
-    '''
-    Embed a k-FCI sector vector into the full spin-string CI matrix.
-    args:
-        fcivec : ndarray, shape (sector_size,)
-            CI vector stored in one total momentum sector.
-        norb : int
-            Total number of orbitals across all k-points.
-        nelec : tuple of 2 ints
-            Number of alpha and beta electrons.
-        nkpts : int
-            Number of k-points.
-        target_k : int, optional
-            Total momentum sector.
-        link_index : tuple of 2 ndarrays or None
-            k-aware link tables.
-        spin : int or None
-            Spin value passed to _unpack_nelec.
-    returns:
-        ci_full : ndarray, shape (nstra, nstrb)
-            Full CI matrix with zeros outside the target momentum sector.
-    '''
-    neleca, nelecb = _unpack_nelec(nelec, spin)
-    target_k = int(target_k) % nkpts
-
-    link_indexa, link_indexb = _unpack_k(norb, (neleca, nelecb), nkpts,
-                                         link_index=link_index, spin=spin,
-                                         kmom=kmom, kconserv=kconserv)
-    straid_k, strbid_k = kcistrings.gen_k_sector_maps(
-        link_indexa, link_indexb, nkpts, kmom=kmom,
-        kconserv=kconserv)[:2]
-    blocks = kcistrings.gen_k_sector_linkstr_info(
-        link_indexa, link_indexb, nkpts, target_k, kmom=kmom,
-        kconserv=kconserv)
-
-    sector_size = int(blocks[:, 5].sum()) if blocks.size else 0
-    assert fcivec.size == sector_size, (fcivec.size, sector_size)
-
-    nstra = cistring.num_strings(norb, neleca)
-    nstrb = cistring.num_strings(norb, nelecb)
-    ci_full = np.zeros((nstra, nstrb), dtype=np.asarray(fcivec).dtype)
-
-    for blk in blocks:
-        ka, kb, nstra_k, nstrb_k, offset, size = map(int, blk)
-        ci_blk = fcivec[offset:offset + size].reshape(nstra_k, nstrb_k)
-
-        astrs = straid_k[ka]
-        bstrs = strbid_k[kb]
-
-        ci_full[np.ix_(astrs, bstrs)] = ci_blk
-
-    return ci_full
-
-
 def embed_ksector_ci_to_full(fcivec, norb, nelec, nkpts, target_k=0,
                              link_index=None, spin=None, contract_map=None,
                              kmom=None, kconserv=None):
@@ -183,60 +127,6 @@ def embed_ksector_ci_to_full(fcivec, norb, nelec, nkpts, target_k=0,
         ctypes.c_int(nstrb),
     )
     return ci_full
-
-def _extract_ksector_ci_from_full_python(ci_full, norb, nelec, nkpts,
-                                         target_k=0, link_index=None,
-                                         spin=None, kmom=None,
-                                         kconserv=None):
-    '''
-    Extract a k-FCI sector vector from the full spin-string CI matrix.
-    args:
-        ci_full : ndarray, shape (nstra, nstrb)
-            Full CI matrix.
-        norb : int
-            Total number of orbitals across all k-points.
-        nelec : tuple of 2 ints
-            Number of alpha and beta electrons.
-        nkpts : int
-            Number of k-points.
-        target_k : int, optional
-            Total momentum sector.
-        link_index : tuple of 2 ndarrays or None
-            k-aware link tables.
-        spin : int or None
-            Spin value passed to _unpack_nelec.
-    returns:
-        fcivec : ndarray, shape (sector_size,)
-            CI vector in the target momentum sector.
-    '''
-    neleca, nelecb = _unpack_nelec(nelec, spin)
-    target_k = int(target_k) % nkpts
-
-    link_indexa, link_indexb = _unpack_k(norb, (neleca, nelecb), nkpts,
-                                         link_index=link_index, spin=spin,
-                                         kmom=kmom, kconserv=kconserv)
-    straid_k, strbid_k = kcistrings.gen_k_sector_maps(
-        link_indexa, link_indexb, nkpts, kmom=kmom,
-        kconserv=kconserv)[:2]
-    blocks = kcistrings.gen_k_sector_linkstr_info(
-        link_indexa, link_indexb, nkpts, target_k, kmom=kmom,
-        kconserv=kconserv)
-
-    ci_full = np.asarray(ci_full)
-    sector_size = int(blocks[:, 5].sum()) if blocks.size else 0
-    fcivec = np.zeros(sector_size, dtype=ci_full.dtype)
-
-    for blk in blocks:
-        ka, kb, nstra_k, nstrb_k, offset, size = map(int, blk)
-
-        astrs = straid_k[ka]
-        bstrs = strbid_k[kb]
-
-        ci_blk = ci_full[np.ix_(astrs, bstrs)]
-        fcivec[offset:offset + size] = ci_blk.reshape(-1)
-
-    return fcivec
-
 
 def extract_ksector_ci_from_full(ci_full, norb, nelec, nkpts, target_k=0,
                                  link_index=None, spin=None,
