@@ -34,6 +34,17 @@ logger = lib.logger
 HDIAG_IMAG_TOL = 1e-3
 HERMI_THRESH = 1e-8
 libpbcfci_k = None
+_UINT8_POPCOUNT = np.asarray(
+    [bin(i).count("1") for i in range(256)], dtype=np.uint8)
+
+
+def _popcount_uint64(values):
+    '''
+    Count set bits in uint64 values without requiring Python 3.10 bit_count.
+    '''
+    values = np.ascontiguousarray(values, dtype=np.uint64)
+    byte_values = values.view(np.uint8).reshape(values.shape + (8,))
+    return _UINT8_POPCOUNT[byte_values].sum(axis=-1, dtype=np.uint16)
 
 
 def _timer_start():
@@ -1239,9 +1250,7 @@ def _spin_square_diag_k(norb, nelec, nkpts, target_k=0, link_index=None,
         hblk = hdiag[offset:offset + size].reshape(nstra, nstrb)
         for ia, astr in enumerate(astrs):
             common = np.bitwise_and(astr, bstrs)
-            ncommon = np.fromiter(
-                (int(x).bit_count() for x in common),
-                dtype=np.float64, count=nstrb)
+            ncommon = _popcount_uint64(common)
             hblk[ia, :] = diag0 - ncommon
 
     return hdiag

@@ -14,6 +14,14 @@ Tests for k-FCI spin-penalty helpers.
 
 class KnownValues(unittest.TestCase):
 
+    def test_popcount_uint64_python39_compatible(self):
+        values = np.asarray(
+            [0, 1, 3, 0xffff, 1 << 63, (1 << 64) - 1],
+            dtype=np.uint64)
+        expected = np.asarray([0, 1, 2, 16, 1, 64], dtype=np.uint16)
+        self.assertTrue(np.array_equal(
+            direct_spin1_kfci._popcount_uint64(values), expected))
+
     def test_spin_square_diag_matches_contract_ss(self):
         nkpts = 3
         ncas = 2
