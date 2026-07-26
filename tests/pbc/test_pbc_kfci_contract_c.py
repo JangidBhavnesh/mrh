@@ -12,7 +12,7 @@ from mrh.my_pyscf.pbc.fci.direct_spin1_kfci import (
     sector_size,
 )
 from mrh.my_pyscf.pbc.fci import direct_spin1_kfci
-from mrh.my_pyscf.pbc.fci.kcistrings import (
+from mrh.my_pyscf.pbc.fci.kfci_helper import (
     _raise_if_contract_structure_too_large,
 )
 from mrh.my_pyscf.pbc.fci import kcistrings

@@ -4,7 +4,13 @@ import ctypes
 from pyscf.fci import cistring
 from pyscf.fci.addons import _unpack_nelec
 
-from mrh.my_pyscf.pbc.fci import direct_spin1_cplx, kcistrings, rdm_helper, spin_op
+from mrh.my_pyscf.pbc.fci import (
+    direct_spin1_cplx,
+    kcistrings,
+    kfci_helper,
+    rdm_helper,
+    spin_op,
+)
 
 # Author: Bhavnesh Jangid
 
@@ -62,7 +68,7 @@ def _as_contract_map(norb, nelec, nkpts, target_k=0, link_index=None,
 
     link_index = _unpack_k(norb, nelec, nkpts, link_index=link_index,
                            spin=spin, kmom=kmom, kconserv=kconserv)
-    return kcistrings.make_kfci_contract_map(
+    return kfci_helper.make_kfci_contract_map(
         norb, nelec, nkpts, target_k, link_index=link_index,
         build_pair_tables=False, kmom=kmom, kconserv=kconserv)
 

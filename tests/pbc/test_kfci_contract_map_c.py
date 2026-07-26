@@ -5,7 +5,7 @@ import unittest
 import numpy as np
 
 from mrh.my_pyscf.pbc.fci.direct_spin1_kfci import _unpack
-from mrh.my_pyscf.pbc.fci.kcistrings import make_kfci_contract_map
+from mrh.my_pyscf.pbc.fci.kfci_helper import make_kfci_contract_map
 
 
 class KnownValues(unittest.TestCase):

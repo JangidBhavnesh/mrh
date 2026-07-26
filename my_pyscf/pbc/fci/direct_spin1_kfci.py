@@ -12,13 +12,15 @@ from mrh.my_pyscf.pbc.fci import kfci_helper, kcistrings, krdm_helper
 from mrh.lib.helper import load_library
 
 from mrh.my_pyscf.pbc.fci.kcistrings import (
+    gen_k_sector_linkstr_info,
+    gen_k_sector_maps,
+)
+from mrh.my_pyscf.pbc.fci.kfci_helper import (
     KFCIContractMap,
     build_ab_pair_tables,
     build_k_links_spin,
     build_links_by_global_source_array,
     build_same_spin_pair_tables,
-    gen_k_sector_linkstr_info,
-    gen_k_sector_maps,
     make_kfci_contract_map,
 )
 
