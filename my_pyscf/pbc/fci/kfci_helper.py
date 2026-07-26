@@ -36,6 +36,25 @@ from mrh.my_pyscf.pbc.fci.kcistrings import (
 
 
 def contract_ab_pairs(eri, ci0_block, ci1_blocks, ab_pairs, ka, kb):
+    '''
+    Contracting the alpha-beta excitation pairs for a given (ka, kb) block.
+    args:
+        eri : np.ndarray
+            The two-electron integrals in k-space.
+        ci0_block : np.ndarray
+            The input CI vector block for the (ka, kb) momentum sector.
+        ci1_blocks : list of list of np.ndarray
+            The output CI vector blocks for all momentum sectors.
+        ab_pairs : list of list of np.ndarray
+            The alpha-beta excitation-pair tables grouped by (ka, kb).
+        ka : int
+            The total momentum of the alpha strings in ci0_block.
+        kb : int
+            The total momentum of the beta strings in ci0_block.
+    returns:
+        None
+            The ci1_blocks arrays are updated in place.
+    '''
     pairtab = ab_pairs[ka][kb]
 
     for row in pairtab:
@@ -64,6 +83,25 @@ def contract_ab_pairs(eri, ci0_block, ci1_blocks, ab_pairs, ka, kb):
 
 
 def contract_aa_pairs(eri, ci0_blocks, ci1_blocks, aa_pairs, ka, kb):
+    '''
+    Contracting the alpha-alpha excitation pairs for a given (ka, kb) block.
+    args:
+        eri : np.ndarray
+            The two-electron integrals in k-space.
+        ci0_blocks : list of list of np.ndarray
+            The input CI vector blocks for all momentum sectors.
+        ci1_blocks : list of list of np.ndarray
+            The output CI vector blocks for all momentum sectors.
+        aa_pairs : list of np.ndarray
+            The alpha-alpha excitation-pair tables grouped by ka.
+        ka : int
+            The total momentum of the alpha strings in the input block.
+        kb : int
+            The total momentum of the beta strings in the input block.
+    returns:
+        None
+            The ci1_blocks arrays are updated in place.
+    '''
     ci0_block = ci0_blocks[ka][kb]
     if ci0_block is None:
         return
@@ -89,6 +127,25 @@ def contract_aa_pairs(eri, ci0_blocks, ci1_blocks, aa_pairs, ka, kb):
 
 
 def contract_bb_pairs(eri, ci0_blocks, ci1_blocks, bb_pairs, ka, kb):
+    '''
+    Contracting the beta-beta excitation pairs for a given (ka, kb) block.
+    args:
+        eri : np.ndarray
+            The two-electron integrals in k-space.
+        ci0_blocks : list of list of np.ndarray
+            The input CI vector blocks for all momentum sectors.
+        ci1_blocks : list of list of np.ndarray
+            The output CI vector blocks for all momentum sectors.
+        bb_pairs : list of np.ndarray
+            The beta-beta excitation-pair tables grouped by kb.
+        ka : int
+            The total momentum of the alpha strings in the input block.
+        kb : int
+            The total momentum of the beta strings in the input block.
+    returns:
+        None
+            The ci1_blocks arrays are updated in place.
+    '''
     ci0_block = ci0_blocks[ka][kb]
     if ci0_block is None:
         return
