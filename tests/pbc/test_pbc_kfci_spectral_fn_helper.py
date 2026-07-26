@@ -154,6 +154,32 @@ class KnownValues(unittest.TestCase):
         self.assertGreater(spectrum['spectra']['particle'][1, 0, 0].max(),
                            0.0)
 
+    def test_c_spectral_function_matches_python(self):
+        if sfh._load_spectral_lib() is None:
+            self.skipTest("libpbc_spectral_fn is not built")
+
+        roots = _one_alpha_roots()
+        poles = sfh.make_spectral_poles(
+            roots, k_indices=(0, 1), orbital_indices=(0,),
+            spins=(0,), min_weight=1e-12)
+        omega = np.linspace(-1.0, 2.0, 173)
+
+        for broadening in ('lorentzian', 'gaussian'):
+            with self.subTest(broadening=broadening):
+                ref = sfh.make_spectral_function_py(
+                    poles, omega_grid=omega, eta=0.07,
+                    broadening=broadening, nkpts=2, norb=1,
+                    spin_resolved=True, orbital_resolved=True)
+                test = sfh.make_spectral_function(
+                    poles, omega_grid=omega, eta=0.07,
+                    broadening=broadening, nkpts=2, norb=1,
+                    spin_resolved=True, orbital_resolved=True)
+
+                for key in ('hole', 'particle', 'total'):
+                    self.assertTrue(np.allclose(test['spectra'][key],
+                                                ref['spectra'][key],
+                                                rtol=1e-13, atol=1e-13))
+
     def test_spectral_weight_sum_rules(self):
         roots = _one_alpha_roots()
         poles = sfh.make_spectral_poles(
