@@ -925,8 +925,8 @@ class SpinPenaltyFCISolver:
         del obj.ss_penalty
         return obj
 
-    def base_contract_ham(self, *args, **kwargs):
-        return super().contract_ham(*args, **kwargs)
+    def base_contract_2e(self, *args, **kwargs):
+        return super().contract_2e(*args, **kwargs)
 
     def contract_spin_penalty(self, fcivec, norb, nelec, nkpts=None,
                               target_k=None, link_index=None):
@@ -939,13 +939,13 @@ class SpinPenaltyFCISolver:
                                  ss_value=self.ss_value,
                                  ss_penalty=self.ss_penalty)
 
-    def contract_ham(self, h1e, eri, fcivec, norb, nelec, nkpts=None,
+    def contract_2e(self, eri, fcivec, norb, nelec, nkpts=None,
                      target_k=None, link_index=None):
         if nkpts is None: nkpts = self.nkpts
         if target_k is None: target_k = self.target_k
-        ci0 = super().contract_ham(h1e, eri, fcivec, norb, nelec,
-                                   nkpts=nkpts, target_k=target_k,
-                                   link_index=link_index)
+        ci0 = super().contract_2e(eri, fcivec, norb, nelec,
+                                  nkpts=nkpts, target_k=target_k,
+                                  link_index=link_index)
         ci1 = self.contract_spin_penalty(fcivec, norb, nelec,
                                          nkpts=nkpts, target_k=target_k,
                                          link_index=link_index)
@@ -1060,8 +1060,14 @@ class FCISolver(direct_spin1.FCISolver):
                      target_k=None, link_index=None):
         if nkpts is None: nkpts = self.nkpts
         if target_k is None: target_k = self.target_k
-        return contract_ham_k(h1e, eri, fcivec, norb, nelec, nkpts, target_k,
-                              link_index=link_index)
+        link_index = _unpack(norb, nelec, link_index, nkpts, spin=self.spin)
+        ci1 = self.contract_1e(h1e, fcivec, norb, nelec,
+                               nkpts=nkpts, target_k=target_k,
+                               link_index=link_index)
+        ci1 += self.contract_2e(eri, fcivec, norb, nelec,
+                                nkpts=nkpts, target_k=target_k,
+                                link_index=link_index)
+        return ci1
 
     def make_hdiag(self, h1e, eri, norb, nelec, nkpts=None, target_k=None,
                    link_index=None, compress=False):

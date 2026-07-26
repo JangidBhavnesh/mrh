@@ -460,6 +460,7 @@ class KnownValues(unittest.TestCase):
                + 1j * rng.normal(size=(nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas)))
 
         base_solver = direct_spin1_kfci.FCISolver(nkpts=nkpts, target_k=target_k)
+        base_2e = base_solver.contract_2e(eri, fcivec_k, norb, nelec)
         base_sigma = base_solver.contract_ham(h1e, eri, fcivec_k, norb, nelec)
         penalty = shift * (base_solver.contract_ss(fcivec_k, norb, nelec) - ss * fcivec_k)
 
@@ -467,6 +468,9 @@ class KnownValues(unittest.TestCase):
         pbc_fci.addons.fix_spin_(ksolver, shift=shift, ss=ss)
 
         self.assertTrue(isinstance(ksolver, direct_spin1_kfci.SpinPenaltyFCISolver))
+
+        sigma_2e = ksolver.contract_2e(eri, fcivec_k, norb, nelec)
+        self.assertTrue(np.allclose(sigma_2e, base_2e + penalty, atol=1e-12, rtol=1e-12))
 
         sigma = ksolver.contract_ham(h1e, eri, fcivec_k, norb, nelec)
         self.assertTrue(np.allclose(sigma, base_sigma + penalty, atol=1e-12, rtol=1e-12))
