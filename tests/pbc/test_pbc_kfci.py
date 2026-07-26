@@ -302,6 +302,8 @@ class KnownValues(unittest.TestCase):
 
         solver = direct_spin1_kfci.FCISolver(nkpts=nkpts, target_k=target_k)
         hmat = solver.make_hamiltonian(h1e, eri, norb, nelec)
+        hdiag = solver.make_hdiag(h1e, eri, norb, nelec)
+        self.assertTrue(np.allclose(hdiag, np.diag(hmat), atol=1e-12, rtol=1e-12))
 
         for i in range(hmat.shape[1]):
             ci0 = np.zeros(hmat.shape[0], dtype=hmat.dtype)
