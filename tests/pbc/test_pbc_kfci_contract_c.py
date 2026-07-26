@@ -259,7 +259,7 @@ class KnownValues(unittest.TestCase):
         link_index = _unpack(norb, nelec, None, nkpts)
         contract_map = make_kfci_contract_map(
             norb, nelec, nkpts, target_k, link_index=link_index,
-            explicit_ab="auto")
+            explicit_ab="auto", max_memory=1 << 50)
 
         self.assertFalse(contract_map.explicit_ab)
         self.assertEqual(contract_map.ab_src_addr.size, 0)
