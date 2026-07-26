@@ -5,7 +5,7 @@ import warnings
 import ctypes
 
 from pyscf import lib
-from pyscf.fci import direct_spin1
+from pyscf.fci import cistring, direct_spin1
 from pyscf.fci.addons import _unpack_nelec
 
 from mrh.my_pyscf.pbc.fci import kfci_helper, kcistrings, krdm_helper
@@ -1162,6 +1162,45 @@ def _get_spin_penalty(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
     _timer_debug1(log_obj, "k-FCI spin penalty scale", t0)
     return ci1
 
+def _spin_square_diag_k(norb, nelec, nkpts, target_k=0, link_index=None,
+                        contract_map=None):
+    '''
+    Diagonal of S^2 in a packed k-FCI sector.
+    '''
+    nelec = _unpack_nelec(nelec)
+    contract_map = _as_contract_map(
+        norb, nelec, nkpts, target_k, link_index=link_index,
+        contract_map=contract_map)
+    strs_a = np.asarray(cistring.make_strings(range(norb), nelec[0]),
+                        dtype=np.uint64)
+    strs_b = np.asarray(cistring.make_strings(range(norb), nelec[1]),
+                        dtype=np.uint64)
+
+    sz = 0.5 * (nelec[0] - nelec[1])
+    diag0 = sz * sz + 0.5 * (nelec[0] + nelec[1])
+    hdiag = np.empty(contract_map.sector_size, dtype=np.float64)
+
+    for blk in contract_map.blocks:
+        ka, kb, nstra, nstrb, offset, size = map(int, blk)
+        a0 = int(contract_map.stra_offsets[ka])
+        a1 = int(contract_map.stra_offsets[ka + 1])
+        b0 = int(contract_map.strb_offsets[kb])
+        b1 = int(contract_map.strb_offsets[kb + 1])
+        astrs = strs_a[contract_map.stra_ids[a0:a1]]
+        bstrs = strs_b[contract_map.strb_ids[b0:b1]]
+        assert astrs.size == nstra
+        assert bstrs.size == nstrb
+
+        hblk = hdiag[offset:offset + size].reshape(nstra, nstrb)
+        for ia, astr in enumerate(astrs):
+            common = np.bitwise_and(astr, bstrs)
+            ncommon = np.fromiter(
+                (int(x).bit_count() for x in common),
+                dtype=np.float64, count=nstrb)
+            hblk[ia, :] = diag0 - ncommon
+
+    return hdiag
+
 def _make_diag_precond(hdiag, level_shift=1e-3):
     '''
     Diagonal preconditioner for the Davidson solver.
@@ -1363,18 +1402,27 @@ class SpinPenaltyFCISolver:
             norb, nelec, nkpts, target_k, link_index=link_index,
             contract_map=contract_map, log_obj=self)
         link_index = contract_map.link_index
-        ndet = contract_map.sector_size
-        dtype = np.result_type(h1e, eri, np.complex128)
-        hdiag = np.empty(ndet, dtype=dtype)
 
-        for i in range(ndet):
-            ci0 = np.zeros(ndet, dtype=dtype)
-            ci0[i] = 1.0
-            sigma = self.contract_ham(h1e, eri, ci0, norb, nelec,
-                                      nkpts=nkpts, target_k=target_k,
+        hdiag = super().make_hdiag(h1e, eri, norb, nelec, nkpts=nkpts,
+                                   target_k=target_k,
+                                   link_index=link_index,
+                                   compress=compress,
+                                   contract_map=contract_map)
+
+        sz = abs(nelec[0] - nelec[1]) * 0.5
+        if self.ss_value is None:
+            ss = sz * (sz + 1)
+        else:
+            ss = self.ss_value
+        diag_ss = _spin_square_diag_k(norb, nelec, nkpts, target_k=target_k,
                                       link_index=link_index,
                                       contract_map=contract_map)
-            hdiag[i] = sigma[i]
+        if ss < sz * (sz + 1) + 0.1:
+            hdiag = hdiag + self.ss_penalty * (diag_ss - ss)
+        else:
+            # This branch is a preconditioner diagonal.  Avoid applying S^2 to
+            # every determinant; the full operator is still used in contract_2e.
+            hdiag = hdiag + self.ss_penalty * (diag_ss - ss) ** 2
 
         return hdiag
 
