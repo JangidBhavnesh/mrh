@@ -11,6 +11,10 @@ from mrh.my_pyscf.pbc.fci import ksolver
 In this file, I am showing a basic k-FCI calculation.
 The k-FCI solver works in one total momentum sector at a time.
 After solving each target_k sector, I compute the S^2 of the k-FCI wavefunction.
+
+The last section shows the charged k-CASCI wrapper.  Passing charge=1 removes
+one active electron from the full k-mesh active space; for this 2e,2o active
+space and 3 k-points, the charged CI problem is (5e,6o).
 '''
 
 
@@ -125,3 +129,35 @@ for target_k in range(nkpts):
     rdm1, rdm2 = kmc.fcisolver.make_rdm12(ci, norb, nelecas, nkpts, target_k=target_k)
     print(f"1-RDM trace: {np.trace(rdm1).real:12.8f}")
     print(f"2-RDM shape : {rdm2.shape}")
+
+
+print("\nCharged k-CASCI hole band")
+
+# Neutral reference energy in the KCASCI per-cell convention.
+kmc_neutral = mcscf.KCASCI(kmf, 2, 2, target_k=0)
+kmc_neutral.kmesh = kmesh1D
+kmc_neutral.verbose = 0
+kmc_neutral.fcisolver.verbose = 0
+kmc_neutral.fcisolver.conv_tol = 1e-10
+kmc_neutral.fcisolver.fix_spin_(shift=0.2, ss=0.0)
+e_neutral = kmc_neutral.kernel(mo_coeff)[0]
+
+# charge=1 means one electron is removed from the complete k-mesh active
+# space.  target_k=None sweeps all charged momentum sectors.
+kmc_hole = mcscf.KCASCI(kmf, 2, 2, charge=1)
+kmc_hole.kmesh = kmesh1D
+kmc_hole.verbose = 0
+kmc_hole.fcisolver.verbose = 0
+kmc_hole.fcisolver.conv_tol = 1e-10
+kmc_hole.fcisolver.nroots = 1
+kmc_hole.fcisolver.fix_spin_(shift=0.2, ss=0.75)
+kmc_hole.kernel(mo_coeff)
+
+print(f"charged active space: {sum(kmc_hole.charged_nelecastot)}e, "
+      f"{kmc_hole.nkpts * kmc_hole.ncas}o")
+for band in kmc_hole.band_energies(e_neutral, kpts=kpts):
+    kvec = np.asarray(band["hole_momentum"]).real
+    print("hole momentum: "
+          f"[{kvec[0]:9.6f}, {kvec[1]:9.6f}, {kvec[2]:9.6f}]  "
+          f"target_k = {band['target_k']}  "
+          f"band energy = {band['energy'].real:12.8f}")
