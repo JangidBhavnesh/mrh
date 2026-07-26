@@ -21,10 +21,31 @@
 #define LINK_DES    1
 #define LINK_TARGET 2
 #define LINK_SIGN   3
+#define LINK_K0     4
 #define LINK_K_CRE  5
 #define LINK_K_DES  6
 #define LINK_DK     7
 #define NLINK_FIELDS 8
+
+static inline int mod_pos(int x, int n)
+{
+        int r = x % n;
+        return (r < 0) ? r + n : r;
+}
+
+static inline long long eri_index_k(int kp, int kq, int kr,
+                                    int p, int q, int r, int s,
+                                    int nkpts, int ncas)
+{
+        long long idx = kp;
+        idx = idx * nkpts + kq;
+        idx = idx * nkpts + kr;
+        idx = idx * ncas + p;
+        idx = idx * ncas + q;
+        idx = idx * ncas + r;
+        idx = idx * ncas + s;
+        return idx;
+}
 
 static void zset0(double complex *x, size_t n)
 {
@@ -347,4 +368,100 @@ void FCIhdiag_k(double complex *hdiag,
         free(block_offset);
         free(block_na);
         free(block_nb);
+}
+
+void FCIhdiag_k_stream_ab(double complex *hdiag,
+                          double complex *eri,
+                          int nkpts, int ncas,
+                          int nblocks, int *blocks,
+                          int *linka, int nlinka,
+                          int *linkb, int nlinkb,
+                          int *stra_ids, int *stra_offsets,
+                          int *strb_ids, int *strb_offsets)
+{
+#pragma omp parallel for schedule(dynamic) default(none) \
+        shared(hdiag, eri, nkpts, ncas, nblocks, blocks, linka, nlinka, \
+               linkb, nlinkb, stra_ids, stra_offsets, strb_ids, strb_offsets)
+        for (int iblk = 0; iblk < nblocks; iblk++) {
+                int *blk = blocks + iblk * 6;
+                int ka = blk[BLOCK_KA];
+                int kb = blk[BLOCK_KB];
+                int na = blk[BLOCK_NA];
+                int nb = blk[BLOCK_NB];
+                int offset = blk[BLOCK_OFFSET];
+
+                for (int ia = 0; ia < na; ia++) {
+                        int astr0 = stra_ids[stra_offsets[ka] + ia];
+
+                        for (int ib = 0; ib < nb; ib++) {
+                                int bstr0 = strb_ids[strb_offsets[kb] + ib];
+                                double complex val = 0.0 + 0.0 * I;
+
+                                for (int ilinka = 0; ilinka < nlinka;
+                                     ilinka++) {
+                                        int *la = linka + (astr0 * nlinka +
+                                                           ilinka) *
+                                                NLINK_FIELDS;
+                                        int signa = la[LINK_SIGN];
+                                        if (signa == 0) {
+                                                break;
+                                        }
+                                        if (la[LINK_TARGET] != astr0 ||
+                                            mod_pos(la[LINK_DK], nkpts) != 0 ||
+                                            mod_pos(la[LINK_K_CRE], nkpts) !=
+                                            mod_pos(la[LINK_K_DES], nkpts)) {
+                                                continue;
+                                        }
+
+                                        for (int ilinkb = 0; ilinkb < nlinkb;
+                                             ilinkb++) {
+                                                int *lb = linkb +
+                                                        (bstr0 * nlinkb +
+                                                         ilinkb) *
+                                                        NLINK_FIELDS;
+                                                int signb = lb[LINK_SIGN];
+                                                long long idx_ab;
+                                                long long idx_ba;
+
+                                                if (signb == 0) {
+                                                        break;
+                                                }
+                                                if (lb[LINK_TARGET] != bstr0 ||
+                                                    mod_pos(lb[LINK_DK],
+                                                            nkpts) != 0 ||
+                                                    mod_pos(lb[LINK_K_CRE],
+                                                            nkpts) !=
+                                                    mod_pos(lb[LINK_K_DES],
+                                                            nkpts)) {
+                                                        continue;
+                                                }
+
+                                                idx_ab = eri_index_k(
+                                                        la[LINK_K_CRE],
+                                                        la[LINK_K_DES],
+                                                        lb[LINK_K_CRE],
+                                                        la[LINK_CRE] % ncas,
+                                                        la[LINK_DES] % ncas,
+                                                        lb[LINK_CRE] % ncas,
+                                                        lb[LINK_DES] % ncas,
+                                                        nkpts, ncas);
+                                                idx_ba = eri_index_k(
+                                                        lb[LINK_K_CRE],
+                                                        lb[LINK_K_DES],
+                                                        la[LINK_K_CRE],
+                                                        lb[LINK_CRE] % ncas,
+                                                        lb[LINK_DES] % ncas,
+                                                        la[LINK_CRE] % ncas,
+                                                        la[LINK_DES] % ncas,
+                                                        nkpts, ncas);
+                                                val += (double)(signa * signb) *
+                                                        (eri[idx_ab] +
+                                                         eri[idx_ba]);
+                                        }
+                                }
+
+                                hdiag[offset + ia * nb + ib] += val;
+                        }
+                }
+        }
 }
