@@ -124,6 +124,52 @@ class KnownValues(unittest.TestCase):
     def test_cre_k_matches_full_ci_operator(self):
         self._check_k_operator(cre=True)
 
+    def test_c_k_operators_match_python(self):
+        if sfh._load_spectral_lib() is None:
+            self.skipTest("libpbc_spectral_fn is not built")
+
+        nkpts = 3
+        ncas = 2
+        norb = nkpts * ncas
+        nelec = (2, 1)
+        rng = np.random.default_rng(21)
+
+        for cre in (False, True):
+            for target_k in range(nkpts):
+                layout = sfh.make_k_sector_layout(
+                    norb, nelec, nkpts, target_k=target_k)
+                fcivec = (rng.normal(size=layout.sector_size)
+                          + 1j * rng.normal(size=layout.sector_size))
+
+                for k in range(nkpts):
+                    for p in range(ncas):
+                        for spin in (0, 1):
+                            with self.subTest(cre=cre, target_k=target_k,
+                                              k=k, p=p, spin=spin):
+                                if cre:
+                                    ref, info_ref = sfh.cre_k_py(
+                                        fcivec, norb, nelec, nkpts, target_k,
+                                        k, p, spin, return_info=True,
+                                        source_link_index=layout.link_index)
+                                    test, info = sfh.cre_k(
+                                        fcivec, norb, nelec, nkpts, target_k,
+                                        k, p, spin, return_info=True,
+                                        source_link_index=layout.link_index)
+                                else:
+                                    ref, info_ref = sfh.des_k_py(
+                                        fcivec, norb, nelec, nkpts, target_k,
+                                        k, p, spin, return_info=True,
+                                        source_link_index=layout.link_index)
+                                    test, info = sfh.des_k(
+                                        fcivec, norb, nelec, nkpts, target_k,
+                                        k, p, spin, return_info=True,
+                                        source_link_index=layout.link_index)
+
+                                self.assertEqual(info, info_ref)
+                                self.assertTrue(np.allclose(test, ref,
+                                                            rtol=1e-13,
+                                                            atol=1e-13))
+
     def test_make_spectral_poles_from_charged_roots(self):
         roots = _one_alpha_roots()
 

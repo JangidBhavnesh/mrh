@@ -59,6 +59,32 @@ def _load_spectral_lib():
         ctypes.c_int,     # broadening
     ]
     libpbcspectral.FCIspectral_broaden.restype = None
+    libpbcspectral.FCIspectral_apply_k_op.argtypes = [
+        ctypes.c_void_p,  # out
+        ctypes.c_void_p,  # fcivec
+        ctypes.c_void_p,  # blocks
+        ctypes.c_int,     # nblocks
+        ctypes.c_int,     # nkpts
+        ctypes.c_void_p,  # stra_ids
+        ctypes.c_void_p,  # stra_offsets
+        ctypes.c_void_p,  # strb_ids
+        ctypes.c_void_p,  # strb_offsets
+        ctypes.c_void_p,  # target_str2loc_a
+        ctypes.c_int,     # target_nstra
+        ctypes.c_void_p,  # target_str2loc_b
+        ctypes.c_int,     # target_nstrb
+        ctypes.c_void_p,  # target_block_offset
+        ctypes.c_void_p,  # target_block_na
+        ctypes.c_void_p,  # target_block_nb
+        ctypes.c_void_p,  # op_index
+        ctypes.c_int,     # nlink
+        ctypes.c_int,     # orb
+        ctypes.c_int,     # k_op
+        ctypes.c_int,     # spin
+        ctypes.c_int,     # cre
+        ctypes.c_int,     # beta_phase
+    ]
+    libpbcspectral.FCIspectral_apply_k_op.restype = None
     _spectral_lib_initialized = True
     return libpbcspectral
 
@@ -315,10 +341,10 @@ def _apply_beta_op(fcivec, out, ctx):
                 dst[:, ib1] += beta_phase * int(link[SIGN]) * src[:, ib0]
 
 
-def apply_k_op(fcivec, norb, nelec, nkpts, target_k, k, p, spin,
-               cre=False, context=None, return_info=False,
-               source_link_index=None, target_link_index=None,
-               nelec_spin=None):
+def apply_k_op_py(fcivec, norb, nelec, nkpts, target_k, k, p, spin,
+                  cre=False, context=None, return_info=False,
+                  source_link_index=None, target_link_index=None,
+                  nelec_spin=None):
     '''
     Apply a single k-resolved creation or annihilation operator.
     '''
@@ -337,6 +363,129 @@ def apply_k_op(fcivec, norb, nelec, nkpts, target_k, k, p, spin,
         _apply_alpha_op(fcivec, out, context)
     else:
         _apply_beta_op(fcivec, out, context)
+
+    if return_info:
+        info = {
+            'nelec': context.target_nelec,
+            'target_k': context.target_target_k,
+            'orb': context.orb,
+            'k': context.k,
+            'p': context.p,
+            'spin': context.spin,
+            'cre': context.cre,
+        }
+        return out, info
+    return out
+
+
+def _flatten_k_ids(ids_by_k):
+    '''
+    Flatten per-momentum string-id lists for the C operator helper.
+    '''
+    offsets = np.empty(len(ids_by_k) + 1, dtype=np.int32)
+    offsets[0] = 0
+    arrays = []
+    for k, ids in enumerate(ids_by_k):
+        ids = np.asarray(ids, dtype=np.int32)
+        arrays.append(ids)
+        offsets[k + 1] = offsets[k] + ids.size
+    if arrays:
+        ids = np.ascontiguousarray(np.concatenate(arrays), dtype=np.int32)
+    else:
+        ids = np.zeros(0, dtype=np.int32)
+    return ids, offsets
+
+
+def _target_block_tables(layout, nkpts):
+    '''
+    Build target block lookup tables for the C operator helper.
+    '''
+    table_size = int(nkpts) * int(nkpts)
+    offset = np.full(table_size, -1, dtype=np.int32)
+    na = np.zeros(table_size, dtype=np.int32)
+    nb = np.zeros(table_size, dtype=np.int32)
+    for blk in layout.blocks:
+        ka, kb, nstra, nstrb, off, size = map(int, blk)
+        key = ka * int(nkpts) + kb
+        offset[key] = off
+        na[key] = nstra
+        nb[key] = nstrb
+    return offset, na, nb
+
+
+def _apply_k_op_c(fcivec, context):
+    '''
+    Apply one k-resolved operator through the native C helper.
+    '''
+    lib = _load_spectral_lib()
+    if lib is None:
+        return None
+
+    fcivec = np.ascontiguousarray(fcivec, dtype=np.complex128)
+    out = np.zeros(context.target.sector_size, dtype=np.complex128)
+    blocks = np.ascontiguousarray(context.source.blocks, dtype=np.int32)
+    op_index = np.ascontiguousarray(context.op_index, dtype=np.int32)
+    stra_ids, stra_offsets = _flatten_k_ids(context.source.stra_id)
+    strb_ids, strb_offsets = _flatten_k_ids(context.source.strb_id)
+    str2loc_a = np.ascontiguousarray(context.target.str2loc_a,
+                                     dtype=np.int32)
+    str2loc_b = np.ascontiguousarray(context.target.str2loc_b,
+                                     dtype=np.int32)
+    block_offset, block_na, block_nb = _target_block_tables(
+        context.target, len(context.target.stra_id))
+    beta_phase = -1 if (context.source_nelec[0] % 2) else 1
+
+    lib.FCIspectral_apply_k_op(
+        out.ctypes.data_as(ctypes.c_void_p),
+        fcivec.ctypes.data_as(ctypes.c_void_p),
+        blocks.ctypes.data_as(ctypes.c_void_p),
+        ctypes.c_int(blocks.shape[0]),
+        ctypes.c_int(len(context.source.stra_id)),
+        stra_ids.ctypes.data_as(ctypes.c_void_p),
+        stra_offsets.ctypes.data_as(ctypes.c_void_p),
+        strb_ids.ctypes.data_as(ctypes.c_void_p),
+        strb_offsets.ctypes.data_as(ctypes.c_void_p),
+        str2loc_a.ctypes.data_as(ctypes.c_void_p),
+        ctypes.c_int(str2loc_a.shape[1]),
+        str2loc_b.ctypes.data_as(ctypes.c_void_p),
+        ctypes.c_int(str2loc_b.shape[1]),
+        block_offset.ctypes.data_as(ctypes.c_void_p),
+        block_na.ctypes.data_as(ctypes.c_void_p),
+        block_nb.ctypes.data_as(ctypes.c_void_p),
+        op_index.ctypes.data_as(ctypes.c_void_p),
+        ctypes.c_int(op_index.shape[1]),
+        ctypes.c_int(context.orb),
+        ctypes.c_int(context.k),
+        ctypes.c_int(context.spin),
+        ctypes.c_int(1 if context.cre else 0),
+        ctypes.c_int(beta_phase),
+    )
+    return out
+
+
+def apply_k_op(fcivec, norb, nelec, nkpts, target_k, k, p, spin,
+               cre=False, context=None, return_info=False,
+               source_link_index=None, target_link_index=None,
+               nelec_spin=None, use_c=True):
+    '''
+    Apply a single k-resolved creation or annihilation operator.
+    '''
+    if context is None:
+        context = make_k_op_context(
+            norb, nelec, nkpts, target_k, k, p, spin, cre=cre,
+            source_link_index=source_link_index,
+            target_link_index=target_link_index, nelec_spin=nelec_spin)
+
+    if use_c:
+        out = _apply_k_op_c(fcivec, context)
+    else:
+        out = None
+    if out is None:
+        return apply_k_op_py(
+            fcivec, norb, nelec, nkpts, target_k, k, p, spin,
+            cre=cre, context=context, return_info=return_info,
+            source_link_index=source_link_index,
+            target_link_index=target_link_index, nelec_spin=nelec_spin)
 
     if return_info:
         info = {
@@ -1152,9 +1301,35 @@ def plot_spectral_function(spectrum, kind='total', k=0, orbital=0, spin=0,
     return fig, ax
 
 
+def des_k_py(fcivec, norb, nelec, nkpts, target_k, k, p, spin,
+             context=None, return_info=False, source_link_index=None,
+             target_link_index=None, nelec_spin=None):
+    '''
+    Return a_{k p spin} |Psi_N> in the N-1 target momentum sector.
+    '''
+    return apply_k_op_py(fcivec, norb, nelec, nkpts, target_k, k, p, spin,
+                         cre=False, context=context, return_info=return_info,
+                         source_link_index=source_link_index,
+                         target_link_index=target_link_index,
+                         nelec_spin=nelec_spin)
+
+
+def cre_k_py(fcivec, norb, nelec, nkpts, target_k, k, p, spin,
+             context=None, return_info=False, source_link_index=None,
+             target_link_index=None, nelec_spin=None):
+    '''
+    Return a^dagger_{k p spin} |Psi_N> in the N+1 target momentum sector.
+    '''
+    return apply_k_op_py(fcivec, norb, nelec, nkpts, target_k, k, p, spin,
+                         cre=True, context=context, return_info=return_info,
+                         source_link_index=source_link_index,
+                         target_link_index=target_link_index,
+                         nelec_spin=nelec_spin)
+
+
 def des_k(fcivec, norb, nelec, nkpts, target_k, k, p, spin,
           context=None, return_info=False, source_link_index=None,
-          target_link_index=None, nelec_spin=None):
+          target_link_index=None, nelec_spin=None, use_c=True):
     '''
     Return a_{k p spin} |Psi_N> in the N-1 target momentum sector.
     '''
@@ -1162,12 +1337,12 @@ def des_k(fcivec, norb, nelec, nkpts, target_k, k, p, spin,
                       cre=False, context=context, return_info=return_info,
                       source_link_index=source_link_index,
                       target_link_index=target_link_index,
-                      nelec_spin=nelec_spin)
+                      nelec_spin=nelec_spin, use_c=use_c)
 
 
 def cre_k(fcivec, norb, nelec, nkpts, target_k, k, p, spin,
           context=None, return_info=False, source_link_index=None,
-          target_link_index=None, nelec_spin=None):
+          target_link_index=None, nelec_spin=None, use_c=True):
     '''
     Return a^dagger_{k p spin} |Psi_N> in the N+1 target momentum sector.
     '''
@@ -1175,7 +1350,7 @@ def cre_k(fcivec, norb, nelec, nkpts, target_k, k, p, spin,
                       cre=True, context=context, return_info=return_info,
                       source_link_index=source_link_index,
                       target_link_index=target_link_index,
-                      nelec_spin=nelec_spin)
+                      nelec_spin=nelec_spin, use_c=use_c)
 
 
 __all__ = [
@@ -1195,7 +1370,10 @@ __all__ = [
     'spectral_weight_sum_rules',
     'save_spectral_npz',
     'plot_spectral_function',
+    'apply_k_op_py',
     'apply_k_op',
+    'des_k_py',
     'des_k',
+    'cre_k_py',
     'cre_k',
 ]
