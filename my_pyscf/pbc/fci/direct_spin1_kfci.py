@@ -4,7 +4,7 @@ import types
 import warnings
 import ctypes
 
-from pyscf import lib, __config__
+from pyscf import lib
 from pyscf.fci import direct_spin1
 from pyscf.fci.addons import _unpack_nelec
 
@@ -34,8 +34,6 @@ logger = lib.logger
 HDIAG_IMAG_TOL = 1e-3
 HERMI_THRESH = 1e-8
 libpbcfci_k = None
-contract_2e_threads = getattr(__config__, "pbc_k_contract_2e_threads",
-                              getattr(__config__, "pbc_contract_2e_threads", None))
 
 
 def _timer_start():
@@ -405,7 +403,7 @@ def contract_1e_k(h1e, fcivec, norb, nelec, nkpts, kindx,
     link_indexa, link_indexb = contract_map.link_index
 
     libpbcfci = _load_k_contract_lib()
-    with lib.with_omp_threads(contract_2e_threads):
+    with lib.with_omp_threads(lib.num_threads()):
         libpbcfci.FCIcontract_1e_k(
             h1e.ctypes.data_as(ctypes.c_void_p),
             fcivec.ctypes.data_as(ctypes.c_void_p),
@@ -541,7 +539,7 @@ def contract_2e_k(eri, fcivec, norb, nelec, nkpts, target_k,
     C implementation of contract_2e_k using structural k-sector contraction maps.
     The alpha-alpha and beta-beta same-spin contractions are applied with zgemm
     and the alpha-beta terms are packed into sparse source/destination block groups.
-    OpenMP threads follow pbc_k_contract_2e_threads/pbc_contract_2e_threads.
+    OpenMP threads follow lib.num_threads().
     args:
         eri : ndarray, shape (nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas)
             Two-electron integrals in k-space, in chemist notation.
@@ -584,7 +582,7 @@ def contract_2e_k(eri, fcivec, norb, nelec, nkpts, target_k,
 
     libpbcfci = _load_k_contract_lib()
     kernel = libpbcfci.FCIcontract_2e_k
-    with lib.with_omp_threads(contract_2e_threads):
+    with lib.with_omp_threads(lib.num_threads()):
         kernel(
             eri.ctypes.data_as(ctypes.c_void_p),
             fcivec.ctypes.data_as(ctypes.c_void_p),
@@ -878,7 +876,7 @@ def make_hdiag(h1e, eri, norb, nelec, nkpts, target_k=0, link_index=None,
     link_indexa, link_indexb = contract_map.link_index
     libpbcfci = _load_k_contract_lib()
     t0 = _timer_debug1(log_obj, "k-FCI make_hdiag library setup", t0)
-    with lib.with_omp_threads(contract_2e_threads):
+    with lib.with_omp_threads(lib.num_threads()):
         libpbcfci.FCIhdiag_k(
             hdiag.ctypes.data_as(ctypes.c_void_p),
             h1e.ctypes.data_as(ctypes.c_void_p),
@@ -1218,7 +1216,7 @@ def kernel_ms1(fci, h1e, eri, norb, nelec, nkpts, target_k=0, ci0=None,
     tol_residual = getattr(fci, "conv_tol_residual", None)
     t0 = log.timer_debug1("k-FCI kernel Davidson parameters", *t0)
 
-    with lib.with_omp_threads(fci.threads):
+    with lib.with_omp_threads(lib.num_threads()):
         e, c = fci.eig(hop, ci0, precond, tol=tol, lindep=lindep,
                        max_cycle=max_cycle, max_space=max_space,
                        nroots=nroots, max_memory=max_memory, verbose=log,

@@ -5,7 +5,7 @@ import numpy as np
 from dataclasses import dataclass
 from collections import defaultdict
 
-from pyscf import lib, __config__
+from pyscf import lib
 from pyscf.fci.cistring import OIndexList, make_strings
 from pyscf.fci.addons import _unpack_nelec
 
@@ -13,10 +13,6 @@ from mrh.lib.helper import load_library
 
 libpbckcistring = load_library('libpbc_kcistring')
 _contract_structure_builder_configured = False
-contract_map_threads = getattr(
-    __config__, "pbc_k_contract_map_threads",
-    getattr(__config__, "pbc_k_contract_2e_threads",
-            getattr(__config__, "pbc_contract_2e_threads", None)))
 
 # Author: Bhavnesh Jangid
 
@@ -920,7 +916,7 @@ def build_contract_structures_c(link_indexa, link_indexb, str2tot_a,
     nstrb, nlinkb, _ = link_indexb.shape
     dims = np.zeros(6, dtype=np.int64)
 
-    with lib.with_omp_threads(contract_map_threads):
+    with lib.with_omp_threads(lib.num_threads()):
         status = libpbckcistring.FCIcount_contract_k_structures(
             link_indexa.ctypes.data_as(ctypes.c_void_p),
             ctypes.c_int(nstra),
@@ -969,7 +965,7 @@ def build_contract_structures_c(link_indexa, link_indexb, str2tot_a,
         "bb_eri_idx": np.empty(nbb_entries, dtype=np.int64, order="C"),
     }
 
-    with lib.with_omp_threads(contract_map_threads):
+    with lib.with_omp_threads(lib.num_threads()):
         status = libpbckcistring.FCIfill_contract_k_structures(
             link_indexa.ctypes.data_as(ctypes.c_void_p),
             ctypes.c_int(nstra),
