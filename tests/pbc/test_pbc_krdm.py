@@ -149,7 +149,7 @@ def _check_kRDM_and_kRDMs_thoroughly(rdm1, rdm2, rdm1a, rdm1b, rdm2aa, rdm2ab, r
     dm1 = rdm1a + rdm1b
     dm2 = rdm2aa + rdm2bb + rdm2ab + rdm2ab.transpose(2,3,0,1)
 
-    # Check the consistency of make_rdm1s_py and make_rdm12s_py
+    # Check the consistency of make_rdm1s and make_rdm12s.
     np.testing.assert_allclose(rdm1a, rdm1a_from_make_rdm1s, atol=1e-10, rtol=1e-10)
     np.testing.assert_allclose(rdm1b, rdm1b_from_make_rdm1s, atol=1e-10, rtol=1e-10)
     np.testing.assert_allclose(dm1.conj().T, rdm1_from_make_rdm1, atol=1e-10, rtol=1e-10)
@@ -205,13 +205,13 @@ class KnownValues(unittest.TestCase):
 
                     cisolver = direct_spin1_kfci.FCISolver(nkpts=nkpts, target_k=target_k)
 
-                    rdm1, rdm2 = cisolver.make_rdm12_py(fcivec_k.copy(), norb, nelecas, reorder=True)
+                    rdm1, rdm2 = cisolver.make_rdm12(fcivec_k.copy(), norb, nelecas, reorder=True)
                     (rdm1a, rdm1b), (rdm2aa, rdm2ab, rdm2bb) = \
-                        cisolver.make_rdm12s_py(fcivec_k.copy(), norb, nelecas)
+                        cisolver.make_rdm12s(fcivec_k.copy(), norb, nelecas)
                     rdm1a_from_make_rdm1s, rdm1b_from_make_rdm1s = \
-                        cisolver.make_rdm1s_py(fcivec_k.copy(), norb, nelecas, link_index=None)
+                        cisolver.make_rdm1s(fcivec_k.copy(), norb, nelecas, link_index=None)
                     rdm1_from_make_rdm1 = \
-                        cisolver.make_rdm1_py(fcivec_k.copy(), norb, nelecas, link_index=None)
+                        cisolver.make_rdm1(fcivec_k.copy(), norb, nelecas, link_index=None)
                     
                     _check_kRDM_and_kRDMs_thoroughly(
                         rdm1, rdm2, rdm1a, rdm1b, rdm2aa, rdm2ab, rdm2bb,
@@ -238,19 +238,19 @@ class KnownValues(unittest.TestCase):
 
                     cisolver_k = direct_spin1_kfci.FCISolver(nkpts=nkpts, target_k=target_k)
 
-                    rdm1s_k = cisolver_k.make_rdm1s_py(fcivec_k.copy(), norb, nelecas)
-                    rdm1s_ref = direct_spin1_cplx.make_rdm1s_py(ci_full.copy(), norb, nelecas)
+                    rdm1s_k = cisolver_k.make_rdm1s(fcivec_k.copy(), norb, nelecas)
+                    rdm1s_ref = direct_spin1_cplx.make_rdm1s(ci_full.copy(), norb, nelecas)
 
                     _compare_two_RDM(rdm1s_k[0], rdm1s_ref[0])
                     _compare_two_RDM(rdm1s_k[1], rdm1s_ref[1])
 
-                    rdm1_k = cisolver_k.make_rdm1_py(fcivec_k.copy(), norb, nelecas)
-                    rdm1_ref = direct_spin1_cplx.make_rdm1_py(ci_full.copy(), norb, nelecas)
+                    rdm1_k = cisolver_k.make_rdm1(fcivec_k.copy(), norb, nelecas)
+                    rdm1_ref = direct_spin1_cplx.make_rdm1(ci_full.copy(), norb, nelecas)
 
                     _compare_two_RDM(rdm1_k, rdm1_ref)
 
-                    rdm12s_k = cisolver_k.make_rdm12s_py(fcivec_k.copy(), norb, nelecas)
-                    rdm12s_ref = direct_spin1_cplx.make_rdm12s_py(ci_full.copy(), norb, nelecas)
+                    rdm12s_k = cisolver_k.make_rdm12s(fcivec_k.copy(), norb, nelecas)
+                    rdm12s_ref = direct_spin1_cplx.make_rdm12s(ci_full.copy(), norb, nelecas)
 
                     for dmA, dmB in zip(rdm12s_k[0], rdm12s_ref[0]):
                         _compare_two_RDM(dmA, dmB)
@@ -258,8 +258,8 @@ class KnownValues(unittest.TestCase):
                     for dmA, dmB in zip(rdm12s_k[1], rdm12s_ref[1]):
                         _compare_two_RDM(dmA, dmB)
 
-                    rdm1_k, rdm2_k = cisolver_k.make_rdm12_py(fcivec_k.copy(), norb, nelecas)
-                    rdm1_ref, rdm2_ref = direct_spin1_cplx.make_rdm12_py(ci_full.copy(), norb, nelecas)
+                    rdm1_k, rdm2_k = cisolver_k.make_rdm12(fcivec_k.copy(), norb, nelecas)
+                    rdm1_ref, rdm2_ref = direct_spin1_cplx.make_rdm12(ci_full.copy(), norb, nelecas)
 
                     _compare_two_RDM(rdm1_k, rdm1_ref)
                     _compare_two_RDM(rdm2_k, rdm2_ref)
