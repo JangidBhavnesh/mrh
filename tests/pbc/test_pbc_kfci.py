@@ -4,7 +4,10 @@ import numpy as np
 import scipy
 
 from pyscf import fci
+from pyscf.pbc import gto as pgto
+from pyscf.pbc import scf
 
+from mrh.my_pyscf.pbc import mcscf
 from mrh.my_pyscf.pbc import fci as pbc_fci
 from mrh.my_pyscf.pbc.fci import direct_spin1_cplx, direct_spin1_cplx_opt
 from mrh.my_pyscf.pbc.fci import direct_spin1_kfci
@@ -333,6 +336,106 @@ class KnownValues(unittest.TestCase):
         e_test = solver.energy(h1e, eri, fcivec_k, norb, nelec)
 
         self.assertTrue(np.allclose(e_test, e_ref, atol=1e-12, rtol=1e-12))
+
+    def test_single_determinant_kfci_equals_khf_determinant(self):
+        '''
+        A fully occupied ncas=1 active space has only one determinant across
+        the k mesh.  In that limit k-FCI has no variational/off-diagonal CI
+        space, so its energy must be the same single-determinant expectation
+        value that k-HF would assign to those occupied k orbitals.
+        '''
+        rng = np.random.default_rng(19)
+
+        for nkpts in (2, 3, 4):
+            with self.subTest(nkpts=nkpts):
+                ncas = 1
+                norb = nkpts * ncas
+                nelec = (nkpts, nkpts)
+                target_k = 0
+
+                h1e = rng.normal(size=(nkpts, ncas, ncas))
+                h1e = np.asarray(h1e, dtype=np.complex128)
+                eri = rng.normal(
+                    size=(nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas)
+                )
+                eri = np.asarray(eri, dtype=np.complex128)
+
+                self.assertEqual(
+                    direct_spin1_kfci.sector_size(
+                        norb, nelec, nkpts, target_k
+                    ),
+                    1,
+                )
+
+                ci0 = np.ones(1, dtype=np.complex128)
+                sigma = direct_spin1_kfci.contract_ham_k(
+                    h1e, eri, ci0, norb, nelec, nkpts, target_k
+                )
+                e_kfci = direct_spin1_kfci.energy(
+                    h1e, eri, ci0, norb, nelec, nkpts, target_k
+                )
+
+                e_khf_det = 2.0 * np.sum(h1e[:, 0, 0])
+                for ki in range(nkpts):
+                    for kj in range(nkpts):
+                        coul_ij = eri[ki, ki, kj, 0, 0, 0, 0]
+                        coul_ji = eri[kj, kj, ki, 0, 0, 0, 0]
+                        e_khf_det += 2.0 * coul_ij
+                        e_khf_det += coul_ij + coul_ji
+
+                self.assertTrue(
+                    np.allclose(sigma[0], e_khf_det, atol=1e-12, rtol=1e-12)
+                )
+                self.assertTrue(
+                    np.allclose(e_kfci, e_khf_det, atol=1e-12, rtol=1e-12)
+                )
+
+    def test_single_determinant_kcasci_equals_krhf(self):
+        '''
+        With one occupied active orbital at each k point and two active
+        electrons per cell, the k-FCI sector contains a single determinant.
+        The kCASCI energy should therefore reduce to the KRHF determinant
+        energy computed from the same orbitals.
+        '''
+        intraH = 0.74
+        interH = 1.5
+        vacuum = 17.5
+
+        cell = pgto.Cell()
+        cell.a = np.diag([intraH + interH, intraH + interH, vacuum])
+        cell.atom = [
+            ["H", (0.0, 0.0, vacuum / 2.0)],
+            ["H", (intraH, 0.0, vacuum / 2.0)],
+        ]
+        cell.basis = 'STO-6G'
+        cell.unit = 'Angstrom'
+        cell.max_memory = 100000
+        cell.ke_cutoff = 100
+        cell.precision = 1e-10
+        cell.verbose = 0
+        cell.build()
+
+        kmesh = [2, 1, 1]
+        kpts = cell.make_kpts(kmesh, wrap_around=True)
+
+        kmf = scf.KRHF(cell, kpts=kpts).density_fit(auxbasis='def2-svp-jkfit')
+        kmf.max_cycle = 1000
+        kmf.exxdiv = None
+        kmf.conv_tol = 1e-10
+        kmf.verbose = 0
+        kmf.kernel()
+        self.assertTrue(kmf.converged)
+
+        kmc = mcscf.KCASCI(kmf, 1, 2, target_k=0)
+        kmc.kmesh = kmesh
+        kmc.verbose = 0
+        kmc.fcisolver.verbose = 0
+        kmc.canonicalization = False
+
+        e_kcasci = kmc.kernel(np.asarray(kmf.mo_coeff))[0]
+
+        self.assertEqual(np.size(kmc.ci), 1)
+        self.assertTrue(np.allclose(e_kcasci, kmf.e_tot, atol=1e-10, rtol=1e-10))
 
     def test_fix_spin_k(self):
         '''
