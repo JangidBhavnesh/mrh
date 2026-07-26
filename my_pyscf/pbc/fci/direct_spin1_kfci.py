@@ -169,6 +169,23 @@ def _load_k_contract_lib():
             ctypes.c_void_p,  # bb_eri_idx
         ]
         libpbcfci_k.FCIhdiag_k.restype = None
+        libpbcfci_k.FCIhdiag_k_stream_ab.argtypes = [
+            ctypes.c_void_p,  # hdiag
+            ctypes.c_void_p,  # eri
+            ctypes.c_int,     # nkpts
+            ctypes.c_int,     # ncas
+            ctypes.c_int,     # nblocks
+            ctypes.c_void_p,  # blocks
+            ctypes.c_void_p,  # linka
+            ctypes.c_int,     # nlinka
+            ctypes.c_void_p,  # linkb
+            ctypes.c_int,     # nlinkb
+            ctypes.c_void_p,  # stra_ids
+            ctypes.c_void_p,  # stra_offsets
+            ctypes.c_void_p,  # strb_ids
+            ctypes.c_void_p,  # strb_offsets
+        ]
+        libpbcfci_k.FCIhdiag_k_stream_ab.restype = None
         _timer_debug1(None, "k-FCI load C contract library", t0)
     return libpbcfci_k
 
@@ -596,7 +613,7 @@ def contract_2e_k(eri, fcivec, norb, nelec, nkpts, target_k,
     t0 = _timer_start()
     contract_map = _as_contract_map(
         norb, nelec, nkpts, target_k, link_index=link_index,
-        contract_map=contract_map, log_obj=log_obj)
+        contract_map=contract_map, explicit_ab=True, log_obj=log_obj)
     assert fcivec.size == contract_map.sector_size
     t0 = _timer_debug1(log_obj, "k-FCI contract_2e map setup", t0)
 
@@ -908,7 +925,7 @@ def make_hdiag(h1e, eri, norb, nelec, nkpts, target_k=0, link_index=None,
 
     contract_map = _as_contract_map(
         norb, nelec, nkpts, target_k, link_index=link_index,
-        contract_map=contract_map, explicit_ab=True, log_obj=log_obj)
+        contract_map=contract_map, log_obj=log_obj)
     ndet = contract_map.sector_size
     t0 = _timer_debug1(log_obj, "k-FCI make_hdiag map setup", t0)
 
@@ -959,6 +976,23 @@ def make_hdiag(h1e, eri, norb, nelec, nkpts, target_k=0, link_index=None,
             contract_map.bb_sign.ctypes.data_as(ctypes.c_void_p),
             contract_map.bb_eri_idx.ctypes.data_as(ctypes.c_void_p),
         )
+        if not getattr(contract_map, "explicit_ab", True):
+            libpbcfci.FCIhdiag_k_stream_ab(
+                hdiag.ctypes.data_as(ctypes.c_void_p),
+                eri.ctypes.data_as(ctypes.c_void_p),
+                ctypes.c_int(nkpts),
+                ctypes.c_int(ncas),
+                ctypes.c_int(contract_map.blocks.shape[0]),
+                contract_map.blocks.ctypes.data_as(ctypes.c_void_p),
+                link_indexa.ctypes.data_as(ctypes.c_void_p),
+                ctypes.c_int(link_indexa.shape[1]),
+                link_indexb.ctypes.data_as(ctypes.c_void_p),
+                ctypes.c_int(link_indexb.shape[1]),
+                contract_map.stra_ids.ctypes.data_as(ctypes.c_void_p),
+                contract_map.stra_offsets.ctypes.data_as(ctypes.c_void_p),
+                contract_map.strb_ids.ctypes.data_as(ctypes.c_void_p),
+                contract_map.strb_offsets.ctypes.data_as(ctypes.c_void_p),
+            )
     _timer_debug1(log_obj, "k-FCI make_hdiag C kernel", t0)
     return hdiag
 
