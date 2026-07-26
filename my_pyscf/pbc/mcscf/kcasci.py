@@ -8,6 +8,7 @@ from pyscf.lib import logger
 
 from mrh.my_pyscf.pbc.fci.addons import _unpack_nelec
 from mrh.my_pyscf.pbc import fci as pbc_fci
+from mrh.my_pyscf.pbc.fci import kcistrings
 from mrh.my_pyscf.pbc.mcscf import casci
 
 # 
@@ -79,6 +80,38 @@ def get_h1e_h2e(mc, mo_coeff=None):
 
     return h1eff, h2eff, ecore
 
+
+def _get_kmom_for_kcasci(mc):
+    '''
+    Build k-point arithmetic from the k-CASCI/SCF kpts metadata.
+    '''
+    kmf = mc._scf
+    kpts = kcistrings._safe_getattr(mc, 'kpts', None)
+    if kpts is None:
+        kpts = kcistrings._safe_getattr(kmf, 'kpts', None)
+    kmesh = kcistrings._safe_getattr(mc, 'kmesh', None)
+    if kmesh is None:
+        kmesh = kcistrings._safe_getattr(kmf, 'kmesh', None)
+    return kcistrings.make_kpoint_momentum(
+        mc.nkpts, cell=mc.cell, kpts=kpts, kmesh=kmesh,
+        kconserv=getattr(mc, 'kconserv', None), kmf=kmf, kmc=mc)
+
+
+def _set_solver_kpts(mc, kmom=None):
+    '''
+    Pass k-point metadata from k-CASCI to the k-FCI solver.
+    '''
+    if kmom is None:
+        kmom = _get_kmom_for_kcasci(mc)
+    mc.kconserv = kmom.kconserv
+    mc.fcisolver.kpts = kcistrings._safe_getattr(
+        mc, 'kpts', kcistrings._safe_getattr(mc._scf, 'kpts', None))
+    mc.fcisolver.kmesh = kcistrings._safe_getattr(
+        mc, 'kmesh', kcistrings._safe_getattr(mc._scf, 'kmesh', None))
+    mc.fcisolver.kconserv = kmom.kconserv
+    mc.fcisolver.kmom = kmom
+    return kmom
+
 def kernel(mc, mo_coeff=None, ci0=None, verbose=logger.NOTE, envs=None):
     '''
     # Passing env to be consistent with molecular CASCI, but currently this is
@@ -104,13 +137,14 @@ def kernel(mc, mo_coeff=None, ci0=None, verbose=logger.NOTE, envs=None):
     assert h1eff.shape == (nkpts, ncas, ncas)
     assert h2eff.shape == (nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas)
 
+    kmom = _set_solver_kpts(mc)
     if log.verbose >= logger.DEBUG1:
         for k in range(nkpts):
             assert np.linalg.norm(h1eff[k] - h1eff[k].conj().T) < 1e-10, \
                 "1e Hamiltonian hermiticity error"
         eri_symm_err = 0.0
         for kp, kq, kr in np.ndindex(nkpts, nkpts, nkpts):
-            ks = (kp - kq + kr) % nkpts
+            ks = int(kmom.kconserv[kp, kq, kr])
             err = np.linalg.norm(h2eff[kp, kq, kr] -
                                  h2eff[kr, ks, kp].transpose(2, 3, 0, 1))
             eri_symm_err = max(eri_symm_err, err)
@@ -123,6 +157,7 @@ def kernel(mc, mo_coeff=None, ci0=None, verbose=logger.NOTE, envs=None):
 
     mc.fcisolver.nkpts = nkpts
     mc.fcisolver.target_k = target_k
+    mc.fcisolver.kmom = kmom
 
     e_tot, fcivec = mc.fcisolver.kernel(h1eff, h2eff, ncastot, nelecastot,
                                         ci0=ci0, nkpts=nkpts, target_k=target_k,
@@ -256,13 +291,14 @@ def charged_kernel(mc, mo_coeff=None, ci0=None, verbose=logger.NOTE,
     assert h1eff.shape == (nkpts, ncas, ncas)
     assert h2eff.shape == (nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas)
 
+    kmom = _set_solver_kpts(mc)
     if log.verbose >= logger.DEBUG1:
         for k in range(nkpts):
             assert np.linalg.norm(h1eff[k] - h1eff[k].conj().T) < 1e-10, \
                 "1e Hamiltonian hermiticity error"
         eri_symm_err = 0.0
         for kp, kq, kr in np.ndindex(nkpts, nkpts, nkpts):
-            ks = (kp - kq + kr) % nkpts
+            ks = int(kmom.kconserv[kp, kq, kr])
             err = np.linalg.norm(h2eff[kp, kq, kr] -
                                  h2eff[kr, ks, kp].transpose(2, 3, 0, 1))
             eri_symm_err = max(eri_symm_err, err)
@@ -292,6 +328,7 @@ def charged_kernel(mc, mo_coeff=None, ci0=None, verbose=logger.NOTE,
 
         mc.fcisolver.nkpts = nkpts
         mc.fcisolver.target_k = tk
+        mc.fcisolver.kmom = kmom
         e_tot, fcivec = mc.fcisolver.kernel(
             h1eff, h2eff, ncastot, nelecastot, ci0=ci0_k, nkpts=nkpts,
             target_k=tk, verbose=log, max_memory=max_memory,
@@ -475,14 +512,20 @@ class PBCKCASCI(casci.PBCCASCI):
     using the k-FCI solver.
     '''
 
-    _keys = casci.PBCCASCI._keys.union({'target_k'})
+    _keys = casci.PBCCASCI._keys.union({'target_k', 'kpts', 'kmesh',
+                                         'kconserv'})
 
     def __init__(self, kmf, ncas=0, nelecas=0, ncore=None, target_k=0):
         casci.PBCCASCI.__init__(self, kmf, ncas=ncas, nelecas=nelecas,
                                 ncore=ncore)
         self.target_k = target_k
+        self.kpts = kcistrings._safe_getattr(kmf, 'kpts', None)
+        self.kmesh = kcistrings._safe_getattr(kmf, 'kmesh', None)
+        self.kconserv = None
         self.fcisolver = pbc_fci.ksolver(self.cell, nkpts=self.nkpts,
                                          target_k=target_k)
+        self.fcisolver.kpts = self.kpts
+        self.fcisolver.kmesh = self.kmesh
         self.fcisolver.lindep = getattr(__config__,
                                         'mcscf_casci_CASCI_fcisolver_lindep',
                                         1e-12)
