@@ -462,6 +462,7 @@ def kernel_chrkcasci(mc, mo_coeff=None, ci0=None, verbose=logger.NOTE,
             'e_cas': e_cas,
             'e_tot_supercell': e_tot * nkpts,
             'e_cas_supercell': e_cas * nkpts,
+            'ci': fcivec,
             'converged': conv,
         })
         e_tot_all.append(e_tot)
@@ -770,8 +771,8 @@ class PBCKCASCI(casci.PBCCASCI):
         nelecastot = (self.nkpts * nelecas[0],
                       self.nkpts * nelecas[1])
         target_k = int(self.target_k) % self.nkpts
-        return make_rdm1(
-            self, mo_coeff, ci, ncas, ncore, nelecastot, target_k)
+        rdm1 = make_rdm1(self, mo_coeff, ci, ncas, ncore, nelecastot, target_k)
+        return rdm1
 
     get_fock = get_fock
     canonicalize = canonicalize
@@ -788,20 +789,21 @@ class PBCKCASCI(casci.PBCCASCI):
                 with_meta_lowdin=with_meta_lowdin, stav_dm1=stav_dm1,
                 weights=weights, target_k=target_k)
         if cas_natorb:
-            self.ci = ci
+            raise NotImplementedError
         return self.mo_coeff, ci, self.mo_energy
 
     def _finalize(self):
         log = logger.Logger(self.stdout, self.verbose)
         nkpts = self.nkpts
+        ncastot = nkpts * self.ncas
+        nelecastot = (nkpts * self.nelecas[0], nkpts * self.nelecas[1])
+
         if (log.verbose >= logger.NOTE and
                 getattr(self.fcisolver, 'spin_square', None)):
             if isinstance(self.e_cas, (np.complex128, np.float64)):
                 try:
                     ss = self.fcisolver.spin_square(
-                        self.ci, nkpts * self.ncas,
-                        (nkpts * self.nelecas[0],
-                         nkpts * self.nelecas[1]))
+                        self.ci, ncastot, nelecastot)
                     log.note(
                         'KCASCI E (per k-point)= %#.15g  '
                         'E(CI) = %#.15g  S^2 = %.7f',
@@ -813,11 +815,8 @@ class PBCKCASCI(casci.PBCCASCI):
             else:
                 for i, e in enumerate(self.e_cas):
                     try:
-                        nelecastot = (
-                            nkpts * self.nelecas[0],
-                            nkpts * self.nelecas[1])
                         ss = self.fcisolver.spin_square(
-                            self.ci[i], nkpts * self.ncas, nelecastot)
+                            self.ci[i], ncastot, nelecastot)
                         log.note(
                             'KCASCI E (per k-point) state %3d  '
                             'E = %#.15g  E(CI) = %#.15g  S^2 = %.7f',
