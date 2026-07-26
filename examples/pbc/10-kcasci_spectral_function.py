@@ -1,4 +1,6 @@
+import os
 import numpy as np
+import matplotlib
 
 from pyscf import lib
 from pyscf.pbc import gto as pgto
@@ -6,6 +8,8 @@ from pyscf.pbc import scf
 
 from mrh.my_pyscf.pbc.fci import spectral_fn_helper as sfh
 
+
+matplotlib.use("Agg")
 
 '''
 Example setup for a k-CASCI spectral function.
@@ -105,3 +109,13 @@ for k in range(roots.nkpts):
 max_missing = max(abs(row['total_missing']) for row in checks)
 print("")
 print(f"max spectral weight missing from supplied roots: {max_missing:.3e}")
+
+fig = None
+ax = None
+for k in range(roots.nkpts):
+    fig, ax = sfh.plot_spectral_function(spectrum, kind='total', k=k, ax=ax)
+    ax.lines[-1].set_label(f"k = {k}")
+ax.legend()
+fig.tight_layout()
+fig.savefig("kcasci_spectral_function.png", dpi=200)
+print("saved plot: kcasci_spectral_function.png")
