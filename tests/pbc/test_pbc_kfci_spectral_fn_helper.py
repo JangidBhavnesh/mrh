@@ -67,6 +67,69 @@ class KnownValues(unittest.TestCase):
     def test_cre_k_matches_full_ci_operator(self):
         self._check_k_operator(cre=True)
 
+    def test_make_spectral_poles_from_charged_roots(self):
+        nkpts = 2
+        ncas = 1
+        norb = nkpts * ncas
+        nelec = (1, 0)
+
+        roots = sfh.KCASCISpectralRoots(
+            neutral=None, hole=None, particle=None,
+            roots=[
+                {
+                    'kind': 'neutral',
+                    'charge': 0,
+                    'target_k': 0,
+                    'root': 0,
+                    'energy': 1.0,
+                    'energy_supercell': 1.0,
+                    'ci': np.ones(1),
+                    'nelecastot': nelec,
+                    'ncastot': norb,
+                    'nkpts': nkpts,
+                    'converged': True,
+                },
+                {
+                    'kind': 'hole',
+                    'charge': 1,
+                    'target_k': 0,
+                    'root': 0,
+                    'energy': 0.25,
+                    'energy_supercell': 0.25,
+                    'ci': np.ones(1),
+                    'nelecastot': (0, 0),
+                    'ncastot': norb,
+                    'nkpts': nkpts,
+                    'converged': True,
+                },
+                {
+                    'kind': 'particle',
+                    'charge': -1,
+                    'target_k': 1,
+                    'root': 0,
+                    'energy': 1.75,
+                    'energy_supercell': 1.75,
+                    'ci': np.ones(1),
+                    'nelecastot': (2, 0),
+                    'ncastot': norb,
+                    'nkpts': nkpts,
+                    'converged': True,
+                },
+            ],
+            nkpts=nkpts, ncas=ncas, ncastot=norb, nelecastot=nelec,
+            target_k=0, mo_coeff=None)
+
+        poles = sfh.make_spectral_poles(
+            roots, k_indices=(0, 1), orbital_indices=(0,),
+            spins=(0,), min_weight=1e-12)
+        labels = {(row['kind'], row['k']): row for row in poles}
+
+        self.assertEqual(set(labels), {('hole', 0), ('particle', 1)})
+        self.assertAlmostEqual(labels[('hole', 0)]['omega'], 0.75)
+        self.assertAlmostEqual(labels[('hole', 0)]['weight'], 1.0)
+        self.assertAlmostEqual(labels[('particle', 1)]['omega'], 0.75)
+        self.assertAlmostEqual(labels[('particle', 1)]['weight'], 1.0)
+
     def _check_k_operator(self, cre=False):
         nkpts = 3
         ncas = 2

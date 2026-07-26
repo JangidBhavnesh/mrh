@@ -10,9 +10,8 @@ from mrh.my_pyscf.pbc.fci import spectral_fn_helper as sfh
 '''
 Example setup for a k-CASCI spectral function.
 
-This example computes and stores the neutral, hole, and particle k-CASCI roots.
-The next step is to apply des_k/cre_k to form transition amplitudes from these
-roots.
+This example computes neutral/charged k-CASCI roots and projects the
+k-resolved creation/destruction operators onto those roots to form poles.
 '''
 
 
@@ -74,7 +73,17 @@ for row in roots.roots:
           f"{row['energy_supercell'].real:21.8f}"
           f"  {row['nelecastot']}")
 
+poles = sfh.make_spectral_poles(roots, min_weight=1e-8)
+
 print("")
-print("Step 10 will use these roots as follows:")
-print("  hole     <Psi_N-1(target_k=K-k)| des_k(k,p,spin) |Psi_N(K)>")
-print("  particle <Psi_N+1(target_k=K+k)| cre_k(k,p,spin) |Psi_N(K)>")
+print("kind          k  target_k  root  orb  spin       omega        weight")
+for row in poles:
+    spin = 'a' if row['spin'] == 0 else 'b'
+    print(f"{row['kind']:10s}"
+          f"{row['k']:4d}"
+          f"{row['target_k']:8d}"
+          f"{row['root']:6d}"
+          f"{row['orbital']:5d}"
+          f"{spin:>6s}"
+          f"{row['omega'].real:14.8f}"
+          f"{row['weight'].real:14.8f}")
