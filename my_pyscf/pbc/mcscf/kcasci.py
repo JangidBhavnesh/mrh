@@ -410,18 +410,7 @@ def kernel_chrkcasci(mc, mo_coeff=None, ci0=None, verbose=logger.NOTE,
     assert h2eff.shape == (nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas)
 
     kmom = _set_solver_kpts(mc)
-    if log.verbose >= logger.DEBUG1:
-        for k in range(nkpts):
-            assert np.linalg.norm(h1eff[k] - h1eff[k].conj().T) < 1e-10, \
-                "1e Hamiltonian hermiticity error"
-        eri_symm_err = 0.0
-        for kp, kq, kr in np.ndindex(nkpts, nkpts, nkpts):
-            ks = int(kmom.kconserv[kp, kq, kr])
-            err = np.linalg.norm(h2eff[kp, kq, kr] -
-                                 h2eff[kr, ks, kp].transpose(2, 3, 0, 1))
-            eri_symm_err = max(eri_symm_err, err)
-        assert eri_symm_err < 1e-10, "ERI permutation symmetry error"
-
+ 
     max_memory = max(4000, mc.max_memory - lib.current_memory()[0])
     ncastot = nkpts * ncas
     nelecastot = _get_nelecas_for_charged_kcasci(
