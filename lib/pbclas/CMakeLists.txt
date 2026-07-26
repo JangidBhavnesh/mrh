@@ -42,3 +42,12 @@ set_target_properties (clib_mrh_pbc_kcistring PROPERTIES
     CLEAN_DIRECT_OUTPUT 1
     LIBRARY_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}
     OUTPUT_NAME "pbc_kcistring")
+
+set (PBC_SPECTRAL_FN_SOURCE_FILES "pbc_spectral_fn.c")
+add_library (clib_mrh_pbc_spectral_fn SHARED ${PBC_SPECTRAL_FN_SOURCE_FILES})
+target_link_libraries(clib_mrh_pbc_spectral_fn ${LAPACK_LIBRARIES})
+set_target_properties (clib_mrh_pbc_spectral_fn PROPERTIES
+    LINKER_LANGUAGE C
+    CLEAN_DIRECT_OUTPUT 1
+    LIBRARY_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}
+    OUTPUT_NAME "pbc_spectral_fn")
