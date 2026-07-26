@@ -299,7 +299,7 @@ def compute_band_energies(charged_results, reference_energy, charge=None,
 
     args:
         charged_results : list of dict
-            The output of charged_kernel for one or more target_k sectors.
+            The output of kernel_chrkcasci for one or more target_k sectors.
         reference_energy : float or list of float
             The neutral KCASCI energy for the same active space.
         charge: int +1 or -1
@@ -382,7 +382,7 @@ def compute_band_energies(charged_results, reference_energy, charge=None,
     return bands
 
 
-def charged_kernel(mc, mo_coeff=None, ci0=None, verbose=logger.NOTE,
+def kernel_chrkcasci(mc, mo_coeff=None, ci0=None, verbose=logger.NOTE,
                    target_k=None, charge=None, charged_spin=None, envs=None):
     '''
     Charged k-CASCI kernel.  This keeps the neutral KCASCI kernel unchanged and
@@ -998,7 +998,7 @@ class ChargedPBCKCASCI(PBCKCASCI):
         self.dump_flags(log)
 
         results, e_tot_all, e_cas_all, ci_all, nelecastot, converged = \
-            charged_kernel(self, mo_coeff=mo_coeff, ci0=ci0,
+            kernel_chrkcasci(self, mo_coeff=mo_coeff, ci0=ci0,
                            verbose=verbose, target_k=target_k,
                            charge=charge, charged_spin=charged_spin)
         self.charged_nelecas = nelecastot
