@@ -1,4 +1,5 @@
 import numpy as np
+import matplotlib.pyplot as plt
 
 from pyscf import lib
 from pyscf.pbc import gto as pgto
@@ -86,6 +87,16 @@ print("  k     scaled kx    target(N-1)  kHF E-      KCASCI E-   "
 # This active space has one occupied and one virtual kHF orbital per k-point.
 scaled_kpts = cell.get_scaled_kpts(kpts)
 k_order = np.argsort(scaled_kpts[:, 0])
+x = scaled_kpts[k_order, 0]
+e_minus_khf_band = np.asarray(
+    [kmf.mo_energy[k][0].real for k in k_order])
+e_plus_khf_band = np.asarray(
+    [kmf.mo_energy[k][1].real for k in k_order])
+e_minus_kcasci = np.asarray(
+    [hole_by_k[k]["energy"].real for k in k_order])
+e_plus_kcasci = np.asarray(
+    [particle_by_k[k]["energy"].real for k in k_order])
+
 for k in k_order:
     hole = hole_by_k[k]
     particle = particle_by_k[k]
@@ -96,3 +107,18 @@ for k in k_order:
           f"  {hole['energy'].real:11.8f}"
           f"  {particle['target_k']:11d}  {e_plus_khf:11.8f}"
           f"  {particle['energy'].real:11.8f}")
+
+# Plot quasiparticle band energies.  The removal band is E- = -IP and the
+# addition band is E+ = -EA.
+fig, ax = plt.subplots(figsize=(6.0, 4.2))
+ax.plot(x, e_minus_khf_band, "o-", label="kHF E-")
+ax.plot(x, e_minus_kcasci, "s--", label="KCASCI E-")
+ax.plot(x, e_plus_khf_band, "o-", label="kHF E+")
+ax.plot(x, e_plus_kcasci, "s--", label="KCASCI E+")
+ax.axhline(0.0, color="0.7", linewidth=0.8)
+ax.set_xlabel(r"scaled $k_x$")
+ax.set_ylabel("quasiparticle energy (Eh)")
+ax.set_xticks(x)
+ax.legend()
+fig.tight_layout()
+plt.show()
