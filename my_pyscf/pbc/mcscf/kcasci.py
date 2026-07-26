@@ -858,7 +858,9 @@ class ChargedPBCKCASCI(PBCKCASCI):
 
                 if with_spin:
                     try:
-                        ss = spin_square(ci_root, ncas, nelecas)
+                        ss = spin_square(
+                            ci_root, ncas, nelecas, nkpts=self.nkpts,
+                            target_k=target_k)
                         log.note(msg + '  S^2 = %.7f', *args, ss[0])
                         continue
                     except NotImplementedError:
