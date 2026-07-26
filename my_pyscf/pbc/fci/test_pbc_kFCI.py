@@ -416,19 +416,19 @@ class KnownValues(unittest.TestCase):
 
         solver = direct_spin1_kfci.FCISolver(nkpts=nkpts, target_k=target_k)
 
-        rdm1s_k = solver.make_rdm1s_py(fcivec_k, norb, nelec)
-        rdm1s_ref = direct_spin1_cplx.make_rdm1s_py(ci_full, norb, nelec)
+        rdm1s_k = solver.make_rdm1s(fcivec_k, norb, nelec)
+        rdm1s_ref = direct_spin1_cplx.make_rdm1s(ci_full, norb, nelec)
 
         self.assertTrue(np.allclose(rdm1s_k[0], rdm1s_ref[0], atol=1e-12, rtol=1e-12))
         self.assertTrue(np.allclose(rdm1s_k[1], rdm1s_ref[1], atol=1e-12, rtol=1e-12))
 
-        rdm1_k = solver.make_rdm1_py(fcivec_k, norb, nelec)
-        rdm1_ref = direct_spin1_cplx.make_rdm1_py(ci_full, norb, nelec)
+        rdm1_k = solver.make_rdm1(fcivec_k, norb, nelec)
+        rdm1_ref = direct_spin1_cplx.make_rdm1(ci_full, norb, nelec)
 
         self.assertTrue(np.allclose(rdm1_k, rdm1_ref, atol=1e-12, rtol=1e-12))
 
-        rdm12s_k = solver.make_rdm12s_py(fcivec_k.copy(), norb, nelec)
-        rdm12s_ref = direct_spin1_cplx.make_rdm12s_py(ci_full.copy(), norb, nelec)
+        rdm12s_k = solver.make_rdm12s(fcivec_k.copy(), norb, nelec)
+        rdm12s_ref = direct_spin1_cplx.make_rdm12s(ci_full.copy(), norb, nelec)
 
         for dm_k, dm_ref in zip(rdm12s_k[0], rdm12s_ref[0]):
             self.assertTrue(np.allclose(dm_k, dm_ref, atol=1e-12, rtol=1e-12))
@@ -436,8 +436,8 @@ class KnownValues(unittest.TestCase):
         for dm_k, dm_ref in zip(rdm12s_k[1], rdm12s_ref[1]):
             self.assertTrue(np.allclose(dm_k, dm_ref, atol=1e-12, rtol=1e-12))
 
-        rdm1_k, rdm2_k = solver.make_rdm12_py(fcivec_k.copy(), norb, nelec)
-        rdm1_ref, rdm2_ref = direct_spin1_cplx.make_rdm12_py(ci_full.copy(), norb, nelec)
+        rdm1_k, rdm2_k = solver.make_rdm12(fcivec_k.copy(), norb, nelec)
+        rdm1_ref, rdm2_ref = direct_spin1_cplx.make_rdm12(ci_full.copy(), norb, nelec)
 
         self.assertTrue(np.allclose(rdm1_k, rdm1_ref, atol=1e-12, rtol=1e-12))
         self.assertTrue(np.allclose(rdm2_k, rdm2_ref, atol=1e-12, rtol=1e-12))
