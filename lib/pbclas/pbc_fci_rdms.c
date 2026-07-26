@@ -18,6 +18,78 @@
 #define BRAKETSYM       1
 #define PARTICLESYM     2
 
+#define KBLOCK_KA       0
+#define KBLOCK_KB       1
+#define KBLOCK_NA       2
+#define KBLOCK_NB       3
+#define KBLOCK_OFFSET   4
+#define KBLOCK_SIZE     5
+
+void FCIkci_sector_to_full_cplx(double complex *ci_full,
+                                double complex *ci_sector,
+                                int nblocks, int *blocks,
+                                int *stra_ids, int *stra_offsets,
+                                int *strb_ids, int *strb_offsets,
+                                int na_full, int nb_full)
+{
+        int iblk, ia, ib;
+        int ka, kb, na_blk, nb_blk, offset;
+        int astr, bstr;
+
+        NPzset0(ci_full, na_full * nb_full);
+
+        for (iblk = 0; iblk < nblocks; iblk++) {
+                int *blk = blocks + iblk * 6;
+                ka = blk[KBLOCK_KA];
+                kb = blk[KBLOCK_KB];
+                na_blk = blk[KBLOCK_NA];
+                nb_blk = blk[KBLOCK_NB];
+                offset = blk[KBLOCK_OFFSET];
+
+                for (ia = 0; ia < na_blk; ia++) {
+                        astr = stra_ids[stra_offsets[ka] + ia];
+                        for (ib = 0; ib < nb_blk; ib++) {
+                                bstr = strb_ids[strb_offsets[kb] + ib];
+                                ci_full[(size_t)astr * nb_full + bstr] =
+                                        ci_sector[offset + ia * nb_blk + ib];
+                        }
+                }
+        }
+}
+
+void FCIkci_full_to_sector_cplx(double complex *ci_sector,
+                                double complex *ci_full,
+                                int nblocks, int *blocks,
+                                int *stra_ids, int *stra_offsets,
+                                int *strb_ids, int *strb_offsets,
+                                int nb_full)
+{
+        int iblk, ia, ib;
+        int ka, kb, na_blk, nb_blk, offset, size;
+        int astr, bstr;
+
+        for (iblk = 0; iblk < nblocks; iblk++) {
+                int *blk = blocks + iblk * 6;
+                size = blk[KBLOCK_SIZE];
+                offset = blk[KBLOCK_OFFSET];
+                NPzset0(ci_sector + offset, size);
+
+                ka = blk[KBLOCK_KA];
+                kb = blk[KBLOCK_KB];
+                na_blk = blk[KBLOCK_NA];
+                nb_blk = blk[KBLOCK_NB];
+
+                for (ia = 0; ia < na_blk; ia++) {
+                        astr = stra_ids[stra_offsets[ka] + ia];
+                        for (ib = 0; ib < nb_blk; ib++) {
+                                bstr = strb_ids[strb_offsets[kb] + ib];
+                                ci_sector[offset + ia * nb_blk + ib] =
+                                        ci_full[(size_t)astr * nb_full + bstr];
+                        }
+                }
+        }
+}
+
 extern void zherk_(const char*, const char*, const int*, const int*,
                    const double*, const double complex*, const int*,
                    const double*, double complex*, const int*);
