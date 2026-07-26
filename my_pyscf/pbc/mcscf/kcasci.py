@@ -1018,12 +1018,12 @@ class ChargedPBCKCASCI(PBCKCASCI):
 
             for root, e in enumerate(e_cas):
                 if scalar_energy:
-                    msg = ('charged KCASCI E (per k-point) target k %3d'
+                    msg = ('KCASCI E (per k-point) target k %3d'
                            ' = %#.15g  E(CI) = %#.15g')
                     args = (target_k, e_tot[root].real, e.real)
                     ci_root = ci
                 else:
-                    msg = ('charged KCASCI E (per k-point) target k %3d'
+                    msg = ('KCASCI E (per k-point) target k %3d'
                            ' state %3d  E = %#.15g  E(CI) = %#.15g')
                     args = (target_k, root, e_tot[root].real, e.real)
                     ci_root = ci[root]
@@ -1082,8 +1082,8 @@ class ChargedPBCKCASCI(PBCKCASCI):
             self.ci = ci_all
 
         self.converged = bool(np.all(converged))
-        if self.converged: log.info('charged KCASCI converged')
-        else: log.info('charged KCASCI not converged')
+        if self.converged: log.info('KCASCI converged')
+        else: log.info('KCASCI not converged')
 
         self._finalize()
 
