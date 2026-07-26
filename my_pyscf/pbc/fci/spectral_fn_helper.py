@@ -1,4 +1,7 @@
-#!/bin/bash
+'''
+Helper functions for building k-resolved spectral functions from k-FCI
+wavefunctions.
+'''
 
 import ctypes
 import numpy as np
@@ -8,15 +11,10 @@ from pyscf.fci import cistring
 from pyscf.fci.addons import _unpack_nelec
 
 from mrh.lib.helper import load_library
-from mrh.my_pyscf.pbc.fci import kcistrings
+from mrh.my_pyscf.pbc.fci import kcistrings, kfci_helper
 
 
 # Author: Bhavnesh Jangid
-
-'''
-Helper functions for building k-resolved spectral functions from k-FCI
-wavefunctions.
-'''
 
 libpbcspectral = None
 _spectral_lib_initialized = False
@@ -194,23 +192,6 @@ def _target_nelec(nelec, spin, cre):
     return tuple(target)
 
 
-def _make_link_index(norb, nelec, nkpts, kmom=None):
-    '''
-    Build k-aware link indices.  Only the K0 labels are used here.
-    '''
-    neleca, nelecb = nelec
-    ncas = int(norb) // int(nkpts)
-    orb_k = np.arange(int(norb), dtype=np.int32) // ncas
-    link_indexa = kcistrings.gen_linkstr_index_k(
-        range(int(norb)), neleca, orb_k, int(nkpts), kmom=kmom)
-    if neleca == nelecb:
-        link_indexb = link_indexa
-    else:
-        link_indexb = kcistrings.gen_linkstr_index_k(
-            range(int(norb)), nelecb, orb_k, int(nkpts), kmom=kmom)
-    return link_indexa, link_indexb
-
-
 def make_k_sector_layout(norb, nelec, nkpts, target_k=0,
                          link_index=None, nelec_spin=None, kmom=None,
                          kconserv=None, cell=None, kpts=None, kmesh=None,
@@ -225,7 +206,8 @@ def make_k_sector_layout(norb, nelec, nkpts, target_k=0,
     target_k = int(target_k) % int(nkpts)
 
     if link_index is None:
-        link_index = _make_link_index(norb, nelec, nkpts, kmom=kmom)
+        link_index = kfci_helper._unpack_contract_link_index(
+            norb, nelec, None, nkpts, spin=nelec_spin, kmom=kmom)
     else:
         assert link_index[0].shape[2] == link_index[1].shape[2] == 8
 
@@ -386,35 +368,24 @@ def apply_k_op_py(fcivec, norb, nelec, nkpts, target_k, k, p, spin,
         _apply_beta_op(fcivec, out, context)
 
     if return_info:
-        info = {
-            'nelec': context.target_nelec,
-            'target_k': context.target_target_k,
-            'orb': context.orb,
-            'k': context.k,
-            'p': context.p,
-            'spin': context.spin,
-            'cre': context.cre,
-        }
-        return out, info
+        return out, _operator_info(context)
     return out
 
 
-def _flatten_k_ids(ids_by_k):
+def _operator_info(context):
     '''
-    Flatten per-momentum string-id lists for the C operator helper.
+    Return target-sector metadata for an applied creation or annihilation
+    operator.
     '''
-    offsets = np.empty(len(ids_by_k) + 1, dtype=np.int32)
-    offsets[0] = 0
-    arrays = []
-    for k, ids in enumerate(ids_by_k):
-        ids = np.asarray(ids, dtype=np.int32)
-        arrays.append(ids)
-        offsets[k + 1] = offsets[k] + ids.size
-    if arrays:
-        ids = np.ascontiguousarray(np.concatenate(arrays), dtype=np.int32)
-    else:
-        ids = np.zeros(0, dtype=np.int32)
-    return ids, offsets
+    return {
+        'nelec': context.target_nelec,
+        'target_k': context.target_target_k,
+        'orb': context.orb,
+        'k': context.k,
+        'p': context.p,
+        'spin': context.spin,
+        'cre': context.cre,
+    }
 
 
 def _target_block_tables(layout, nkpts):
@@ -426,7 +397,7 @@ def _target_block_tables(layout, nkpts):
     na = np.zeros(table_size, dtype=np.int32)
     nb = np.zeros(table_size, dtype=np.int32)
     for blk in layout.blocks:
-        ka, kb, nstra, nstrb, off, size = map(int, blk)
+        ka, kb, nstra, nstrb, off, _ = map(int, blk)
         key = ka * int(nkpts) + kb
         offset[key] = off
         na[key] = nstra
@@ -449,8 +420,10 @@ def _apply_k_op_c(fcivec, context):
     out = np.zeros(context.target.sector_size, dtype=np.complex128)
     blocks = np.ascontiguousarray(context.source.blocks, dtype=np.int32)
     op_index = np.ascontiguousarray(context.op_index, dtype=np.int32)
-    stra_ids, stra_offsets = _flatten_k_ids(context.source.stra_id)
-    strb_ids, strb_offsets = _flatten_k_ids(context.source.strb_id)
+    stra_ids, stra_offsets = kfci_helper._flatten_sector_ids(
+        context.source.stra_id, len(context.source.stra_id))
+    strb_ids, strb_offsets = kfci_helper._flatten_sector_ids(
+        context.source.strb_id, len(context.source.strb_id))
     str2loc_a = np.ascontiguousarray(context.target.str2loc_a,
                                      dtype=np.int32)
     str2loc_b = np.ascontiguousarray(context.target.str2loc_b,
@@ -517,16 +490,7 @@ def apply_k_op(fcivec, norb, nelec, nkpts, target_k, k, p, spin,
             kmesh=kmesh, kmf=kmf, kmc=kmc)
 
     if return_info:
-        info = {
-            'nelec': context.target_nelec,
-            'target_k': context.target_target_k,
-            'orb': context.orb,
-            'k': context.k,
-            'p': context.p,
-            'spin': context.spin,
-            'cre': context.cre,
-        }
-        return out, info
+        return out, _operator_info(context)
     return out
 
 
@@ -540,11 +504,7 @@ def _iter_roots(e_tot, ci):
         return
 
     for root, energy in enumerate(e.reshape(-1)):
-        if isinstance(ci, np.ndarray):
-            ci_root = ci[root]
-        else:
-            ci_root = ci[root]
-        yield root, energy.item(), ci_root
+        yield root, energy.item(), ci[root]
 
 
 def _collect_neutral_roots(kmc):
@@ -599,12 +559,19 @@ def _collect_charged_roots(kmc, kind):
     return roots
 
 
-def _set_solver_nroots(kmc, nroots):
+def _prepare_kcasci_job(kmc, kmom, nroots, solver_setup, kind):
     '''
-    Set nroots when requested and leave user-configured defaults otherwise.
+    Apply the common momentum and solver settings to one spectral KCASCI job.
     '''
+    kmc.kmom = kmom
+    kmc.kconserv = kmom.kconserv
+    kmc.fcisolver.kmom = kmom
+    kmc.fcisolver.kconserv = kmom.kconserv
+    kmc.canonicalization = False
     if nroots is not None:
         kmc.fcisolver.nroots = int(nroots)
+    if solver_setup is not None:
+        solver_setup(kmc, kind)
 
 
 def _charged_spin_list(nelecastot, norb, kind, charged_spin,
@@ -687,14 +654,8 @@ def compute_kcasci_spectral_roots(kmf, ncas, nelecas, ncore=None,
 
     kmc_neutral = mcscf.KCASCI(kmf, ncas, nelecas, ncore=ncore,
                               target_k=target_k)
-    kmc_neutral.kmom = kmom
-    kmc_neutral.kconserv = kmom.kconserv
-    kmc_neutral.fcisolver.kmom = kmom
-    kmc_neutral.fcisolver.kconserv = kmom.kconserv
-    kmc_neutral.canonicalization = False
-    _set_solver_nroots(kmc_neutral, nroots_neutral)
-    if solver_setup is not None:
-        solver_setup(kmc_neutral, 'neutral')
+    _prepare_kcasci_job(kmc_neutral, kmom, nroots_neutral, solver_setup,
+                        'neutral')
     kmc_neutral.kernel(mo_coeff=mo_coeff, verbose=verbose)
 
     roots = _collect_neutral_roots(kmc_neutral)
@@ -708,14 +669,8 @@ def compute_kcasci_spectral_roots(kmf, ncas, nelecas, ncore=None,
             kmc_hole = mcscf.KCASCI(kmf, ncas, nelecas, ncore=ncore,
                                     charge=1, target_k=None,
                                     charged_spin=charged_spin)
-            kmc_hole.kmom = kmom
-            kmc_hole.kconserv = kmom.kconserv
-            kmc_hole.fcisolver.kmom = kmom
-            kmc_hole.fcisolver.kconserv = kmom.kconserv
-            kmc_hole.canonicalization = False
-            _set_solver_nroots(kmc_hole, nroots_hole)
-            if solver_setup is not None:
-                solver_setup(kmc_hole, 'hole')
+            _prepare_kcasci_job(kmc_hole, kmom, nroots_hole, solver_setup,
+                                'hole')
             kmc_hole.kernel(mo_coeff=mo_coeff, verbose=verbose)
             roots.extend(_collect_charged_roots(kmc_hole, 'hole'))
             hole_jobs.append(kmc_hole)
@@ -727,14 +682,8 @@ def compute_kcasci_spectral_roots(kmf, ncas, nelecas, ncore=None,
             kmc_particle = mcscf.KCASCI(kmf, ncas, nelecas, ncore=ncore,
                                         charge=-1, target_k=None,
                                         charged_spin=charged_spin)
-            kmc_particle.kmom = kmom
-            kmc_particle.kconserv = kmom.kconserv
-            kmc_particle.fcisolver.kmom = kmom
-            kmc_particle.fcisolver.kconserv = kmom.kconserv
-            kmc_particle.canonicalization = False
-            _set_solver_nroots(kmc_particle, nroots_particle)
-            if solver_setup is not None:
-                solver_setup(kmc_particle, 'particle')
+            _prepare_kcasci_job(kmc_particle, kmom, nroots_particle,
+                                solver_setup, 'particle')
             kmc_particle.kernel(mo_coeff=mo_coeff, verbose=verbose)
             roots.extend(_collect_charged_roots(kmc_particle, 'particle'))
             particle_jobs.append(kmc_particle)
