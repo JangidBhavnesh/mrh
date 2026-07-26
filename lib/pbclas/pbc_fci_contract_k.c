@@ -22,12 +22,39 @@
 #define LINK_DES    1
 #define LINK_TARGET 2
 #define LINK_SIGN   3
+#define LINK_K0     4
 #define LINK_K_CRE  5
 #define LINK_K_DES  6
 #define LINK_DK     7
 #define NLINK_FIELDS 8
 
 #define AB_TASK_CHUNK 1048576
+
+typedef struct {
+        int *offsets;
+        int *indices;
+        int nlinks_total;
+} LinkOrderK;
+
+static inline int mod_pos(int x, int n)
+{
+        int r = x % n;
+        return (r < 0) ? r + n : r;
+}
+
+static inline long long eri_index_k(int kp, int kq, int kr,
+                                    int p, int q, int r, int s,
+                                    int nkpts, int ncas)
+{
+        long long idx = kp;
+        idx = idx * nkpts + kq;
+        idx = idx * nkpts + kr;
+        idx = idx * ncas + p;
+        idx = idx * ncas + q;
+        idx = idx * ncas + r;
+        idx = idx * ncas + s;
+        return idx;
+}
 
 static void zset0(double complex *x, size_t n)
 {
@@ -41,6 +68,68 @@ static void zadd(double complex *out, double complex *in, size_t n)
         for (size_t i = 0; i < n; i++) {
                 out[i] += in[i];
         }
+}
+
+static int make_link_order_k(int *link_index, int nstr, int nlink,
+                             int nkpts, LinkOrderK *order)
+{
+        int table_size = nkpts * nkpts;
+        int nlinks_total = nstr * nlink;
+        int *counts = calloc((size_t)table_size, sizeof(int));
+        int *offsets = calloc((size_t)table_size + 1, sizeof(int));
+        int *indices = NULL;
+
+        order->offsets = NULL;
+        order->indices = NULL;
+        order->nlinks_total = 0;
+
+        if (counts == NULL || offsets == NULL) {
+                free(counts);
+                free(offsets);
+                return 1;
+        }
+
+        for (int ilink = 0; ilink < nlinks_total; ilink++) {
+                int *row = link_index + ilink * NLINK_FIELDS;
+                if (row[LINK_SIGN] == 0 || row[LINK_TARGET] < 0) {
+                        continue;
+                }
+                int k0 = mod_pos(row[LINK_K0], nkpts);
+                int dk = mod_pos(row[LINK_DK], nkpts);
+                counts[k0 * nkpts + dk]++;
+        }
+
+        offsets[0] = 0;
+        for (int i = 0; i < table_size; i++) {
+                offsets[i + 1] = offsets[i] + counts[i];
+                counts[i] = offsets[i];
+        }
+
+        indices = malloc(sizeof(int) * (size_t)(offsets[table_size] > 0
+                                                ? offsets[table_size] : 1));
+        if (indices == NULL) {
+                free(counts);
+                free(offsets);
+                return 1;
+        }
+
+        for (int ilink = 0; ilink < nlinks_total; ilink++) {
+                int *row = link_index + ilink * NLINK_FIELDS;
+                if (row[LINK_SIGN] == 0 || row[LINK_TARGET] < 0) {
+                        continue;
+                }
+                int k0 = mod_pos(row[LINK_K0], nkpts);
+                int dk = mod_pos(row[LINK_DK], nkpts);
+                int key = k0 * nkpts + dk;
+                indices[counts[key]++] = ilink;
+        }
+
+        order->offsets = offsets;
+        order->indices = indices;
+        order->nlinks_total = offsets[table_size];
+
+        free(counts);
+        return 0;
 }
 
 static int make_block_tables(int nkpts, int nblocks, int *blocks,
@@ -247,6 +336,156 @@ void FCIcontract_1e_k(double complex *h1e,
 
         free(alpha_prefix);
         free(beta_prefix);
+}
+
+void FCIcontract_2e_k_stream_ab(double complex *eri,
+                                double complex *ci0,
+                                double complex *ci1,
+                                int nkpts, int ncas,
+                                int nblocks, int *blocks,
+                                int *linka, int nstra, int nlinka,
+                                int *linkb, int nstrb, int nlinkb,
+                                int *str2tot_a, int *str2tot_b)
+{
+        int ndet = 0;
+        int table_size = nkpts * nkpts;
+        int *block_offset = NULL;
+        int *block_na = NULL;
+        int *block_nb = NULL;
+        LinkOrderK order_a;
+        LinkOrderK order_b;
+
+        order_a.offsets = NULL;
+        order_a.indices = NULL;
+        order_a.nlinks_total = 0;
+        order_b.offsets = NULL;
+        order_b.indices = NULL;
+        order_b.nlinks_total = 0;
+
+        if (make_block_tables(nkpts, nblocks, blocks,
+                              &block_offset, &block_na, &block_nb,
+                              &ndet) != 0) {
+                return;
+        }
+        if (make_link_order_k(linka, nstra, nlinka, nkpts, &order_a) != 0 ||
+            make_link_order_k(linkb, nstrb, nlinkb, nkpts, &order_b) != 0) {
+                free(order_a.offsets);
+                free(order_a.indices);
+                free(order_b.offsets);
+                free(order_b.indices);
+                free(block_offset);
+                free(block_na);
+                free(block_nb);
+                return;
+        }
+
+#pragma omp parallel for schedule(dynamic) default(none) \
+        shared(eri, ci0, ci1, nkpts, ncas, table_size, block_offset, \
+               block_na, block_nb, order_a, order_b, linka, nstra, nlinka, \
+               linkb, nstrb, nlinkb, str2tot_a, str2tot_b)
+        for (int dst_key = 0; dst_key < table_size; dst_key++) {
+                if (block_offset[dst_key] < 0) {
+                        continue;
+                }
+
+                int ka1 = dst_key / nkpts;
+                int kb1 = dst_key % nkpts;
+                int dst_offset = block_offset[dst_key];
+                int dst_nb = block_nb[dst_key];
+
+                for (int dka = 0; dka < nkpts; dka++) {
+                        int ka0 = mod_pos(ka1 - dka, nkpts);
+                        int kb0 = mod_pos(kb1 + dka, nkpts);
+                        int src_key = ka0 * nkpts + kb0;
+                        if (block_offset[src_key] < 0) {
+                                continue;
+                        }
+
+                        int src_offset = block_offset[src_key];
+                        int src_nb = block_nb[src_key];
+                        int akey = ka0 * nkpts + dka;
+                        int bdk = mod_pos(-dka, nkpts);
+                        int bkey = kb0 * nkpts + bdk;
+                        int a0 = order_a.offsets[akey];
+                        int a1 = order_a.offsets[akey + 1];
+                        int b0 = order_b.offsets[bkey];
+                        int b1 = order_b.offsets[bkey + 1];
+
+                        for (int ia = a0; ia < a1; ia++) {
+                                int aid = order_a.indices[ia];
+                                int astr0 = aid / nlinka;
+                                int *la = linka + aid * NLINK_FIELDS;
+                                int astr1 = la[LINK_TARGET];
+                                int aloc0;
+                                int aloc1;
+
+                                if (astr1 < 0 || astr1 >= nstra) {
+                                        continue;
+                                }
+                                aloc0 = str2tot_a[ka0 * nstra + astr0];
+                                aloc1 = str2tot_a[ka1 * nstra + astr1];
+                                if (aloc0 < 0 || aloc1 < 0) {
+                                        continue;
+                                }
+
+                                for (int ib = b0; ib < b1; ib++) {
+                                        int bid = order_b.indices[ib];
+                                        int bstr0 = bid / nlinkb;
+                                        int *lb = linkb + bid * NLINK_FIELDS;
+                                        int bstr1 = lb[LINK_TARGET];
+                                        int bloc0;
+                                        int bloc1;
+                                        long long eri_idx_ab;
+                                        long long eri_idx_ba;
+                                        double complex coef;
+
+                                        if (bstr1 < 0 || bstr1 >= nstrb) {
+                                                continue;
+                                        }
+                                        bloc0 = str2tot_b[kb0 * nstrb + bstr0];
+                                        bloc1 = str2tot_b[kb1 * nstrb + bstr1];
+                                        if (bloc0 < 0 || bloc1 < 0) {
+                                                continue;
+                                        }
+
+                                        eri_idx_ab = eri_index_k(
+                                                la[LINK_K_CRE], la[LINK_K_DES],
+                                                lb[LINK_K_CRE],
+                                                la[LINK_CRE] % ncas,
+                                                la[LINK_DES] % ncas,
+                                                lb[LINK_CRE] % ncas,
+                                                lb[LINK_DES] % ncas,
+                                                nkpts, ncas);
+                                        eri_idx_ba = eri_index_k(
+                                                lb[LINK_K_CRE], lb[LINK_K_DES],
+                                                la[LINK_K_CRE],
+                                                lb[LINK_CRE] % ncas,
+                                                lb[LINK_DES] % ncas,
+                                                la[LINK_CRE] % ncas,
+                                                la[LINK_DES] % ncas,
+                                                nkpts, ncas);
+                                        coef = (eri[eri_idx_ab] +
+                                                eri[eri_idx_ba]) *
+                                               (double)(la[LINK_SIGN] *
+                                                        lb[LINK_SIGN]);
+
+                                        ci1[dst_offset + aloc1 * dst_nb +
+                                            bloc1] +=
+                                                coef * ci0[src_offset +
+                                                           aloc0 * src_nb +
+                                                           bloc0];
+                                }
+                        }
+                }
+        }
+
+        free(order_a.offsets);
+        free(order_a.indices);
+        free(order_b.offsets);
+        free(order_b.indices);
+        free(block_offset);
+        free(block_na);
+        free(block_nb);
 }
 
 static int find_block_key_by_offset(int *block_offset, int table_size,
