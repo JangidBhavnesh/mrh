@@ -137,6 +137,195 @@ def kernel(mc, mo_coeff=None, ci0=None, verbose=logger.NOTE, envs=None):
     return e_tot, e_cas, fcivec
 
 
+def charged_active_nelecas(ncas, nkpts, nelecas, cell_spin, charge=0,
+                           spin=None):
+    '''
+    Return the total k-FCI active electron tuple for a charged supercell.
+
+    Positive charge removes active electrons and negative charge adds them.
+    If spin is omitted, the lowest valid Ms sector is used for the charged
+    electron count.
+    '''
+    nelecas = _unpack_nelec(nelecas, cell_spin)
+    neutral_nelec = nkpts * (nelecas[0] + nelecas[1])
+    nelec = neutral_nelec - int(charge)
+    norb = nkpts * int(ncas)
+    if spin is None:
+        spin = nelec % 2
+    spin = int(spin)
+    if nelec < 0 or nelec > 2 * norb:
+        raise ValueError(f"charge={charge} gives {nelec} active electrons "
+                         f"for {norb} active orbitals")
+    if (nelec + spin) % 2:
+        raise ValueError(f"active electron count {nelec} and spin {spin} "
+                         "have inconsistent parity")
+    neleca = (nelec + spin) // 2
+    nelecb = nelec - neleca
+    if neleca < 0 or nelecb < 0 or neleca > norb or nelecb > norb:
+        raise ValueError(f"charge={charge}, spin={spin} gives invalid "
+                         f"active electrons ({neleca}, {nelecb})")
+    return int(neleca), int(nelecb)
+
+
+def _select_root_energy(energy, root=0):
+    e = np.asarray(energy)
+    if e.ndim == 0:
+        if root not in (0, None):
+            raise IndexError("root index requested for a scalar energy")
+        return e.item()
+    return e[int(root)].item()
+
+
+def charged_band_energies(charged_results, reference_energy, charge=None,
+                          root=0, kpts=None, nkpts=None, per_cell=False):
+    '''
+    Convert charged-sector KCASCI energies into hole/particle band energies.
+
+    reference_energy should use the same per-cell convention as KCASCI.kernel.
+    By default the returned band energy is the supercell energy difference,
+    nkpts * (E_charged - E_reference).  Set per_cell=True to keep the KCASCI
+    per-cell convention.
+    '''
+    if hasattr(charged_results, 'charged_results'):
+        mc = charged_results
+        if charge is None:
+            charge = mc.charge
+        if nkpts is None:
+            nkpts = mc.nkpts
+        if kpts is None:
+            kpts = getattr(mc._scf, 'kpts', None)
+        charged_results = mc.charged_results
+
+    if charge is None:
+        charged_results = list(charged_results)
+        if not charged_results:
+            return []
+        charge = charged_results[0].get('charge')
+    if int(charge) == 0:
+        raise ValueError("charged band energies require a nonzero charge")
+    kind = 'hole' if int(charge) > 0 else 'particle'
+    momentum_key = f'{kind}_momentum'
+
+    bands = []
+    for result in charged_results:
+        target_k = int(result['target_k'])
+        result_nkpts = result.get('nkpts', nkpts)
+        if result_nkpts is None:
+            raise ValueError("nkpts is required when charged results do not "
+                             "store it")
+        result_nkpts = int(result_nkpts)
+        scale = 1 if per_cell else result_nkpts
+        momentum = target_k
+        if kpts is not None:
+            momentum = np.asarray(kpts[target_k]).copy()
+        e_charged = _select_root_energy(result['e_tot'], root=root)
+        e_ref = _select_root_energy(reference_energy, root=0)
+        bands.append({
+            'target_k': target_k,
+            momentum_key: momentum,
+            'energy': scale * (e_charged - e_ref),
+            'root': int(root),
+            'charge': int(charge),
+            'kind': kind,
+        })
+    return bands
+
+
+def charged_kernel(mc, mo_coeff=None, ci0=None, verbose=logger.NOTE,
+                   target_k=None, charge=None, charged_spin=None, envs=None):
+    '''
+    Charged k-CASCI kernel.  This keeps the neutral KCASCI kernel unchanged and
+    solves one or all charged total-momentum sectors with a shared Hamiltonian.
+    '''
+    if mo_coeff is None:
+        mo_coeff = mc.mo_coeff
+
+    log = logger.new_logger(mc, verbose)
+    t0 = (logger.process_clock(), logger.perf_counter())
+    log.debug('Start charged k-CASCI')
+
+    nkpts = mc.nkpts
+    ncas = mc.ncas
+    charge = mc.charge if charge is None else int(charge)
+    charged_spin = mc.charged_spin if charged_spin is None else charged_spin
+
+    h1eff, h2eff, energy_core = mc.get_h1e_h2e(mo_coeff)
+    t1 = log.timer('integral transformation to charged k-CAS space', *t0)
+    log.debug('core energy = %.15g', energy_core.real)
+
+    assert h1eff.shape == (nkpts, ncas, ncas)
+    assert h2eff.shape == (nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas)
+
+    if log.verbose >= logger.DEBUG1:
+        for k in range(nkpts):
+            assert np.linalg.norm(h1eff[k] - h1eff[k].conj().T) < 1e-10, \
+                "1e Hamiltonian hermiticity error"
+        eri_symm_err = 0.0
+        for kp, kq, kr in np.ndindex(nkpts, nkpts, nkpts):
+            ks = (kp - kq + kr) % nkpts
+            err = np.linalg.norm(h2eff[kp, kq, kr] -
+                                 h2eff[kr, ks, kp].transpose(2, 3, 0, 1))
+            eri_symm_err = max(eri_symm_err, err)
+        assert eri_symm_err < 1e-10, "ERI permutation symmetry error"
+
+    max_memory = max(4000, mc.max_memory - lib.current_memory()[0])
+    ncastot = nkpts * ncas
+    nelecastot = charged_active_nelecas(
+        ncas, nkpts, mc.nelecas, mc._scf.cell.spin,
+        charge=charge, spin=charged_spin)
+
+    target_ks = mc._target_ks(target_k=target_k)
+    if len(target_ks) > 1 and ci0 is not None and not isinstance(ci0, dict):
+        raise ValueError("ci0 for a charged target_k sweep must be a dict "
+                         "keyed by target_k")
+
+    results = []
+    e_tot_all = []
+    e_cas_all = []
+    ci_all = []
+    converged = []
+    for tk in target_ks:
+        tk = int(tk) % nkpts
+        ci0_k = ci0.get(tk) if isinstance(ci0, dict) else ci0
+        log.info('Solving charged k-CASCI target_k = %d, nelec = %s',
+                 tk, nelecastot)
+
+        mc.fcisolver.nkpts = nkpts
+        mc.fcisolver.target_k = tk
+        e_tot, fcivec = mc.fcisolver.kernel(
+            h1eff, h2eff, ncastot, nelecastot, ci0=ci0_k, nkpts=nkpts,
+            target_k=tk, verbose=log, max_memory=max_memory,
+            ecore=energy_core)
+        t1 = log.timer('charged k-FCI solver target_k = %d' % tk, *t1)
+        e_cas = e_tot - energy_core
+        e_tot /= nkpts
+        e_cas /= nkpts
+
+        conv = getattr(mc.fcisolver, 'converged', True)
+        conv = bool(np.all(conv))
+        converged.append(conv)
+        results.append({
+            'target_k': int(tk),
+            'charge': int(charge),
+            'ncas': int(ncas),
+            'ncastot': int(ncastot),
+            'nelecas': nelecastot,
+            'nelecastot': nelecastot,
+            'nkpts': int(nkpts),
+            'e_tot': e_tot,
+            'e_cas': e_cas,
+            'e_tot_supercell': e_tot * nkpts,
+            'e_cas_supercell': e_cas * nkpts,
+            'ci': fcivec,
+            'converged': conv,
+        })
+        e_tot_all.append(e_tot)
+        e_cas_all.append(e_cas)
+        ci_all.append(fcivec)
+
+    return results, e_tot_all, e_cas_all, ci_all, nelecastot, converged
+
+
 def _casdm1_for_kcasci(mc, ci, stav_dm1=False):
     '''
     Build the k-basis active-space 1-RDM for KCASCI.
@@ -392,4 +581,106 @@ class PBCKCASCI(casci.PBCCASCI):
 
         return self.e_tot, self.e_cas, self.ci, self.mo_coeff, self.mo_energy
 
+
+class ChargedPBCKCASCI(PBCKCASCI):
+    '''
+    k-CASCI driver for N+/-1 active-space sectors over one or all target
+    momentum sectors.
+    '''
+
+    _keys = PBCKCASCI._keys.union({
+        'charge', 'charged_spin', 'charged_nelecas', 'charged_nelecastot',
+        'charged_results',
+    })
+
+    def __init__(self, kmf, ncas=0, nelecas=0, ncore=None, charge=1,
+                 target_k=None, charged_spin=None):
+        solver_target_k = 0 if target_k is None else target_k
+        PBCKCASCI.__init__(self, kmf, ncas=ncas, nelecas=nelecas,
+                           ncore=ncore, target_k=solver_target_k)
+        self.target_k = target_k
+        self.charge = int(charge)
+        self.charged_spin = charged_spin
+        self.charged_nelecas = None
+        self.charged_nelecastot = None
+        self.charged_results = []
+        self.canonicalization = False
+
+    def dump_flags(self, verbose=None):
+        casci.PBCCASCI.dump_flags(self, verbose)
+        log = logger.new_logger(self, verbose)
+        if self.target_k is None:
+            target_k = 'all'
+        else:
+            target_k = str(int(self.target_k) % self.nkpts)
+        spin = 'default' if self.charged_spin is None else self.charged_spin
+        log.info('target_k = %s', target_k)
+        log.info('charge = %d', self.charge)
+        log.info('charged_spin = %s', spin)
+        return self
+
+    def _target_ks(self, target_k=None):
+        if target_k is None:
+            target_k = self.target_k
+        if target_k is None:
+            return list(range(self.nkpts))
+        return [int(target_k) % self.nkpts]
+
+    def kernel(self, mo_coeff=None, ci0=None, verbose=None, target_k=None,
+               charge=None, charged_spin=None):
+        '''
+        Run the charged active-space CI.  If target_k is None and self.target_k
+        is None, all total momentum sectors are solved successively.
+        '''
+        if mo_coeff is None:
+            mo_coeff = self.mo_coeff
+        self.mo_coeff = mo_coeff
+
+        if ci0 is None:
+            if self.charged_results:
+                ci0 = {r['target_k']: r['ci'] for r in self.charged_results}
+            else:
+                ci0 = self.ci
+
+        log = logger.new_logger(self, verbose)
+        self.check_sanity()
+        charge = self.charge if charge is None else int(charge)
+        charged_spin = self.charged_spin if charged_spin is None else charged_spin
+        self.charge = int(charge)
+        self.charged_spin = charged_spin
+        self.dump_flags(log)
+
+        results, e_tot_all, e_cas_all, ci_all, nelecastot, converged = \
+            charged_kernel(self, mo_coeff=mo_coeff, ci0=ci0,
+                           verbose=verbose, target_k=target_k,
+                           charge=charge, charged_spin=charged_spin)
+        self.charged_nelecas = nelecastot
+        self.charged_nelecastot = nelecastot
+
+        self.charged_results = results
+        if len(results) == 1:
+            self.e_tot = e_tot_all[0]
+            self.e_cas = e_cas_all[0]
+            self.ci = ci_all[0]
+        else:
+            self.e_tot = np.asarray(e_tot_all)
+            self.e_cas = np.asarray(e_cas_all)
+            self.ci = ci_all
+
+        self.converged = bool(np.all(converged))
+        if self.converged: log.info('charged KCASCI converged')
+        else: log.info('charged KCASCI not converged')
+
+        return self.e_tot, self.e_cas, self.ci, self.mo_coeff, self.mo_energy
+
+    def band_energies(self, reference_energy, root=0, kpts=None,
+                      per_cell=False):
+        return charged_band_energies(
+            self, reference_energy, root=root, kpts=kpts, per_cell=per_cell)
+
+    get_band_energy = band_energies
+    band_energy = band_energies
+
+
 KCASCI = PBCKCASCI
+ChargedKCASCI = ChargedPBCKCASCI
