@@ -1,5 +1,7 @@
 #!/bin/bash
 
+import os
+import tempfile
 import unittest
 import numpy as np
 
@@ -59,6 +61,61 @@ def _apply_full_op(ci, norb, nelec, orb, spin, cre=False):
     return out, target_nelec
 
 
+def _one_alpha_roots():
+    '''
+    Build a tiny exact root table with one occupied alpha k-orbital.
+    '''
+    nkpts = 2
+    ncas = 1
+    norb = nkpts * ncas
+    nelec = (1, 0)
+    return sfh.KCASCISpectralRoots(
+        neutral=None, hole=None, particle=None,
+        roots=[
+            {
+                'kind': 'neutral',
+                'charge': 0,
+                'target_k': 0,
+                'root': 0,
+                'energy': 1.0,
+                'energy_supercell': 1.0,
+                'ci': np.ones(1),
+                'nelecastot': nelec,
+                'ncastot': norb,
+                'nkpts': nkpts,
+                'converged': True,
+            },
+            {
+                'kind': 'hole',
+                'charge': 1,
+                'target_k': 0,
+                'root': 0,
+                'energy': 0.25,
+                'energy_supercell': 0.25,
+                'ci': np.ones(1),
+                'nelecastot': (0, 0),
+                'ncastot': norb,
+                'nkpts': nkpts,
+                'converged': True,
+            },
+            {
+                'kind': 'particle',
+                'charge': -1,
+                'target_k': 1,
+                'root': 0,
+                'energy': 1.75,
+                'energy_supercell': 1.75,
+                'ci': np.ones(1),
+                'nelecastot': (2, 0),
+                'ncastot': norb,
+                'nkpts': nkpts,
+                'converged': True,
+            },
+        ],
+        nkpts=nkpts, ncas=ncas, ncastot=norb, nelecastot=nelec,
+        target_k=0, mo_coeff=None)
+
+
 class KnownValues(unittest.TestCase):
 
     def test_des_k_matches_full_ci_operator(self):
@@ -68,56 +125,7 @@ class KnownValues(unittest.TestCase):
         self._check_k_operator(cre=True)
 
     def test_make_spectral_poles_from_charged_roots(self):
-        nkpts = 2
-        ncas = 1
-        norb = nkpts * ncas
-        nelec = (1, 0)
-
-        roots = sfh.KCASCISpectralRoots(
-            neutral=None, hole=None, particle=None,
-            roots=[
-                {
-                    'kind': 'neutral',
-                    'charge': 0,
-                    'target_k': 0,
-                    'root': 0,
-                    'energy': 1.0,
-                    'energy_supercell': 1.0,
-                    'ci': np.ones(1),
-                    'nelecastot': nelec,
-                    'ncastot': norb,
-                    'nkpts': nkpts,
-                    'converged': True,
-                },
-                {
-                    'kind': 'hole',
-                    'charge': 1,
-                    'target_k': 0,
-                    'root': 0,
-                    'energy': 0.25,
-                    'energy_supercell': 0.25,
-                    'ci': np.ones(1),
-                    'nelecastot': (0, 0),
-                    'ncastot': norb,
-                    'nkpts': nkpts,
-                    'converged': True,
-                },
-                {
-                    'kind': 'particle',
-                    'charge': -1,
-                    'target_k': 1,
-                    'root': 0,
-                    'energy': 1.75,
-                    'energy_supercell': 1.75,
-                    'ci': np.ones(1),
-                    'nelecastot': (2, 0),
-                    'ncastot': norb,
-                    'nkpts': nkpts,
-                    'converged': True,
-                },
-            ],
-            nkpts=nkpts, ncas=ncas, ncastot=norb, nelecastot=nelec,
-            target_k=0, mo_coeff=None)
+        roots = _one_alpha_roots()
 
         poles = sfh.make_spectral_poles(
             roots, k_indices=(0, 1), orbital_indices=(0,),
@@ -129,6 +137,64 @@ class KnownValues(unittest.TestCase):
         self.assertAlmostEqual(labels[('hole', 0)]['weight'], 1.0)
         self.assertAlmostEqual(labels[('particle', 1)]['omega'], 0.75)
         self.assertAlmostEqual(labels[('particle', 1)]['weight'], 1.0)
+
+    def test_make_spectral_function_broadens_poles(self):
+        roots = _one_alpha_roots()
+        poles = sfh.make_spectral_poles(
+            roots, k_indices=(0, 1), orbital_indices=(0,),
+            spins=(0,), min_weight=1e-12)
+
+        spectrum = sfh.make_spectral_function(
+            poles, eta=0.05, npts=101, nkpts=2, norb=1,
+            spin_resolved=True, orbital_resolved=True)
+
+        self.assertEqual(spectrum['spectra']['total'].shape, (2, 1, 2, 101))
+        self.assertTrue(np.all(spectrum['spectra']['total'] >= 0.0))
+        self.assertGreater(spectrum['spectra']['hole'][0, 0, 0].max(), 0.0)
+        self.assertGreater(spectrum['spectra']['particle'][1, 0, 0].max(),
+                           0.0)
+
+    def test_spectral_weight_sum_rules(self):
+        roots = _one_alpha_roots()
+        poles = sfh.make_spectral_poles(
+            roots, k_indices=(0, 1), orbital_indices=(0,),
+            spins=(0,), min_weight=1e-12)
+        checks = sfh.spectral_weight_sum_rules(
+            roots, poles=poles, k_indices=(0, 1), orbital_indices=(0,),
+            spins=(0,))
+        by_k = {row['k']: row for row in checks}
+
+        self.assertAlmostEqual(by_k[0]['hole_norm'], 1.0)
+        self.assertAlmostEqual(by_k[0]['hole_missing'], 0.0)
+        self.assertAlmostEqual(by_k[1]['particle_norm'], 1.0)
+        self.assertAlmostEqual(by_k[1]['particle_missing'], 0.0)
+
+    def test_labels_projection_and_npz_output(self):
+        roots = _one_alpha_roots()
+        poles = sfh.make_spectral_poles(
+            roots, k_indices=(0, 1), orbital_indices=(0,),
+            spins=(0,), min_weight=1e-12)
+
+        kpts = np.asarray([[0.0, 0.0, 0.0], [0.5, 0.0, 0.0]])
+        labelled = sfh.label_pole_momenta(poles, kpts)
+        self.assertTrue(np.allclose(labelled[0]['operator_momentum'],
+                                    kpts[labelled[0]['k']]))
+
+        coeff = np.ones((2, 1, 1))
+        projected = sfh.project_poles_to_band_basis(labelled, coeff)
+        self.assertEqual(len(projected), len(labelled))
+        self.assertEqual(projected[0]['basis'], 'band')
+        self.assertAlmostEqual(projected[0]['weight'], labelled[0]['weight'])
+
+        spectrum = sfh.make_spectral_function(
+            projected, eta=0.05, npts=31, nkpts=2, norb=1)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filename = os.path.join(tmpdir, 'spectral.npz')
+            sfh.save_spectral_npz(filename, spectrum, poles=projected)
+            data = np.load(filename, allow_pickle=True)
+            self.assertIn('omega', data.files)
+            self.assertIn('total', data.files)
+            self.assertIn('poles', data.files)
 
     def _check_k_operator(self, cre=False):
         nkpts = 3
