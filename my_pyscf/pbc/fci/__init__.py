@@ -29,13 +29,16 @@ def solver(cell, singlet, symm=None):
         raise NotImplementedError("Symmetry is not implemented for FCI in PBC yet.")
     return direct_spin1_cplx.FCISolver(cell)
 
-def ksolver(cell=None, nkpts=None, target_k=0, symm=None):
+def ksolver(cell=None, nkpts=None, target_k=0, symm=None,
+            kpts=None, kmesh=None, kconserv=None):
     '''
     k-FCI solver working in one total momentum sector.
     '''
     if symm is not None and symm is not False:
         raise NotImplementedError("Symmetry is not implemented for k-FCI in PBC yet.")
-    return direct_spin1_kfci.FCISolver(cell, nkpts=nkpts, target_k=target_k)
+    return direct_spin1_kfci.FCISolver(cell, nkpts=nkpts, target_k=target_k,
+                                       kpts=kpts, kmesh=kmesh,
+                                       kconserv=kconserv)
 
 
 def csf_solver(cell, smult, symm=None):

@@ -2,11 +2,13 @@
 
 import ctypes
 import os
+import warnings
 import numpy as np
 from dataclasses import dataclass
 from collections import defaultdict
 
 from pyscf import lib
+from pyscf.pbc.lib import kpts_helper
 from pyscf.fci.cistring import OIndexList, make_strings
 from pyscf.fci.addons import _unpack_nelec
 
@@ -21,7 +23,177 @@ _same_spin_structure_builder_configured = False
 # TODO: Add the openMP parallelization to the link index generation in pbc_kcistring.c.
 # TODO: Move the below checks to a unit test.
 
-def gen_linkstr_index_k(orb_list, nocc, orb_k, nkpts, strs=None):
+
+@dataclass
+class KPointMomentum:
+    '''
+    Table-driven k-point arithmetic for total-momentum sector labels.
+    '''
+    nkpts: int
+    kconserv: np.ndarray
+    kadd: np.ndarray
+    ksub: np.ndarray
+    kneg: np.ndarray
+    zero: int = 0
+    scalar: bool = True
+
+
+def _scalar_kconserv(nkpts):
+    kconserv = np.empty((nkpts, nkpts, nkpts), dtype=np.int32)
+    for kp in range(nkpts):
+        for kq in range(nkpts):
+            for kr in range(nkpts):
+                kconserv[kp, kq, kr] = (kp - kq + kr) % nkpts
+    return kconserv
+
+
+def _find_gamma_kpt(cell, kpts):
+    '''
+    Return the index of Gamma in kpts, falling back to 0 with a warning.
+    '''
+    kpts = np.asarray(kpts)
+    if kpts.size == 0:
+        return 0
+    try:
+        scaled = cell.get_scaled_kpts(kpts)
+        frac = scaled - np.rint(scaled)
+        err = np.linalg.norm(frac, axis=1)
+    except Exception:
+        err = np.linalg.norm(kpts, axis=1)
+    idx = int(np.argmin(err))
+    if err[idx] > 1e-8:
+        warnings.warn("Could not identify Gamma in kpts; using kpts[0] as "
+                      "the neutral momentum label.", RuntimeWarning)
+    return idx
+
+
+def _safe_getattr(obj, name, default=None):
+    '''
+    getattr for optional PySCF properties that can raise while inferring data.
+    '''
+    try:
+        return getattr(obj, name, default)
+    except Exception:
+        return default
+
+
+def resolve_kpts(cell=None, kpts=None, kmesh=None, kmf=None, kmc=None):
+    '''
+    Read kpts from kmc/kmf or generate them from kmesh with a warning.
+    '''
+    if kmc is not None:
+        if kpts is None:
+            kpts = _safe_getattr(kmc, 'kpts', None)
+        scf_obj = _safe_getattr(kmc, '_scf', None)
+        if kpts is None and scf_obj is not None:
+            kpts = _safe_getattr(scf_obj, 'kpts', None)
+        if kmesh is None:
+            kmesh = _safe_getattr(kmc, 'kmesh', None)
+        if cell is None:
+            cell = _safe_getattr(kmc, 'cell', None)
+    if kmf is not None:
+        if kpts is None:
+            kpts = _safe_getattr(kmf, 'kpts', None)
+        if kmesh is None:
+            kmesh = _safe_getattr(kmf, 'kmesh', None)
+        if cell is None:
+            cell = _safe_getattr(kmf, 'cell', None)
+
+    if kpts is None and kmesh is not None and cell is not None:
+        warnings.warn("kpts were not found on kmc/kmf; generating kpts from "
+                      "kmesh. Pass kmf.kpts/kmc.kpts to avoid ambiguity.",
+                      RuntimeWarning)
+        kpts = cell.make_kpts(kmesh, wrap_around=True)
+    return cell, kpts, kmesh
+
+
+def make_kpoint_momentum(nkpts, cell=None, kpts=None, kmesh=None,
+                         kconserv=None, kmf=None, kmc=None):
+    '''
+    Build table-driven k-point arithmetic from kconserv.
+    '''
+    nkpts = int(nkpts)
+    cell, kpts, kmesh = resolve_kpts(cell=cell, kpts=kpts, kmesh=kmesh,
+                                     kmf=kmf, kmc=kmc)
+    if kconserv is None:
+        if kpts is not None and cell is not None:
+            kconserv = kpts_helper.get_kconserv(cell, np.asarray(kpts))
+        else:
+            kconserv = _scalar_kconserv(nkpts)
+    kconserv = np.asarray(kconserv, dtype=np.int32, order="C")
+    assert kconserv.shape == (nkpts, nkpts, nkpts)
+
+    zero = _find_gamma_kpt(cell, kpts) if kpts is not None and cell is not None else 0
+    kadd = np.asarray(kconserv[:, zero, :], dtype=np.int32, order="C")
+    ksub = np.asarray(kconserv[:, :, zero], dtype=np.int32, order="C")
+    kneg = np.asarray(kconserv[zero, :, zero], dtype=np.int32, order="C")
+
+    scalar = (zero == 0 and
+              np.all(kadd == _scalar_kconserv(nkpts)[:, 0, :]) and
+              np.all(ksub == _scalar_kconserv(nkpts)[:, :, 0]) and
+              np.all(kneg == np.asarray([(-k) % nkpts
+                                         for k in range(nkpts)],
+                                        dtype=np.int32)))
+    return KPointMomentum(nkpts=nkpts, kconserv=kconserv, kadd=kadd,
+                          ksub=ksub, kneg=kneg, zero=int(zero),
+                          scalar=bool(scalar))
+
+
+def _as_kmom(nkpts, kmom=None, kconserv=None, **kwargs):
+    if isinstance(kmom, KPointMomentum):
+        return kmom
+    return make_kpoint_momentum(nkpts, kconserv=kconserv, **kwargs)
+
+
+def _kadd(kmom, a, b):
+    return int(kmom.kadd[int(a), int(b)])
+
+
+def _ksub(kmom, a, b):
+    return int(kmom.ksub[int(a), int(b)])
+
+def _string_momentum(strs, orb_k, kmom):
+    '''
+    Compute total momentum labels for bit strings.
+    '''
+    strs = np.asarray(strs, dtype=np.uint64)
+    orb_k = np.asarray(orb_k, dtype=np.int32)
+    out = np.empty(strs.size, dtype=np.int32)
+    for i, s in enumerate(strs):
+        k = int(kmom.zero)
+        x = int(s)
+        while x:
+            lsb = x & -x
+            orb = lsb.bit_length() - 1
+            k = _kadd(kmom, k, int(orb_k[orb]))
+            x ^= lsb
+        out[i] = k
+    return out
+
+
+def _overwrite_link_momentum(link_index, strs, orb_k, kmom):
+    '''
+    Replace scalar momentum columns by table-driven k-point labels.
+    '''
+    if link_index.shape[1] == 0:
+        return link_index
+
+    str_k = _string_momentum(strs, orb_k, kmom)
+    link_index[:, :, 4] = str_k[:, None]
+    flat = link_index.reshape(-1, link_index.shape[-1])
+    flat[:, 5] = np.asarray(orb_k[flat[:, 0]], dtype=np.int32)
+    flat[:, 6] = np.asarray(orb_k[flat[:, 1]], dtype=np.int32)
+    flat[:, 7] = kmom.ksub[flat[:, 5], flat[:, 6]]
+    target_k = str_k[flat[:, 2]]
+    expected = kmom.kadd[flat[:, 4], flat[:, 7]]
+    if not np.all(target_k == expected):
+        raise RuntimeError("k-point momentum table is inconsistent with "
+                           "generated string links")
+    return link_index
+
+
+def gen_linkstr_index_k(orb_list, nocc, orb_k, nkpts, strs=None,
+                        kmom=None, kconserv=None):
     '''
     Generate momentum (k-aware) labelled link index for FCI strings.
     link_index [str, link, 8]
@@ -70,6 +242,7 @@ def gen_linkstr_index_k(orb_list, nocc, orb_k, nkpts, strs=None):
     nlink = nocc * nvir + nocc
 
     # orb_k must be length norb and int32-compatible.
+    kmom = _as_kmom(nkpts, kmom=kmom, kconserv=kconserv)
     orb_k = np.asarray(orb_k, dtype=np.int32)
     assert orb_k.shape == (norb,)
     assert np.all(orb_k >= 0)
@@ -86,6 +259,9 @@ def gen_linkstr_index_k(orb_list, nocc, orb_k, nkpts, strs=None):
         orb_k.ctypes.data_as(ctypes.c_void_p),
         ctypes.c_int(nkpts),
     )
+
+    if not kmom.scalar:
+        link_index = _overwrite_link_momentum(link_index, strs, orb_k, kmom)
 
     return link_index
 
@@ -115,7 +291,8 @@ def _count_det_per_k(link_index):
     return {int(kindx): int(ndet_k)
             for kindx, ndet_k in zip(unique_K0, counts)}
 
-def gen_k_sector_linkstr_info(link_indexa, link_indexb, nkpts, kindx):
+def gen_k_sector_linkstr_info(link_indexa, link_indexb, nkpts, kindx,
+                              kmom=None, kconserv=None):
     '''
     Building the sector-specific link index info for k-FCI.
     args:
@@ -139,6 +316,7 @@ def gen_k_sector_linkstr_info(link_indexa, link_indexb, nkpts, kindx):
     assert link_indexa.ndim == link_indexb.ndim == 3
     assert link_indexa.shape[2] == link_indexb.shape[2] == 8
 
+    kmom = _as_kmom(nkpts, kmom=kmom, kconserv=kconserv)
     kindx = int(kindx) % nkpts
 
     count_a, count_b = _count_det_per_k((link_indexa, link_indexb))
@@ -147,7 +325,7 @@ def gen_k_sector_linkstr_info(link_indexa, link_indexb, nkpts, kindx):
     offset = 0
 
     for ka in range(nkpts):
-        kb = (kindx - ka) % nkpts
+        kb = _ksub(kmom, kindx, ka)
 
         na = count_a.get(ka, 0)
         nb = count_b.get(kb, 0)
@@ -165,7 +343,7 @@ def gen_k_sector_linkstr_info(link_indexa, link_indexb, nkpts, kindx):
     
     return np.asarray(blocks, dtype=np.int32)
 
-def _build_sector_map_spin(link_index, nkpts):
+def _build_sector_map_spin(link_index, nkpts, kmom=None, kconserv=None):
     '''
     Building sector string lists and global-to-local lookup for one spin sector.
     args:
@@ -181,6 +359,7 @@ def _build_sector_map_spin(link_index, nkpts):
             inside sector k. It is -1 if str_global is not in sector k.
     '''
     dtype = np.int32
+    kmom = _as_kmom(nkpts, kmom=kmom, kconserv=kconserv)
     assert link_index.ndim == 3
     assert link_index.shape[2] == 8
 
@@ -192,9 +371,9 @@ def _build_sector_map_spin(link_index, nkpts):
     # Its total momentum is 0.
     if nlink == 0:
         str_k = [np.empty(0, dtype=dtype) for _ in range(nkpts)]
-        str_k[0] = np.arange(nstr, dtype=dtype)
+        str_k[int(kmom.zero)] = np.arange(nstr, dtype=dtype)
         str_k2tot = -np.ones((nkpts, nstr), dtype=dtype)
-        str_k2tot[0, :nstr] = np.arange(nstr, dtype=dtype)
+        str_k2tot[int(kmom.zero), :nstr] = np.arange(nstr, dtype=dtype)
         return str_k, str_k2tot
     
     _str_k = np.asarray(link_index[:, 0, 4], dtype=dtype)
@@ -210,12 +389,16 @@ def _build_sector_map_spin(link_index, nkpts):
     
     return str_k, str_k2tot
 
-def gen_k_sector_maps(link_indexa, link_indexb, nkpts):
+def gen_k_sector_maps(link_indexa, link_indexb, nkpts, kmom=None,
+                      kconserv=None):
     '''
     Build alpha/beta sector string lists and global-to-local maps.
     '''
-    alpha_by_kindx, alpha_str_k2tot = _build_sector_map_spin(link_indexa, nkpts)
-    beta_by_kindx, beta_str_k2tot = _build_sector_map_spin(link_indexb, nkpts)
+    kmom = _as_kmom(nkpts, kmom=kmom, kconserv=kconserv)
+    alpha_by_kindx, alpha_str_k2tot = _build_sector_map_spin(
+        link_indexa, nkpts, kmom=kmom)
+    beta_by_kindx, beta_str_k2tot = _build_sector_map_spin(
+        link_indexb, nkpts, kmom=kmom)
     return alpha_by_kindx, beta_by_kindx, alpha_str_k2tot, beta_str_k2tot
 
 @dataclass
@@ -236,12 +419,14 @@ class KLink:
     dK: int               # k_cre - k_des mod nkpts
 
 
-def _build_k_links_spin(link_index, norb, nkpts, str_k, str_k2tot):
+def _build_k_links_spin(link_index, norb, nkpts, str_k, str_k2tot,
+                        kmom=None, kconserv=None):
     '''
     Build the grouped link lists for a single spin sector, along with the local string index maps.
     The grouping is done by the source string momentum k0 and the momentum transfer dK.
     '''
     # Sanity checks
+    kmom = _as_kmom(nkpts, kmom=kmom, kconserv=kconserv)
     assert link_index.ndim == 3
     assert link_index.shape[2] == 8
 
@@ -275,12 +460,12 @@ def _build_k_links_spin(link_index, norb, nkpts, str_k, str_k2tot):
             dK = int(row[7]) % nkpts
 
             # Sanity: excitation q -> p changes string momentum by k_p - k_q
-            dK_check = (k_cre - k_des) % nkpts
+            dK_check = _ksub(kmom, k_cre, k_des)
             assert dK == dK_check, (f"dK mismatch at str0={str0_global}, link={j}: " 
                                     f"dK={dK}, but k_cre-k_des={dK_check}")
 
             # Sanity: target string momentum k1 should be (k0 + dK) % nkpts
-            k1 = (k0 + dK) % nkpts
+            k1 = _kadd(kmom, k0, dK)
 
             cre_l = cre % norb_per_k
             des_l = des % norb_per_k
@@ -332,12 +517,14 @@ L_DK          = 11
 
 NLINK_FIELDS = 12
 
-def build_k_links_spin(link_index, norb, nkpts, str_k, str_k2tot):
+def build_k_links_spin(link_index, norb, nkpts, str_k, str_k2tot,
+                       kmom=None, kconserv=None):
     '''
     Build the compact link table for a single spin sector, along with the local string index maps.
     The grouping is done by the source string momentum k0 and the momentum transfer dK.
     '''
     # Sanity checks
+    kmom = _as_kmom(nkpts, kmom=kmom, kconserv=kconserv)
     assert link_index.ndim == 3
     assert link_index.shape[2] == 8
 
@@ -362,12 +549,12 @@ def build_k_links_spin(link_index, norb, nkpts, str_k, str_k2tot):
             dK = int(row[7]) % nkpts
 
             # Sanity: excitation q -> p changes string momentum by k_p - k_q
-            dK_check = (k_cre - k_des) % nkpts
+            dK_check = _ksub(kmom, k_cre, k_des)
             assert dK == dK_check, (f"dK mismatch at str0={str0_global}, link={j}: "
                                     f"dK={dK}, but k_cre-k_des={dK_check}")
 
             # Sanity: target string momentum k1 should be (k0 + dK) % nkpts
-            k1 = (k0 + dK) % nkpts
+            k1 = _kadd(kmom, k0, dK)
 
             cre_l = cre % norb_per_k
             des_l = des % norb_per_k
@@ -455,18 +642,21 @@ def _flatten_sector_ids(str_ids_by_k, nkpts):
     return ids, np.asarray(offsets, dtype=np.int32, order="C")
 
 
-def _unpack_contract_link_index(norb, nelec, link_index, nkpts, spin=None):
+def _unpack_contract_link_index(norb, nelec, link_index, nkpts, spin=None,
+                                kmom=None, kconserv=None):
     assert norb % nkpts == 0
+    kmom = _as_kmom(nkpts, kmom=kmom, kconserv=kconserv)
     if link_index is None:
         neleca, nelecb = _unpack_nelec(nelec, spin)
         norb_k = norb // nkpts
         orb_k = (np.arange(norb, dtype=np.int32) // norb_k).astype(np.int32)
-        link_indexa = gen_linkstr_index_k(range(norb), neleca, orb_k, nkpts)
+        link_indexa = gen_linkstr_index_k(range(norb), neleca, orb_k,
+                                          nkpts, kmom=kmom)
         if spin == 0 and neleca == nelecb:
             link_indexb = link_indexa
         else:
             link_indexb = gen_linkstr_index_k(range(norb), nelecb,
-                                              orb_k, nkpts)
+                                              orb_k, nkpts, kmom=kmom)
         return link_indexa, link_indexb
 
     assert link_index[0].shape[2] == link_index[1].shape[2] == 8
@@ -562,7 +752,8 @@ SS_S      = 10
 NSS_FIELDS = 11
 
 
-def build_ab_pair_tables(links_a, links_b, nkpts):
+def build_ab_pair_tables(links_a, links_b, nkpts, kmom=None, kconserv=None):
+    kmom = _as_kmom(nkpts, kmom=kmom, kconserv=kconserv)
     ab_pairs = [[None for _ in range(nkpts)] for _ in range(nkpts)]
 
     for ka in range(nkpts):
@@ -574,7 +765,7 @@ def build_ab_pair_tables(links_a, links_b, nkpts):
             for la in la_tab:
                 dKa = int(la[L_DK])
                 ka1 = int(la[L_K1])
-                dKb_needed = (-dKa) % nkpts
+                dKb_needed = int(kmom.kneg[dKa])
 
                 lb_tab = get_links_by_k_dk(links_b, kb, dKb_needed)
 
@@ -611,7 +802,8 @@ def build_ab_pair_tables(links_a, links_b, nkpts):
     return ab_pairs
 
 
-def build_same_spin_pair_tables(links, nkpts):
+def build_same_spin_pair_tables(links, nkpts, kmom=None, kconserv=None):
+    kmom = _as_kmom(nkpts, kmom=kmom, kconserv=kconserv)
     linktab = links["linktab"]
     ss_pairs = [None for _ in range(nkpts)]
 
@@ -630,7 +822,7 @@ def build_same_spin_pair_tables(links, nkpts):
                     continue
 
                 dK2 = int(l2[L_DK])
-                if (dK1 + dK2) % nkpts != 0:
+                if _kadd(kmom, dK1, dK2) != int(kmom.zero):
                     continue
 
                 rows.append([
@@ -1160,38 +1352,42 @@ def _raise_if_contract_structure_too_large(nab_entries, naa_entries,
     )
 
 
-def build_contract_pair_tables(link_indexa, link_indexb, norb, nkpts):
+def build_contract_pair_tables(link_indexa, link_indexb, norb, nkpts,
+                               kmom=None, kconserv=None):
+    kmom = _as_kmom(nkpts, kmom=kmom, kconserv=kconserv)
     straid_k, strbid_k, str2tot_a, str2tot_b = gen_k_sector_maps(
-        link_indexa, link_indexb, nkpts)
+        link_indexa, link_indexb, nkpts, kmom=kmom)
 
     links_a = build_k_links_spin(link_indexa, norb, nkpts,
-                                 straid_k, str2tot_a)
+                                 straid_k, str2tot_a, kmom=kmom)
     links_b = build_k_links_spin(link_indexb, norb, nkpts,
-                                 strbid_k, str2tot_b)
+                                 strbid_k, str2tot_b, kmom=kmom)
 
     links_a = build_links_by_global_source_array(links_a)
     links_b = build_links_by_global_source_array(links_b)
 
-    ab_pairs = build_ab_pair_tables(links_a, links_b, nkpts)
-    aa_pairs = build_same_spin_pair_tables(links_a, nkpts)
-    bb_pairs = build_same_spin_pair_tables(links_b, nkpts)
+    ab_pairs = build_ab_pair_tables(links_a, links_b, nkpts, kmom=kmom)
+    aa_pairs = build_same_spin_pair_tables(links_a, nkpts, kmom=kmom)
+    bb_pairs = build_same_spin_pair_tables(links_b, nkpts, kmom=kmom)
 
     return flatten_pair_tables(ab_pairs, aa_pairs, bb_pairs, nkpts)
 
 
 def build_same_spin_pair_structures_py(link_indexa, link_indexb, norb, nkpts,
-                                       blocks, ncas):
+                                       blocks, ncas, kmom=None,
+                                       kconserv=None):
+    kmom = _as_kmom(nkpts, kmom=kmom, kconserv=kconserv)
     straid_k, strbid_k, str2tot_a, str2tot_b = gen_k_sector_maps(
-        link_indexa, link_indexb, nkpts)
+        link_indexa, link_indexb, nkpts, kmom=kmom)
     links_a = build_k_links_spin(link_indexa, norb, nkpts,
-                                 straid_k, str2tot_a)
+                                 straid_k, str2tot_a, kmom=kmom)
     links_b = build_k_links_spin(link_indexb, norb, nkpts,
-                                 strbid_k, str2tot_b)
+                                 strbid_k, str2tot_b, kmom=kmom)
     links_a = build_links_by_global_source_array(links_a)
     links_b = build_links_by_global_source_array(links_b)
 
-    aa_pairs = build_same_spin_pair_tables(links_a, nkpts)
-    bb_pairs = build_same_spin_pair_tables(links_b, nkpts)
+    aa_pairs = build_same_spin_pair_tables(links_a, nkpts, kmom=kmom)
+    bb_pairs = build_same_spin_pair_tables(links_b, nkpts, kmom=kmom)
 
     aa_rows = []
     aa_offsets = [0]
@@ -1237,7 +1433,9 @@ def _available_memory_bytes():
         return None
 
 
-def estimate_ab_entries_upper_bound(link_indexa, link_indexb, blocks, nkpts):
+def estimate_ab_entries_upper_bound(link_indexa, link_indexb, blocks, nkpts,
+                                    kmom=None, kconserv=None):
+    kmom = _as_kmom(nkpts, kmom=kmom, kconserv=kconserv)
     link_indexa = np.asarray(link_indexa, dtype=np.int32, order="C")
     link_indexb = np.asarray(link_indexb, dtype=np.int32, order="C")
     counts_a = np.zeros((nkpts, nkpts), dtype=np.int64)
@@ -1257,7 +1455,7 @@ def estimate_ab_entries_upper_bound(link_indexa, link_indexb, blocks, nkpts):
         kb = int(kb)
         for dka in range(nkpts):
             nentries += (int(counts_a[ka, dka]) *
-                         int(counts_b[kb, (-dka) % nkpts]))
+                         int(counts_b[kb, int(kmom.kneg[dka])]))
     return int(nentries)
 
 
@@ -1268,14 +1466,15 @@ def estimate_ab_structure_bytes(nentries):
 
 def _resolve_explicit_ab(link_indexa, link_indexb, blocks, nkpts,
                          explicit_ab="auto", max_memory=None,
-                         memory_fraction=0.5):
+                         memory_fraction=0.5, kmom=None, kconserv=None):
     if explicit_ab is True or explicit_ab is False:
         return bool(explicit_ab)
     if explicit_ab != "auto":
         raise ValueError("explicit_ab must be True, False, or 'auto'")
 
     nentries = estimate_ab_entries_upper_bound(
-        link_indexa, link_indexb, blocks, nkpts)
+        link_indexa, link_indexb, blocks, nkpts, kmom=kmom,
+        kconserv=kconserv)
     required = estimate_ab_structure_bytes(nentries)
     if max_memory is None:
         max_memory = _available_memory_bytes()
@@ -1300,27 +1499,31 @@ class KFCILayoutMap:
     strb_offsets: np.ndarray
     str2tot_a: np.ndarray
     str2tot_b: np.ndarray
+    kmom: KPointMomentum
 
     @classmethod
-    def build(cls, norb, nelec, nkpts, target_k, link_index=None):
+    def build(cls, norb, nelec, nkpts, target_k, link_index=None,
+              kmom=None, kconserv=None, cell=None, kpts=None, kmesh=None):
         nkpts = int(nkpts)
+        kmom = _as_kmom(nkpts, kmom=kmom, kconserv=kconserv,
+                        cell=cell, kpts=kpts, kmesh=kmesh)
         norb = int(norb)
         ncas = norb // nkpts
         assert ncas * nkpts == norb
 
         nelec = _unpack_nelec(nelec)
         link_indexa, link_indexb = _unpack_contract_link_index(
-            norb, nelec, link_index, nkpts)
+            norb, nelec, link_index, nkpts, kmom=kmom)
         link_indexa = np.asarray(link_indexa, dtype=np.int32, order="C")
         link_indexb = np.asarray(link_indexb, dtype=np.int32, order="C")
 
         blocks = gen_k_sector_linkstr_info(
-            link_indexa, link_indexb, nkpts, target_k)
+            link_indexa, link_indexb, nkpts, target_k, kmom=kmom)
         blocks = np.asarray(blocks, dtype=np.int32, order="C")
         sector_size = int(blocks[:, 5].sum()) if blocks.size else 0
 
         straid_k, strbid_k, str2tot_a, str2tot_b = gen_k_sector_maps(
-            link_indexa, link_indexb, nkpts)
+            link_indexa, link_indexb, nkpts, kmom=kmom)
         stra_ids, stra_offsets = _flatten_sector_ids(straid_k, nkpts)
         strb_ids, strb_offsets = _flatten_sector_ids(strbid_k, nkpts)
 
@@ -1339,6 +1542,7 @@ class KFCILayoutMap:
             strb_offsets=strb_offsets,
             str2tot_a=np.asarray(str2tot_a, dtype=np.int32, order="C"),
             str2tot_b=np.asarray(str2tot_b, dtype=np.int32, order="C"),
+            kmom=kmom,
         )
 
 
@@ -1390,9 +1594,12 @@ class KFCIContractMap:
     @classmethod
     def build(cls, norb, nelec, nkpts, target_k, link_index=None,
               build_pair_tables=False, use_c_structures=True,
-              explicit_ab="auto", max_memory=None, memory_fraction=0.5):
+              explicit_ab="auto", max_memory=None, memory_fraction=0.5,
+              kmom=None, kconserv=None, cell=None, kpts=None, kmesh=None):
         layout = KFCILayoutMap.build(
-            norb, nelec, nkpts, target_k, link_index=link_index)
+            norb, nelec, nkpts, target_k, link_index=link_index,
+            kmom=kmom, kconserv=kconserv, cell=cell, kpts=kpts,
+            kmesh=kmesh)
         link_indexa, link_indexb = layout.link_index
         norb = layout.norb
         nkpts = layout.nkpts
@@ -1400,13 +1607,14 @@ class KFCIContractMap:
         blocks = layout.blocks
         str2tot_a = layout.str2tot_a
         str2tot_b = layout.str2tot_b
+        kmom = layout.kmom
         explicit_ab = _resolve_explicit_ab(
             link_indexa, link_indexb, blocks, nkpts,
             explicit_ab=explicit_ab, max_memory=max_memory,
-            memory_fraction=memory_fraction)
+            memory_fraction=memory_fraction, kmom=kmom)
 
         structures = None
-        if use_c_structures:
+        if use_c_structures and kmom.scalar:
             try:
                 structures = build_contract_structures_c(
                     link_indexa, link_indexb, str2tot_a, str2tot_b,
@@ -1417,7 +1625,7 @@ class KFCIContractMap:
         if explicit_ab and (build_pair_tables or structures is None):
             ab_tab, ab_offsets, aa_tab, aa_offsets, bb_tab, bb_offsets = (
                 build_contract_pair_tables(link_indexa, link_indexb,
-                                           norb, nkpts))
+                                           norb, nkpts, kmom=kmom))
             has_pair_tables = True
             if structures is None:
                 ab_sparse = build_ab_sparse_structure(
@@ -1450,7 +1658,8 @@ class KFCIContractMap:
         elif structures is None:
             (aa_tab, aa_offsets, bb_tab, bb_offsets, aa_dense, bb_dense) = (
                 build_same_spin_pair_structures_py(
-                    link_indexa, link_indexb, norb, nkpts, blocks, ncas))
+                    link_indexa, link_indexb, norb, nkpts, blocks, ncas,
+                    kmom=kmom))
             table_size = nkpts * nkpts
             ab_tab = np.zeros((0, NAB_FIELDS), dtype=np.int32)
             ab_offsets = np.zeros(table_size + 1, dtype=np.int32)
@@ -1515,14 +1724,17 @@ class KFCIContractMap:
 def make_kfci_contract_map(norb, nelec, nkpts, target_k, link_index=None,
                            build_pair_tables=False, use_c_structures=True,
                            explicit_ab="auto", max_memory=None,
-                           memory_fraction=0.5):
+                           memory_fraction=0.5, kmom=None, kconserv=None,
+                           cell=None, kpts=None, kmesh=None):
     return KFCIContractMap.build(norb, nelec, nkpts, target_k,
                                  link_index=link_index,
                                  build_pair_tables=build_pair_tables,
                                  use_c_structures=use_c_structures,
                                  explicit_ab=explicit_ab,
                                  max_memory=max_memory,
-                                 memory_fraction=memory_fraction)
+                                 memory_fraction=memory_fraction,
+                                 kmom=kmom, kconserv=kconserv, cell=cell,
+                                 kpts=kpts, kmesh=kmesh)
 
 if __name__ == "__main__":
     from pyscf.fci import cistring
