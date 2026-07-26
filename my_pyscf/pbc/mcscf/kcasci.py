@@ -16,31 +16,36 @@ from mrh.my_pyscf.pbc.mcscf import casci
 # Author: Bhavnesh Jangid <jangidbhavnesh@uchicago.edu>
 #
 
-def get_h1e_h2e(mc, mo_coeff=None):
+def h1e_for_cas(mc, mo_coeff=None, ncas=None, ncore=None):
     '''
-    Compute the k-space active-space effective Hamiltonian for the k-FCI solver.
+    Compute the k-space one-electron active-space Hamiltonian and core energy.
+
     Args:
         mc : pbc.mcscf.KCASCI
             The k-CASCI object.
         mo_coeff : np.ndarray [nk, nao, nmo_k]
             orbitals at each k-point.
+        ncas : int
+            number of active orbitals at each k-point.
+        ncore : int
+            number of core orbitals at each k-point.
     Returns:
         h1eff : np.ndarray [nk, ncas, ncas]
             The effective one-electron Hamiltonian in k-space.
-        h2eff : np.ndarray [nk, nk, nk, ncas, ncas, ncas, ncas]
-            The effective two-electron Hamiltonian in k-space.
         ecore : np.complex128
             The core energy.
     '''
 
     if mo_coeff is None:
         mo_coeff = mc.mo_coeff
+    if ncas is None:
+        ncas = mc.ncas
+    if ncore is None:
+        ncore = mc.ncore
 
     cell = mc.cell
     kmf = mc._scf
     nkpts = mc.nkpts
-    ncore = mc.ncore
-    ncas = mc.ncas
     nocc = ncore + ncas
 
     hcore = mc.get_hcore()
@@ -63,22 +68,45 @@ def get_h1e_h2e(mc, mo_coeff=None):
 
     h1eff = np.asarray([mo_cas[k].conj().T @ hcore[k] @ mo_cas[k]
                         for k in range(nkpts)], dtype=dtype)
+    return h1eff, ecore
 
-    # k-space two-electron integrals with supercell normalization.
+
+def get_h2eff(mc, mo_coeff=None):
+    '''
+    Compute the k-space two-electron active-space Hamiltonian.
+
+    The returned integrals include the supercell normalization and the factor
+    of one half expected by the lower-level k-FCI two-electron contraction.
+    '''
+    if mo_coeff is None:
+        mo_coeff = mc.mo_coeff
+
+    kmf = mc._scf
+    nkpts = mc.nkpts
+    ncore = mc.ncore
+    ncas = mc.ncas
+    nocc = ncore + ncas
+    dtype = np.result_type(*[mo.dtype for mo in mo_coeff])
+    mo_cas = np.asarray(
+        [mo[:, ncore:nocc] for mo in mo_coeff], dtype=dtype)
+
     h2eff = kmf.with_df.ao2mo_7d(mo_cas, kpts=kmf.kpts)
     h2eff = np.asarray(h2eff, dtype=dtype) / nkpts
+    h2eff *= 0.5
+    return h2eff
 
-    # k-FCI contract_2e follows the same lower-level convention as
-    # direct_spin1_cplx.contract_2e. The Hamiltonian needs h1 - 0.5*J and 0.5*h2.
+
+def _adjust_h1eff_for_kfci(h1eff, h2eff):
+    '''
+    Apply the one-body correction associated with the k-FCI 0.5*h2 convention.
+    '''
+    nkpts = h1eff.shape[0]
     j_eff = np.zeros_like(h1eff)
     for kp in range(nkpts):
         for kq in range(nkpts):
             j_eff[kp] += np.einsum('piis->ps', h2eff[kp, kq, kq])
 
-    h1eff -= 0.5 * j_eff
-    h2eff *= 0.5
-
-    return h1eff, h2eff, ecore
+    return h1eff - j_eff
 
 
 def _get_kmom_for_kcasci(mc):
@@ -130,7 +158,9 @@ def kernel(mc, mo_coeff=None, ci0=None, verbose=logger.NOTE, envs=None):
     ncas = mc.ncas
     nelecas = _unpack_nelec(mc.nelecas, mc._scf.cell.spin)
 
-    h1eff, h2eff, energy_core = mc.get_h1e_h2e(mo_coeff)
+    h1eff, energy_core = mc.get_h1eff(mo_coeff)
+    h2eff = mc.get_h2eff(mo_coeff)
+    h1eff = _adjust_h1eff_for_kfci(h1eff, h2eff)
     t1 = log.timer('integral transformation to k-CAS space', *t0)
     log.debug('core energy = %.15g', energy_core.real)
 
@@ -286,7 +316,9 @@ def charged_kernel(mc, mo_coeff=None, ci0=None, verbose=logger.NOTE,
     charge = mc.charge if charge is None else int(charge)
     charged_spin = mc.charged_spin if charged_spin is None else charged_spin
 
-    h1eff, h2eff, energy_core = mc.get_h1e_h2e(mo_coeff)
+    h1eff, energy_core = mc.get_h1eff(mo_coeff)
+    h2eff = mc.get_h2eff(mo_coeff)
+    h1eff = _adjust_h1eff_for_kfci(h1eff, h2eff)
     t1 = log.timer('integral transformation to charged k-CAS space', *t0)
     log.debug('core energy = %.15g', energy_core.real)
 
@@ -576,25 +608,12 @@ class PBCKCASCI(casci.PBCCASCI):
         log.info('target_k = %d', self.target_k)
         return self
 
-    def get_h1e_h2e(self, mo_coeff=None):
-        return get_h1e_h2e(self, mo_coeff=mo_coeff)
+    def get_h1cas(self, mo_coeff=None, ncas=None, ncore=None):
+        '''An alias of get_h1eff method.'''
+        return self.get_h1eff(mo_coeff, ncas, ncore)
 
-    def get_h1eff(self, mo_coeff=None, ncas=None, ncore=None):
-        '''
-        Return the effective h1e for the k-FCI solver.
-        '''
-        h1eff, h2eff, ecore = self.get_h1e_h2e(mo_coeff=mo_coeff)
-        return h1eff, ecore
-
-    h1e_for_cas = get_h1eff
-    get_h1cas = get_h1eff
-
-    def get_h2eff(self, mo_coeff=None):
-        '''
-        Return the effective h2e for the k-FCI solver.
-        '''
-        h1eff, h2eff, ecore = self.get_h1e_h2e(mo_coeff=mo_coeff)
-        return h2eff
+    get_h1eff = h1e_for_cas = h1e_for_cas
+    get_h2eff = get_h2eff
 
     def make_rdm1(self, mo_coeff=None, ci=None, ncas=None, nelecas=None,
                   ncore=None, **kwargs):
