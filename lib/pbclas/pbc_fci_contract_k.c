@@ -345,7 +345,8 @@ void FCIcontract_2e_k_stream_ab(double complex *eri,
                                 int nblocks, int *blocks,
                                 int *linka, int nstra, int nlinka,
                                 int *linkb, int nstrb, int nlinkb,
-                                int *str2tot_a, int *str2tot_b)
+                                int *str2tot_a, int *str2tot_b,
+                                int *ksub, int *kneg)
 {
         int ndet = 0;
         int table_size = nkpts * nkpts;
@@ -382,7 +383,7 @@ void FCIcontract_2e_k_stream_ab(double complex *eri,
 #pragma omp parallel for schedule(dynamic) default(none) \
         shared(eri, ci0, ci1, nkpts, ncas, table_size, block_offset, \
                block_na, block_nb, order_a, order_b, linka, nstra, nlinka, \
-               linkb, nstrb, nlinkb, str2tot_a, str2tot_b)
+               linkb, nstrb, nlinkb, str2tot_a, str2tot_b, ksub, kneg)
         for (int dst_key = 0; dst_key < table_size; dst_key++) {
                 if (block_offset[dst_key] < 0) {
                         continue;
@@ -394,8 +395,9 @@ void FCIcontract_2e_k_stream_ab(double complex *eri,
                 int dst_nb = block_nb[dst_key];
 
                 for (int dka = 0; dka < nkpts; dka++) {
-                        int ka0 = mod_pos(ka1 - dka, nkpts);
-                        int kb0 = mod_pos(kb1 + dka, nkpts);
+                        int dkb = kneg[dka];
+                        int ka0 = ksub[ka1 * nkpts + dka];
+                        int kb0 = ksub[kb1 * nkpts + dkb];
                         int src_key = ka0 * nkpts + kb0;
                         if (block_offset[src_key] < 0) {
                                 continue;
@@ -404,8 +406,7 @@ void FCIcontract_2e_k_stream_ab(double complex *eri,
                         int src_offset = block_offset[src_key];
                         int src_nb = block_nb[src_key];
                         int akey = ka0 * nkpts + dka;
-                        int bdk = mod_pos(-dka, nkpts);
-                        int bkey = kb0 * nkpts + bdk;
+                        int bkey = kb0 * nkpts + dkb;
                         int a0 = order_a.offsets[akey];
                         int a1 = order_a.offsets[akey + 1];
                         int b0 = order_b.offsets[bkey];
