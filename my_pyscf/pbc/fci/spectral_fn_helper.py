@@ -365,6 +365,8 @@ def _collect_charged_roots(kmc, kind):
                 'energy_supercell': energy * int(result['nkpts']),
                 'ci': ci,
                 'nelecastot': result['nelecastot'],
+                'charged_spin': int(result['nelecastot'][0] -
+                                    result['nelecastot'][1]),
                 'ncastot': int(result['ncastot']),
                 'nkpts': int(result['nkpts']),
                 'converged': bool(result.get('converged', True)),
@@ -380,6 +382,39 @@ def _set_solver_nroots(kmc, nroots):
         kmc.fcisolver.nroots = int(nroots)
 
 
+def _charged_spin_list(nelecastot, norb, kind, charged_spin):
+    '''
+    Return charged spin sectors needed for alpha/beta spectral operators.
+    '''
+    if isinstance(charged_spin, str) and charged_spin == 'default':
+        return [None]
+    if charged_spin is not None:
+        if isinstance(charged_spin, (list, tuple, np.ndarray)):
+            return list(charged_spin)
+        return [charged_spin]
+
+    neleca, nelecb = map(int, nelecastot)
+    spin0 = neleca - nelecb
+    if kind == 'hole':
+        spins = []
+        if neleca > 0:
+            spins.append(spin0 - 1)
+        if nelecb > 0:
+            spins.append(spin0 + 1)
+    else:
+        spins = []
+        if neleca < norb:
+            spins.append(spin0 + 1)
+        if nelecb < norb:
+            spins.append(spin0 - 1)
+
+    out = []
+    for spin in spins:
+        if spin not in out:
+            out.append(spin)
+    return out
+
+
 def compute_kcasci_spectral_roots(kmf, ncas, nelecas, ncore=None,
                                   mo_coeff=None, target_k=0,
                                   nroots_neutral=1, nroots_hole=1,
@@ -393,12 +428,18 @@ def compute_kcasci_spectral_roots(kmf, ncas, nelecas, ncore=None,
 
     The returned root table is the input needed for spectral-function transition
     amplitudes.  Energies follow KCASCI's per-cell convention, with supercell
-    values also stored for pole-energy differences.
+    values also stored for pole-energy differences.  By default both charged
+    spin sectors needed by alpha/beta spectral operators are computed; pass
+    charged_spin_hole/particle='default' to use KCASCI's lowest-spin default.
     '''
     from mrh.my_pyscf.pbc import mcscf
 
     if mo_coeff is None:
         mo_coeff = np.asarray(kmf.mo_coeff)
+    nelecas = _unpack_nelec(nelecas, kmf.cell.spin)
+    nkpts = len(kmf.kpts)
+    ncastot = nkpts * int(ncas)
+    nelecastot = (nkpts * nelecas[0], nkpts * nelecas[1])
 
     kmc_neutral = mcscf.KCASCI(kmf, ncas, nelecas, ncore=ncore,
                               target_k=target_k)
@@ -409,41 +450,196 @@ def compute_kcasci_spectral_roots(kmf, ncas, nelecas, ncore=None,
     kmc_neutral.kernel(mo_coeff=mo_coeff, verbose=verbose)
 
     roots = _collect_neutral_roots(kmc_neutral)
-    kmc_hole = None
-    kmc_particle = None
+    hole_jobs = []
+    particle_jobs = []
 
     if with_hole:
-        kmc_hole = mcscf.KCASCI(kmf, ncas, nelecas, ncore=ncore,
-                                charge=1, target_k=None,
-                                charged_spin=charged_spin_hole)
-        kmc_hole.canonicalization = False
-        _set_solver_nroots(kmc_hole, nroots_hole)
-        if solver_setup is not None:
-            solver_setup(kmc_hole, 'hole')
-        kmc_hole.kernel(mo_coeff=mo_coeff, verbose=verbose)
-        roots.extend(_collect_charged_roots(kmc_hole, 'hole'))
+        for charged_spin in _charged_spin_list(
+                nelecastot, ncastot, 'hole', charged_spin_hole):
+            kmc_hole = mcscf.KCASCI(kmf, ncas, nelecas, ncore=ncore,
+                                    charge=1, target_k=None,
+                                    charged_spin=charged_spin)
+            kmc_hole.canonicalization = False
+            _set_solver_nroots(kmc_hole, nroots_hole)
+            if solver_setup is not None:
+                solver_setup(kmc_hole, 'hole')
+            kmc_hole.kernel(mo_coeff=mo_coeff, verbose=verbose)
+            roots.extend(_collect_charged_roots(kmc_hole, 'hole'))
+            hole_jobs.append(kmc_hole)
 
     if with_particle:
-        kmc_particle = mcscf.KCASCI(kmf, ncas, nelecas, ncore=ncore,
-                                    charge=-1, target_k=None,
-                                    charged_spin=charged_spin_particle)
-        kmc_particle.canonicalization = False
-        _set_solver_nroots(kmc_particle, nroots_particle)
-        if solver_setup is not None:
-            solver_setup(kmc_particle, 'particle')
-        kmc_particle.kernel(mo_coeff=mo_coeff, verbose=verbose)
-        roots.extend(_collect_charged_roots(kmc_particle, 'particle'))
+        for charged_spin in _charged_spin_list(
+                nelecastot, ncastot, 'particle', charged_spin_particle):
+            kmc_particle = mcscf.KCASCI(kmf, ncas, nelecas, ncore=ncore,
+                                        charge=-1, target_k=None,
+                                        charged_spin=charged_spin)
+            kmc_particle.canonicalization = False
+            _set_solver_nroots(kmc_particle, nroots_particle)
+            if solver_setup is not None:
+                solver_setup(kmc_particle, 'particle')
+            kmc_particle.kernel(mo_coeff=mo_coeff, verbose=verbose)
+            roots.extend(_collect_charged_roots(kmc_particle, 'particle'))
+            particle_jobs.append(kmc_particle)
 
-    nelecas = _unpack_nelec(nelecas, kmf.cell.spin)
-    nkpts = len(kmf.kpts)
+    kmc_hole = hole_jobs[0] if len(hole_jobs) == 1 else hole_jobs
+    kmc_particle = (particle_jobs[0] if len(particle_jobs) == 1
+                    else particle_jobs)
     return KCASCISpectralRoots(neutral=kmc_neutral, hole=kmc_hole,
                                particle=kmc_particle, roots=roots,
                                nkpts=nkpts, ncas=int(ncas),
-                               ncastot=nkpts * int(ncas),
-                               nelecastot=(nkpts * nelecas[0],
-                                           nkpts * nelecas[1]),
+                               ncastot=ncastot,
+                               nelecastot=nelecastot,
                                target_k=int(target_k) % nkpts,
                                mo_coeff=mo_coeff)
+
+
+def _root_table(spectral_roots):
+    '''
+    Return the plain list of root dictionaries used by this module.
+    '''
+    if isinstance(spectral_roots, KCASCISpectralRoots):
+        return spectral_roots.roots
+    return list(spectral_roots)
+
+
+def _select_neutral_root(rows, neutral_root=0, target_k=None):
+    '''
+    Find the neutral root that defines the initial state.
+    '''
+    roots = [row for row in rows
+             if row['kind'] == 'neutral' and int(row['root']) == neutral_root]
+    if target_k is not None:
+        target_k = int(target_k)
+        roots = [row for row in roots if int(row['target_k']) == target_k]
+    if len(roots) != 1:
+        raise ValueError(f"expected one neutral root, found {len(roots)}")
+    return roots[0]
+
+
+def _charged_root_index(rows):
+    '''
+    Index charged roots by type, target momentum, and electron number.
+    '''
+    table = {}
+    for row in rows:
+        if row['kind'] not in ('hole', 'particle'):
+            continue
+        key = (row['kind'], int(row['target_k']),
+               tuple(map(int, row['nelecastot'])))
+        table.setdefault(key, []).append(row)
+    return table
+
+
+def _index_list(values, stop, name):
+    '''
+    Normalize optional k/orbital index filters.
+    '''
+    if values is None:
+        return list(range(int(stop)))
+    out = []
+    for value in values:
+        value = int(value)
+        if value < 0 or value >= int(stop):
+            raise ValueError(f"{name}={value} is outside [0, {stop})")
+        out.append(value)
+    return out
+
+
+def _append_poles(poles, op_vec, op_info, charged_rows, neutral, kind,
+                  k, p, spin, min_weight):
+    '''
+    Project one operated vector onto all matching charged roots.
+    '''
+    e0 = neutral['energy_supercell']
+    for charged in charged_rows:
+        amp = np.vdot(np.asarray(charged['ci']), op_vec)
+        weight = abs(amp) ** 2
+        if weight < min_weight:
+            continue
+        e1 = charged['energy_supercell']
+        omega = e0 - e1 if kind == 'hole' else e1 - e0
+        poles.append({
+            'kind': kind,
+            'k': int(k),
+            'target_k': int(op_info['target_k']),
+            'root': int(charged['root']),
+            'neutral_root': int(neutral['root']),
+            'orbital': int(p),
+            'spin': int(spin),
+            'omega': np.real_if_close(omega),
+            'weight': np.real_if_close(weight),
+            'amplitude': amp,
+            'energy_neutral': e0,
+            'energy_charged': e1,
+            'nelecastot': tuple(map(int, charged['nelecastot'])),
+        })
+
+
+def make_spectral_poles(spectral_roots, neutral_root=0, neutral_target_k=None,
+                        k_indices=None, orbital_indices=None, spins=(0, 1),
+                        include_hole=True, include_particle=True,
+                        min_weight=0.0, strict=False):
+    '''
+    Build k-resolved hole/particle pole table from neutral and charged roots.
+
+    Hole poles use <Psi_N-1| a_kps |Psi_N> and
+    omega = E_N - E_N-1.  Particle poles use
+    <Psi_N+1| a^dagger_kps |Psi_N> and omega = E_N+1 - E_N.
+    '''
+    rows = _root_table(spectral_roots)
+    if isinstance(spectral_roots, KCASCISpectralRoots):
+        nkpts = spectral_roots.nkpts
+        ncas = spectral_roots.ncas
+        neutral_target_k = (spectral_roots.target_k if neutral_target_k is None
+                            else neutral_target_k)
+    else:
+        neutral0 = _select_neutral_root(rows, neutral_root,
+                                       target_k=neutral_target_k)
+        nkpts = neutral0['nkpts']
+        ncas = neutral0['ncastot'] // neutral0['nkpts']
+
+    neutral = _select_neutral_root(rows, neutral_root,
+                                  target_k=neutral_target_k)
+    charged_index = _charged_root_index(rows)
+    nkpts = int(nkpts)
+    ncas = int(ncas)
+    norb = nkpts * ncas
+    nelec = tuple(map(int, neutral['nelecastot']))
+    target_k = int(neutral['target_k'])
+
+    k_list = _index_list(k_indices, nkpts, 'k')
+    p_list = _index_list(orbital_indices, ncas, 'orbital')
+    spin_list = [_as_spin_id(spin) for spin in spins]
+    poles = []
+
+    for k in k_list:
+        for p in p_list:
+            for spin in spin_list:
+                if include_hole and nelec[spin] > 0:
+                    op_vec, info = des_k(
+                        neutral['ci'], norb, nelec, nkpts, target_k,
+                        k, p, spin, return_info=True)
+                    key = ('hole', int(info['target_k']),
+                           tuple(map(int, info['nelec'])))
+                    charged_rows = charged_index.get(key, ())
+                    if strict and not charged_rows:
+                        raise ValueError(f"missing hole sector {key[1:]}")
+                    _append_poles(poles, op_vec, info, charged_rows, neutral,
+                                  'hole', k, p, spin, min_weight)
+
+                if include_particle and nelec[spin] < norb:
+                    op_vec, info = cre_k(
+                        neutral['ci'], norb, nelec, nkpts, target_k,
+                        k, p, spin, return_info=True)
+                    key = ('particle', int(info['target_k']),
+                           tuple(map(int, info['nelec'])))
+                    charged_rows = charged_index.get(key, ())
+                    if strict and not charged_rows:
+                        raise ValueError(f"missing particle sector {key[1:]}")
+                    _append_poles(poles, op_vec, info, charged_rows, neutral,
+                                  'particle', k, p, spin, min_weight)
+
+    return poles
 
 
 def des_k(fcivec, norb, nelec, nkpts, target_k, k, p, spin,
@@ -479,6 +675,7 @@ __all__ = [
     'make_k_sector_layout',
     'make_k_op_context',
     'compute_kcasci_spectral_roots',
+    'make_spectral_poles',
     'apply_k_op',
     'des_k',
     'cre_k',
