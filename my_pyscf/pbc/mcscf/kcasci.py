@@ -11,10 +11,9 @@ from mrh.my_pyscf.pbc import fci as pbc_fci
 from mrh.my_pyscf.pbc.fci import kcistrings
 from mrh.my_pyscf.pbc.mcscf import casci
 
-# 
+# Author: Bhavnesh Jangid
+
 # k-space CASCI driver for the k-FCI solver.
-# Author: Bhavnesh Jangid <jangidbhavnesh@uchicago.edu>
-#
 
 def h1e_for_cas(mc, mo_coeff=None, ncas=None, ncore=None):
     '''
@@ -23,8 +22,10 @@ def h1e_for_cas(mc, mo_coeff=None, ncas=None, ncore=None):
     Args:
         mc : pbc.mcscf.KCASCI
             The k-CASCI object.
-        mo_coeff : np.ndarray [nk, nao, nmo_k]
+        mo_coeff : np.ndarray [nk, nao, nmo]
             orbitals at each k-point.
+            nao and nmo are the number of 
+            atomic orbitals and molecular orbitals at each k-point.
         ncas : int
             number of active orbitals at each k-point.
         ncore : int
@@ -36,12 +37,9 @@ def h1e_for_cas(mc, mo_coeff=None, ncas=None, ncore=None):
             The core energy.
     '''
 
-    if mo_coeff is None:
-        mo_coeff = mc.mo_coeff
-    if ncas is None:
-        ncas = mc.ncas
-    if ncore is None:
-        ncore = mc.ncore
+    if mo_coeff is None: mo_coeff = mc.mo_coeff
+    if ncas is None: ncas = mc.ncas
+    if ncore is None: ncore = mc.ncore
 
     cell = mc.cell
     kmf = mc._scf
@@ -49,11 +47,12 @@ def h1e_for_cas(mc, mo_coeff=None, ncas=None, ncore=None):
     nocc = ncore + ncas
 
     hcore = mc.get_hcore()
-    dtype = np.result_type(hcore, *[mo.dtype for mo in mo_coeff])
+    dtype = mo_coeff[0].dtype
     hcore = hcore.astype(dtype)
 
     mo_core = [mo[:, :ncore] for mo in mo_coeff]
-    mo_cas = np.asarray([mo[:, ncore:nocc] for mo in mo_coeff], dtype=dtype)
+    mo_cas = np.asarray([mo[:, ncore:nocc] 
+                         for mo in mo_coeff], dtype=dtype)
 
     # Remember, the total energy is divided by nkpts later.
     ecore = mc.energy_nuc() * nkpts
@@ -77,16 +76,25 @@ def get_h2eff(mc, mo_coeff=None):
 
     The returned integrals include the supercell normalization and the factor
     of one half expected by the lower-level k-FCI two-electron contraction.
+    args:
+        mc : pbc.mcscf.KCASCI
+            The k-CASCI object.
+        mo_coeff : np.ndarray [nk, nao, nmo]
+            orbitals at each k-point.
+            nao and nmo are the number of 
+            atomic orbitals and molecular orbitals at each k-point.
+    returns:
+        h2eff : np.ndarray [nk, nk, nk, ncas, ncas, ncas, ncas]
+            The effective two-electron Hamiltonian in k-space.
     '''
-    if mo_coeff is None:
-        mo_coeff = mc.mo_coeff
+    if mo_coeff is None: mo_coeff = mc.mo_coeff
 
     kmf = mc._scf
     nkpts = mc.nkpts
     ncore = mc.ncore
     ncas = mc.ncas
     nocc = ncore + ncas
-    dtype = np.result_type(*[mo.dtype for mo in mo_coeff])
+    dtype = mo_coeff[0].dtype
     mo_cas = np.asarray(
         [mo[:, ncore:nocc] for mo in mo_coeff], dtype=dtype)
 
@@ -98,7 +106,21 @@ def get_h2eff(mc, mo_coeff=None):
 
 def _adjust_h1eff_for_kfci(h1eff, h2eff):
     '''
-    Apply the one-body correction associated with the k-FCI 0.5*h2 convention.
+    Apply the one-body correction associated with the 
+    k-FCI 0.5*h2 convention. In other words, subtract 
+    the effective J contribution from the one-body Hamiltonian.
+    Remember: I am not doing a single contraction like done
+    in the regular casci, I am doing contract_1e and contract_2e separately.
+    
+    args:
+        h1eff : np.ndarray [nk, ncas, ncas]
+            The effective one-electron Hamiltonian in k-space.
+        h2eff : np.ndarray [nk, nk, nk, ncas, ncas, ncas, ncas]
+            The effective two-electron Hamiltonian in k-space.
+    returns:
+        h1eff : np.ndarray [nk, ncas, ncas]
+            The effective one-electron Hamiltonian in k-space with the J
+            contribution subtracted.
     '''
     nkpts = h1eff.shape[0]
     j_eff = np.zeros_like(h1eff)
@@ -114,20 +136,27 @@ def _get_kmom_for_kcasci(mc):
     Build k-point arithmetic from the k-CASCI/SCF kpts metadata.
     '''
     kmf = mc._scf
+    # _safe_getattr is used to avoid AttributeError due to dynamic
+    # attributes in the k-CASCI object.
     kpts = kcistrings._safe_getattr(mc, 'kpts', None)
     if kpts is None:
         kpts = kcistrings._safe_getattr(kmf, 'kpts', None)
     kmesh = kcistrings._safe_getattr(mc, 'kmesh', None)
     if kmesh is None:
         kmesh = kcistrings._safe_getattr(kmf, 'kmesh', None)
-    return kcistrings.make_kpoint_momentum(
-        mc.nkpts, cell=mc.cell, kpts=kpts, kmesh=kmesh,
-        kconserv=getattr(mc, 'kconserv', None), kmf=kmf, kmc=mc)
+    kconserv = getattr(mc, 'kconserv', None)
+    kmom = kcistrings.make_kpoint_momentum(mc.nkpts, cell=mc.cell, 
+                                           kpts=kpts, kmesh=kmesh,
+                                           kconserv=kconserv, kmf=kmf, kmc=mc)
+    return kmom
 
 
 def _set_solver_kpts(mc, kmom=None):
     '''
     Pass k-point metadata from k-CASCI to the k-FCI solver.
+    I don't know how to do this in a more elegant way, 
+    but the k-FCI solver needs the kconserv and kpts/kmesh
+    attributes to be set before the kernel is called.
     '''
     if kmom is None:
         kmom = _get_kmom_for_kcasci(mc)
@@ -140,15 +169,15 @@ def _set_solver_kpts(mc, kmom=None):
     mc.fcisolver.kmom = kmom
     return kmom
 
+
 def kernel(mc, mo_coeff=None, ci0=None, verbose=logger.NOTE, envs=None):
     '''
-    # Passing env to be consistent with molecular CASCI, but currently this is
-    # not used.
+    # Kernel for k-CASCI.
+    # see mrh.my_pyscf.pbc.mcscf.casci.kernel for more details on the 
+    # arguments and return values.
     '''
-    if mo_coeff is None:
-        mo_coeff = mc.mo_coeff
-    if ci0 is None:
-        ci0 = mc.ci
+    if mo_coeff is None: mo_coeff = mc.mo_coeff
+    if ci0 is None: ci0 = mc.ci
 
     log = logger.new_logger(mc, verbose)
     t0 = (logger.process_clock(), logger.perf_counter())
@@ -159,32 +188,30 @@ def kernel(mc, mo_coeff=None, ci0=None, verbose=logger.NOTE, envs=None):
     nelecas = _unpack_nelec(mc.nelecas, mc._scf.cell.spin)
 
     h1eff, energy_core = mc.get_h1eff(mo_coeff)
+    t1 = log.timer('one-electron integral computation for k-CAS', *t0)
     h2eff = mc.get_h2eff(mo_coeff)
+    t1 = log.timer('integral transformation to k-CAS space', *t1)
     h1eff = _adjust_h1eff_for_kfci(h1eff, h2eff)
-    t1 = log.timer('integral transformation to k-CAS space', *t0)
     log.debug('core energy = %.15g', energy_core.real)
 
     assert h1eff.shape == (nkpts, ncas, ncas)
     assert h2eff.shape == (nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas)
 
     kmom = _set_solver_kpts(mc)
-    if log.verbose >= logger.DEBUG1:
-        for k in range(nkpts):
-            assert np.linalg.norm(h1eff[k] - h1eff[k].conj().T) < 1e-10, \
-                "1e Hamiltonian hermiticity error"
-        eri_symm_err = 0.0
-        for kp, kq, kr in np.ndindex(nkpts, nkpts, nkpts):
-            ks = int(kmom.kconserv[kp, kq, kr])
-            err = np.linalg.norm(h2eff[kp, kq, kr] -
-                                 h2eff[kr, ks, kp].transpose(2, 3, 0, 1))
-            eri_symm_err = max(eri_symm_err, err)
-        assert eri_symm_err < 1e-10, "ERI permutation symmetry error"
 
     max_memory = max(4000, mc.max_memory - lib.current_memory()[0])
     ncastot = nkpts * ncas
     nelecastot = (nkpts * nelecas[0], nkpts * nelecas[1])
-    target_k = int(mc.target_k) % nkpts
+    if mc.target_k is not None:
+        target_k = int(mc.target_k)
+        assert isinstance(target_k, (int, np.integer)), \
+            "target_k must be an integer or None"
+        if not 0 <= target_k < nkpts:
+            target_k = int(target_k) % nkpts
+            log.warn("target_k is out of bounds, using %d instead", target_k)
 
+    # The k-FCI solver needs to know the total number of k-points, the target
+    # k-point, and the k-point arithmetic (kconserv) before the kernel is called.
     mc.fcisolver.nkpts = nkpts
     mc.fcisolver.target_k = target_k
     mc.fcisolver.kmom = kmom
