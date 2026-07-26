@@ -77,8 +77,21 @@ class KnownValues(unittest.TestCase):
         self.assertEqual([b['target_k'] for b in bands], [0, 1])
         self.assertIn('hole_momentum', bands[0])
         self.assertTrue(np.allclose(bands[1]['hole_momentum'], kpts[1]))
-        self.assertAlmostEqual(bands[0]['energy'], 0.8)
-        self.assertAlmostEqual(bands[1]['energy'], 1.0)
+        self.assertAlmostEqual(bands[0]['energy'], -0.8)
+        self.assertAlmostEqual(bands[1]['energy'], -1.0)
+
+        particle_results = [
+            {'target_k': 0, 'charge': -1, 'nkpts': 2,
+             'e_tot': np.asarray([-1.1, -0.9])},
+            {'target_k': 1, 'charge': -1, 'nkpts': 2,
+             'e_tot': np.asarray([-1.0, -0.8])},
+        ]
+        particle_bands = kcasci.charged_band_energies(
+            particle_results, reference_energy=-1.2, root=1, kpts=kpts)
+
+        self.assertIn('particle_momentum', particle_bands[0])
+        self.assertAlmostEqual(particle_bands[0]['energy'], 0.6)
+        self.assertAlmostEqual(particle_bands[1]['energy'], 0.8)
 
     def test_kcasci_target_k0_vs_casci(self):
         intraH = 0.74

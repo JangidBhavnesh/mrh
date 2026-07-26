@@ -217,9 +217,10 @@ def charged_band_energies(charged_results, reference_energy, charge=None,
     Convert charged-sector KCASCI energies into hole/particle band energies.
 
     reference_energy should use the same per-cell convention as KCASCI.kernel.
-    By default the returned band energy is the supercell energy difference,
-    nkpts * (E_charged - E_reference).  Set per_cell=True to keep the KCASCI
-    per-cell convention.
+    By default the returned band energy follows the Green's-function pole
+    convention in the supercell: nkpts * (E_reference - E_charged) for holes
+    and nkpts * (E_charged - E_reference) for particles.  Set per_cell=True
+    to keep the KCASCI per-cell convention.
     '''
     if hasattr(charged_results, 'charged_results'):
         mc = charged_results
@@ -239,6 +240,7 @@ def charged_band_energies(charged_results, reference_energy, charge=None,
     if int(charge) == 0:
         raise ValueError("charged band energies require a nonzero charge")
     kind = 'hole' if int(charge) > 0 else 'particle'
+    energy_sign = -1 if kind == 'hole' else 1
     momentum_key = f'{kind}_momentum'
 
     bands = []
@@ -258,7 +260,7 @@ def charged_band_energies(charged_results, reference_energy, charge=None,
         bands.append({
             'target_k': target_k,
             momentum_key: momentum,
-            'energy': scale * (e_charged - e_ref),
+            'energy': scale * energy_sign * (e_charged - e_ref),
             'root': int(root),
             'charge': int(charge),
             'kind': kind,
