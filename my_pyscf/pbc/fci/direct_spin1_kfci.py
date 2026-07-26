@@ -289,7 +289,7 @@ def contract_1e_k_py(h1e, fcivec, norb, nelec, nkpts, kindx, link_index=None):
 
     return sigma_ci
 
-def _contract_1e_k_lib(h1e, fcivec, norb, nelec, nkpts, kindx,
+def contract_1e_k(h1e, fcivec, norb, nelec, nkpts, kindx,
                        link_index=None, contract_map=None, plan=None):
     '''
     C implementation of contract_1e_k using structural k-sector contraction
@@ -361,19 +361,6 @@ def _contract_1e_k_lib(h1e, fcivec, norb, nelec, nkpts, kindx,
         )
     return sigma_ci
 
-
-def contract_1e_k(h1e, fcivec, norb, nelec, nkpts, kindx,
-                  link_index=None, contract_map=None, plan=None):
-    '''
-    C implementation of contract_1e_k using structural k-sector contraction
-    maps.  The result is returned as complex128 to match the C kernel.
-    '''
-    return _contract_1e_k_lib(
-        h1e, fcivec, norb, nelec, nkpts, kindx,
-        link_index=link_index, contract_map=contract_map, plan=plan,
-    )
-
-
 def _get_ci_sectors(fcivec, blocks, nkpts):
     '''
     Extract blocked CI vectors from a full CI vector based on k-sector information.
@@ -384,87 +371,6 @@ def _get_ci_sectors(fcivec, blocks, nkpts):
         ka, kb, nstra, nstrb, offset, size = map(int, blk)
         ci_blocks[ka][kb] = fcivec[offset:offset + size].reshape(nstra, nstrb)
     return ci_blocks
-
-
-def contract_2e_k(eri, fcivec, norb, nelec, nkpts, target_k,
-                  link_index=None, contract_map=None, plan=None):
-    '''
-    C implementation of contract_2e_k using structural k-sector contraction maps.
-    The alpha-alpha and beta-beta same-spin contractions are applied with zgemm
-    and the alpha-beta terms are packed into sparse source/destination block groups.
-    OpenMP threads follow pbc_k_contract_2e_threads/pbc_contract_2e_threads.
-    args:
-        eri : ndarray, shape (nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas)
-            Two-electron integrals in k-space, in chemist notation.
-        fcivec : ndarray, shape (sector_size,)
-            k-FCI vector in the target total momentum sector.
-        norb : int
-            Total number of orbitals.
-        nelec : tuple of 2 ints
-            Number of alpha and beta electrons.
-        nkpts : int
-            Number of k-points / momentum sectors.
-        target_k : int
-            Target total momentum sector for the output sigma vector.
-        link_index : tuple of 2 ndarrays or None
-            Look up tables/link index for alpha and beta strings.
-            If None, it will be generated on the fly.
-        contract_map : KFCIContractMap or None
-            Precomputed contraction map. If None, a new one will be created.
-        plan : optional
-            Additional plan or configuration for contraction.
-    returns:
-        sigma_ci : ndarray, shape (sector_size,)
-            Result of the Hamiltonian-vector product in the target momentum sector.
-    '''
-    nkpts = int(nkpts)
-    ncas = int(norb) // nkpts
-    assert ncas * nkpts == int(norb)
-
-    contract_map = _as_contract_map(
-        norb, nelec, nkpts, target_k, link_index=link_index,
-        contract_map=contract_map, plan=plan)
-    assert fcivec.size == contract_map.sector_size
-
-    eri = np.asarray(eri, dtype=np.complex128, order="C")
-    fcivec = np.asarray(fcivec, dtype=np.complex128, order="C")
-    sigma_ci = np.zeros(fcivec.shape, dtype=np.complex128, order="C")
-
-    assert eri.shape == (nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas)
-
-    libpbcfci = _load_k_contract_lib()
-    kernel = libpbcfci.FCIcontract_2e_k
-    with lib.with_omp_threads(contract_2e_threads):
-        kernel(
-            eri.ctypes.data_as(ctypes.c_void_p),
-            fcivec.ctypes.data_as(ctypes.c_void_p),
-            sigma_ci.ctypes.data_as(ctypes.c_void_p),
-            ctypes.c_int(nkpts),
-            ctypes.c_int(ncas),
-            ctypes.c_int(contract_map.blocks.shape[0]),
-            contract_map.blocks.ctypes.data_as(ctypes.c_void_p),
-            contract_map.ab_group_tab.ctypes.data_as(ctypes.c_void_p),
-            contract_map.ab_group_offsets.ctypes.data_as(ctypes.c_void_p),
-            contract_map.ab_src_addr.ctypes.data_as(ctypes.c_void_p),
-            contract_map.ab_dst_addr.ctypes.data_as(ctypes.c_void_p),
-            contract_map.ab_sign.ctypes.data_as(ctypes.c_void_p),
-            contract_map.ab_eri_idx_ab.ctypes.data_as(ctypes.c_void_p),
-            contract_map.ab_eri_idx_ba.ctypes.data_as(ctypes.c_void_p),
-            ctypes.c_int(contract_map.ab_src_addr.size),
-            contract_map.aa_group_tab.ctypes.data_as(ctypes.c_void_p),
-            contract_map.aa_group_offsets.ctypes.data_as(ctypes.c_void_p),
-            contract_map.aa_src_addr.ctypes.data_as(ctypes.c_void_p),
-            contract_map.aa_dst_addr.ctypes.data_as(ctypes.c_void_p),
-            contract_map.aa_sign.ctypes.data_as(ctypes.c_void_p),
-            contract_map.aa_eri_idx.ctypes.data_as(ctypes.c_void_p),
-            contract_map.bb_group_tab.ctypes.data_as(ctypes.c_void_p),
-            contract_map.bb_group_offsets.ctypes.data_as(ctypes.c_void_p),
-            contract_map.bb_src_addr.ctypes.data_as(ctypes.c_void_p),
-            contract_map.bb_dst_addr.ctypes.data_as(ctypes.c_void_p),
-            contract_map.bb_sign.ctypes.data_as(ctypes.c_void_p),
-            contract_map.bb_eri_idx.ctypes.data_as(ctypes.c_void_p),
-        )
-    return sigma_ci
 
 def contract_2e_k_py(eri, fcivec, norb, nelec, nkpts, target_k,
                      link_index=None):
@@ -551,6 +457,86 @@ def contract_2e_k_py(eri, fcivec, norb, nelec, nkpts, target_k,
         kfci_helper.contract_bb_pairs(eri, ci0_blocks, ci1_blocks,
                                       bb_pairs, ka, kb)
 
+    return sigma_ci
+
+def contract_2e_k(eri, fcivec, norb, nelec, nkpts, target_k,
+                  link_index=None, contract_map=None, plan=None):
+    '''
+    C implementation of contract_2e_k using structural k-sector contraction maps.
+    The alpha-alpha and beta-beta same-spin contractions are applied with zgemm
+    and the alpha-beta terms are packed into sparse source/destination block groups.
+    OpenMP threads follow pbc_k_contract_2e_threads/pbc_contract_2e_threads.
+    args:
+        eri : ndarray, shape (nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas)
+            Two-electron integrals in k-space, in chemist notation.
+        fcivec : ndarray, shape (sector_size,)
+            k-FCI vector in the target total momentum sector.
+        norb : int
+            Total number of orbitals.
+        nelec : tuple of 2 ints
+            Number of alpha and beta electrons.
+        nkpts : int
+            Number of k-points / momentum sectors.
+        target_k : int
+            Target total momentum sector for the output sigma vector.
+        link_index : tuple of 2 ndarrays or None
+            Look up tables/link index for alpha and beta strings.
+            If None, it will be generated on the fly.
+        contract_map : KFCIContractMap or None
+            Precomputed contraction map. If None, a new one will be created.
+        plan : optional
+            Additional plan or configuration for contraction.
+    returns:
+        sigma_ci : ndarray, shape (sector_size,)
+            Result of the Hamiltonian-vector product in the target momentum sector.
+    '''
+    nkpts = int(nkpts)
+    ncas = int(norb) // nkpts
+    assert ncas * nkpts == int(norb)
+
+    contract_map = _as_contract_map(
+        norb, nelec, nkpts, target_k, link_index=link_index,
+        contract_map=contract_map, plan=plan)
+    assert fcivec.size == contract_map.sector_size
+
+    eri = np.asarray(eri, dtype=np.complex128, order="C")
+    fcivec = np.asarray(fcivec, dtype=np.complex128, order="C")
+    sigma_ci = np.zeros(fcivec.shape, dtype=np.complex128, order="C")
+
+    assert eri.shape == (nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas)
+
+    libpbcfci = _load_k_contract_lib()
+    kernel = libpbcfci.FCIcontract_2e_k
+    with lib.with_omp_threads(contract_2e_threads):
+        kernel(
+            eri.ctypes.data_as(ctypes.c_void_p),
+            fcivec.ctypes.data_as(ctypes.c_void_p),
+            sigma_ci.ctypes.data_as(ctypes.c_void_p),
+            ctypes.c_int(nkpts),
+            ctypes.c_int(ncas),
+            ctypes.c_int(contract_map.blocks.shape[0]),
+            contract_map.blocks.ctypes.data_as(ctypes.c_void_p),
+            contract_map.ab_group_tab.ctypes.data_as(ctypes.c_void_p),
+            contract_map.ab_group_offsets.ctypes.data_as(ctypes.c_void_p),
+            contract_map.ab_src_addr.ctypes.data_as(ctypes.c_void_p),
+            contract_map.ab_dst_addr.ctypes.data_as(ctypes.c_void_p),
+            contract_map.ab_sign.ctypes.data_as(ctypes.c_void_p),
+            contract_map.ab_eri_idx_ab.ctypes.data_as(ctypes.c_void_p),
+            contract_map.ab_eri_idx_ba.ctypes.data_as(ctypes.c_void_p),
+            ctypes.c_int(contract_map.ab_src_addr.size),
+            contract_map.aa_group_tab.ctypes.data_as(ctypes.c_void_p),
+            contract_map.aa_group_offsets.ctypes.data_as(ctypes.c_void_p),
+            contract_map.aa_src_addr.ctypes.data_as(ctypes.c_void_p),
+            contract_map.aa_dst_addr.ctypes.data_as(ctypes.c_void_p),
+            contract_map.aa_sign.ctypes.data_as(ctypes.c_void_p),
+            contract_map.aa_eri_idx.ctypes.data_as(ctypes.c_void_p),
+            contract_map.bb_group_tab.ctypes.data_as(ctypes.c_void_p),
+            contract_map.bb_group_offsets.ctypes.data_as(ctypes.c_void_p),
+            contract_map.bb_src_addr.ctypes.data_as(ctypes.c_void_p),
+            contract_map.bb_dst_addr.ctypes.data_as(ctypes.c_void_p),
+            contract_map.bb_sign.ctypes.data_as(ctypes.c_void_p),
+            contract_map.bb_eri_idx.ctypes.data_as(ctypes.c_void_p),
+        )
     return sigma_ci
 
 def sector_size(norb, nelec, nkpts, target_k=0, link_index=None):
@@ -707,18 +693,12 @@ def make_rdm1s(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
 
 def make_rdm1(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
               spin=None):
-    '''
-    Python implementation of spin-summed 1-RDM for a k-FCI vector.
-    '''
     return krdm_helper.make_rdm1(fcivec, norb, nelec, nkpts,
                                  target_k=target_k,
                                  link_index=link_index, spin=spin)
 
 def make_rdm12s(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
                 reorder=True, spin=None):
-    '''
-    Python implementation of spin-separated 1-RDMs and 2-RDMs for a k-FCI vector.
-    '''
     return krdm_helper.make_rdm12s(fcivec, norb, nelec, nkpts,
                                    target_k=target_k,
                                    link_index=link_index,
@@ -726,9 +706,6 @@ def make_rdm12s(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
 
 def make_rdm12(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
                reorder=True, spin=None):
-    '''
-    Python implementation of spin-summed 1-RDM and 2-RDM for a k-FCI vector.
-    '''
     return krdm_helper.make_rdm12(fcivec, norb, nelec, nkpts,
                                   target_k=target_k,
                                   link_index=link_index,
@@ -736,8 +713,10 @@ def make_rdm12(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
 
 def contract_ss(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
                 spin=None):
-    '''
+    r'''
     Apply S^2 to a k-FCI vector in a fixed total momentum sector.
+    ``` \psi' = S^2 \psi ```
+    
     '''
     return krdm_helper.contract_ss(fcivec, norb, nelec, nkpts,
                                    target_k=target_k,
