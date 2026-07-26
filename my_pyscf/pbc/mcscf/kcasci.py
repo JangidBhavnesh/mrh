@@ -229,18 +229,21 @@ def kernel(mc, mo_coeff=None, ci0=None, verbose=logger.NOTE, envs=None):
     return e_tot, e_cas, fcivec
 
 
-def charged_active_nelecas(ncas, nkpts, nelecas, cell_spin, charge=0,
+def _get_nelecas_for_charged_kcasci(ncas, nkpts, nelecas, cell_spin, charge=0,
                            spin=None):
     '''
     Return the total k-FCI active electron tuple for a charged supercell.
-
     Positive charge removes active electrons and negative charge adds them.
     If spin is omitted, the lowest valid Ms sector is used for the charged
     electron count.
     '''
+    # I am keeping this check: I don't know what would it looks like to have 
+    # doubly charged k-CASCI.
+    assert -1<=charge<=1,\
+          "Only single-electron charged k-CASCI is supported" 
     nelecas = _unpack_nelec(nelecas, cell_spin)
-    neutral_nelec = nkpts * (nelecas[0] + nelecas[1])
-    nelec = neutral_nelec - int(charge)
+    nelec0 = nkpts * (nelecas[0] + nelecas[1])
+    nelec = nelec0 - int(charge)
     norb = nkpts * int(ncas)
     if spin is None:
         spin = nelec % 2
@@ -268,34 +271,43 @@ def _select_root_energy(energy, root=0):
     return e[int(root)].item()
 
 
-def charged_band_energies(charged_results, reference_energy, charge=None,
+def compute_band_energies(charged_results, reference_energy, charge=None,
                           root=0, kpts=None, nkpts=None, per_cell=False):
     '''
     Convert charged-sector KCASCI energies into hole/particle band energies.
+    Note: here we are using the same per-cell convention as KCASCI.kernel.
+    IP = E(charged) - E(neutral)
+    EA = E(neutral) - E(charged)
 
-    reference_energy should use the same per-cell convention as KCASCI.kernel.
-    By default the returned band energy follows the Green's-function pole
-    convention in the supercell: nkpts * (E_reference - E_charged) for holes
-    and nkpts * (E_charged - E_reference) for particles.  Set per_cell=True
-    to keep the KCASCI per-cell convention.
+    args:
+        charged_results : list of dict
+            The output of charged_kernel for one or more target_k sectors.
+        reference_energy : float or list of float
+            The neutral KCASCI energy for the same active space.
+        charge: int +1 or -1
+            charge of the charged sector.
+            +1 means: hole
+            -1 means: particle
+        root : int
+            The root index of the charged sector to use for the band energy.
     '''
     if hasattr(charged_results, 'charged_results'):
+
         mc = charged_results
-        if charge is None:
-            charge = mc.charge
-        if nkpts is None:
-            nkpts = mc.nkpts
-        if kpts is None:
-            kpts = getattr(mc._scf, 'kpts', None)
+        if charge is None: charge = mc.charge
+        if nkpts is None: nkpts = mc.nkpts
+        if kpts is None: kpts = getattr(mc._scf, 'kpts', None)
+
         charged_results = mc.charged_results
 
     if charge is None:
         charged_results = list(charged_results)
-        if not charged_results:
-            return []
+        if not charged_results: return [] # Edge case: no charged results
         charge = charged_results[0].get('charge')
+
     if int(charge) == 0:
         raise ValueError("charged band energies require a nonzero charge")
+
     kind = 'hole' if int(charge) > 0 else 'particle'
     energy_sign = -1 if kind == 'hole' else 1
     momentum_key = f'{kind}_momentum'
@@ -314,8 +326,7 @@ def charged_band_energies(charged_results, reference_energy, charge=None,
             momentum = np.asarray(kpts[target_k]).copy()
         e_charged = _select_root_energy(result['e_tot'], root=root)
         e_ref = _select_root_energy(reference_energy, root=0)
-        bands.append({
-            'target_k': target_k,
+        bands.append({'target_k': target_k,
             momentum_key: momentum,
             'energy': scale * energy_sign * (e_charged - e_ref),
             'root': int(root),
@@ -367,7 +378,7 @@ def charged_kernel(mc, mo_coeff=None, ci0=None, verbose=logger.NOTE,
 
     max_memory = max(4000, mc.max_memory - lib.current_memory()[0])
     ncastot = nkpts * ncas
-    nelecastot = charged_active_nelecas(
+    nelecastot = _get_nelecas_for_charged_kcasci(
         ncas, nkpts, mc.nelecas, mc._scf.cell.spin,
         charge=charge, spin=charged_spin)
 
@@ -967,8 +978,8 @@ class ChargedPBCKCASCI(PBCKCASCI):
 
     def band_energies(self, reference_energy, root=0, kpts=None,
                       per_cell=False):
-        return charged_band_energies(
-            self, reference_energy, root=root, kpts=kpts, per_cell=per_cell)
+        return compute_band_energies(self, reference_energy, root=root, 
+                                     kpts=kpts, per_cell=per_cell)
 
     get_band_energy = band_energies
     band_energy = band_energies
