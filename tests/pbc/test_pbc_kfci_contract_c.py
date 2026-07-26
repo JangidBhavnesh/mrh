@@ -10,6 +10,7 @@ from mrh.my_pyscf.pbc.fci.direct_spin1_kfci import (
     make_kfci_contract_map,
     sector_size,
 )
+from mrh.my_pyscf.pbc.fci import direct_spin1_kfci
 from mrh.my_pyscf.pbc.fci.kcistrings import (
     _raise_if_contract_structure_too_large,
 )
@@ -132,6 +133,37 @@ class KnownValues(unittest.TestCase):
                 np.testing.assert_allclose(
                     sigma_c, sigma_ref, atol=1e-10, rtol=1e-10
                 )
+
+    def test_contract_2e_k_does_not_rebuild_streamed_map(self):
+        nkpts = 3
+        ncas = 2
+        nelec = (2, 1)
+        norb = nkpts * ncas
+        target_k = 1
+        rng = np.random.default_rng(41)
+        link_index = _unpack(norb, nelec, None, nkpts)
+        contract_map = make_kfci_contract_map(
+            norb, nelec, nkpts, target_k, link_index=link_index,
+            explicit_ab=False)
+        ci0 = rng.normal(size=contract_map.sector_size)
+        ci0 = ci0 + 1j * rng.normal(size=contract_map.sector_size)
+        ci0 = np.asarray(ci0, dtype=np.complex128, order="C")
+        eri = rng.normal(
+            size=(nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas)
+        )
+        eri = eri + 1j * rng.normal(size=eri.shape)
+
+        old_builder = direct_spin1_kfci.make_kfci_contract_map
+        try:
+            def fail_rebuild(*args, **kwargs):
+                raise AssertionError("contract_2e_k rebuilt the map")
+            direct_spin1_kfci.make_kfci_contract_map = fail_rebuild
+            contract_2e_k(
+                eri, ci0, norb, nelec, nkpts, target_k,
+                contract_map=contract_map,
+            )
+        finally:
+            direct_spin1_kfci.make_kfci_contract_map = old_builder
 
     def test_contract_map_auto_skips_large_ab_structure(self):
         nkpts = 8

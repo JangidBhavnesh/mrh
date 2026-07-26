@@ -613,7 +613,7 @@ def contract_2e_k(eri, fcivec, norb, nelec, nkpts, target_k,
     t0 = _timer_start()
     contract_map = _as_contract_map(
         norb, nelec, nkpts, target_k, link_index=link_index,
-        contract_map=contract_map, explicit_ab=True, log_obj=log_obj)
+        contract_map=contract_map, log_obj=log_obj)
     assert fcivec.size == contract_map.sector_size
     t0 = _timer_debug1(log_obj, "k-FCI contract_2e map setup", t0)
 
