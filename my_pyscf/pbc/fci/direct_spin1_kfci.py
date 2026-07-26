@@ -37,6 +37,22 @@ libpbcfci_k = None
 contract_2e_threads = getattr(__config__, "pbc_k_contract_2e_threads",
                               getattr(__config__, "pbc_contract_2e_threads", None))
 
+
+def _timer_start():
+    '''
+    Start a PySCF-style CPU/wall timer pair.
+    '''
+    return logger.process_clock(), logger.perf_counter()
+
+
+def _timer_debug1(obj, msg, t0):
+    '''
+    Emit a DEBUG1 timer message with the same logger API used in PySCF.
+    '''
+    log = logger.new_logger(obj)
+    return log.timer_debug1(msg, *t0)
+
+
 def _load_k_contract_lib():
     '''
     Load the C library for k-FCI Hamiltonian-vector product.
@@ -1017,20 +1033,27 @@ class FCISolver(direct_spin1.FCISolver):
                     target_k=None, link_index=None):
         if nkpts is None: nkpts = self.nkpts
         if target_k is None: target_k = self.target_k
-        return contract_1e_k(h1e, fcivec, norb, nelec, nkpts, target_k,
-                             link_index=link_index)
+        t0 = _timer_start()
+        ci1 = contract_1e_k(h1e, fcivec, norb, nelec, nkpts, target_k,
+                            link_index=link_index)
+        _timer_debug1(self, "k-FCI contract_1e", t0)
+        return ci1
 
     def contract_2e(self, eri, fcivec, norb, nelec, nkpts=None,
                     target_k=None, link_index=None):
         if nkpts is None: nkpts = self.nkpts
         if target_k is None: target_k = self.target_k
-        return contract_2e_k(eri, fcivec, norb, nelec, nkpts, target_k,
-                             link_index=link_index)
+        t0 = _timer_start()
+        ci1 = contract_2e_k(eri, fcivec, norb, nelec, nkpts, target_k,
+                            link_index=link_index)
+        _timer_debug1(self, "k-FCI contract_2e", t0)
+        return ci1
 
     def contract_ham(self, h1e, eri, fcivec, norb, nelec, nkpts=None,
                      target_k=None, link_index=None):
         if nkpts is None: nkpts = self.nkpts
         if target_k is None: target_k = self.target_k
+        t0 = _timer_start()
         link_index = _unpack(norb, nelec, link_index, nkpts, spin=self.spin)
         ci1 = self.contract_1e(h1e, fcivec, norb, nelec,
                                nkpts=nkpts, target_k=target_k,
@@ -1038,81 +1061,109 @@ class FCISolver(direct_spin1.FCISolver):
         ci1 += self.contract_2e(eri, fcivec, norb, nelec,
                                 nkpts=nkpts, target_k=target_k,
                                 link_index=link_index)
+        _timer_debug1(self, "k-FCI contract_ham", t0)
         return ci1
 
     def make_hdiag(self, h1e, eri, norb, nelec, nkpts=None, target_k=None,
                    link_index=None, compress=False):
         if nkpts is None: nkpts = self.nkpts
         if target_k is None: target_k = self.target_k
+        t0 = _timer_start()
         nelec = _unpack_nelec(nelec, self.spin)
-        return make_hdiag(h1e, eri, norb, nelec, nkpts, target_k,
-                          link_index=link_index)
+        hdiag = make_hdiag(h1e, eri, norb, nelec, nkpts, target_k,
+                           link_index=link_index)
+        _timer_debug1(self, "k-FCI make_hdiag", t0)
+        return hdiag
 
     def make_hamiltonian(self, h1e, eri, norb, nelec, nkpts=None,
                          target_k=None, link_index=None):
         if nkpts is None: nkpts = self.nkpts
         if target_k is None: target_k = self.target_k
+        t0 = _timer_start()
         nelec = _unpack_nelec(nelec, self.spin)
-        return make_hamiltonian_k(h1e, eri, norb, nelec, nkpts, target_k,
+        hmat = make_hamiltonian_k(h1e, eri, norb, nelec, nkpts, target_k,
                                   link_index=link_index)
+        _timer_debug1(self, "k-FCI make_hamiltonian", t0)
+        return hmat
 
     def energy(self, h1e, eri, fcivec, norb, nelec, nkpts=None,
                target_k=None, link_index=None):
         if nkpts is None: nkpts = self.nkpts
         if target_k is None: target_k = self.target_k
+        t0 = _timer_start()
         nelec = _unpack_nelec(nelec, self.spin)
-        return energy(h1e, eri, fcivec, norb, nelec, nkpts, target_k,
-                      link_index=link_index)
+        e = energy(h1e, eri, fcivec, norb, nelec, nkpts, target_k,
+                   link_index=link_index)
+        _timer_debug1(self, "k-FCI energy", t0)
+        return e
 
     def make_rdm1s(self, fcivec, norb, nelec, nkpts=None, target_k=None,
                    link_index=None):
         if nkpts is None: nkpts = self.nkpts
         if target_k is None: target_k = self.target_k
+        t0 = _timer_start()
         nelec = _unpack_nelec(nelec, self.spin)
-        return make_rdm1s(fcivec, norb, nelec, nkpts=nkpts,
-                          target_k=target_k, link_index=link_index)
+        rdm1s = make_rdm1s(fcivec, norb, nelec, nkpts=nkpts,
+                           target_k=target_k, link_index=link_index)
+        _timer_debug1(self, "k-FCI make_rdm1s", t0)
+        return rdm1s
 
     def make_rdm1(self, fcivec, norb, nelec, nkpts=None, target_k=None,
                   link_index=None):
         if nkpts is None: nkpts = self.nkpts
         if target_k is None: target_k = self.target_k
+        t0 = _timer_start()
         nelec = _unpack_nelec(nelec, self.spin)
-        return make_rdm1(fcivec, norb, nelec, nkpts=nkpts,
+        rdm1 = make_rdm1(fcivec, norb, nelec, nkpts=nkpts,
                          target_k=target_k, link_index=link_index)
+        _timer_debug1(self, "k-FCI make_rdm1", t0)
+        return rdm1
 
     def make_rdm12s(self, fcivec, norb, nelec, nkpts=None, target_k=None,
                     link_index=None, reorder=True):
         if nkpts is None: nkpts = self.nkpts
         if target_k is None: target_k = self.target_k
+        t0 = _timer_start()
         nelec = _unpack_nelec(nelec, self.spin)
-        return make_rdm12s(fcivec, norb, nelec, nkpts=nkpts,
-                           target_k=target_k, link_index=link_index,
-                           reorder=reorder)
+        rdm12s = make_rdm12s(fcivec, norb, nelec, nkpts=nkpts,
+                             target_k=target_k, link_index=link_index,
+                             reorder=reorder)
+        _timer_debug1(self, "k-FCI make_rdm12s", t0)
+        return rdm12s
 
     def make_rdm12(self, fcivec, norb, nelec, nkpts=None, target_k=None,
                    link_index=None, reorder=True):
         if nkpts is None: nkpts = self.nkpts
         if target_k is None: target_k = self.target_k
+        t0 = _timer_start()
         nelec = _unpack_nelec(nelec, self.spin)
-        return make_rdm12(fcivec, norb, nelec, nkpts=nkpts,
-                          target_k=target_k, link_index=link_index,
-                          reorder=reorder)
+        rdm12 = make_rdm12(fcivec, norb, nelec, nkpts=nkpts,
+                           target_k=target_k, link_index=link_index,
+                           reorder=reorder)
+        _timer_debug1(self, "k-FCI make_rdm12", t0)
+        return rdm12
 
     def contract_ss(self, fcivec, norb, nelec, nkpts=None, target_k=None,
                     link_index=None):
         if nkpts is None: nkpts = self.nkpts
         if target_k is None: target_k = self.target_k
+        t0 = _timer_start()
         nelec = _unpack_nelec(nelec, self.spin)
-        return contract_ss(fcivec, norb, nelec, nkpts, target_k,
-                           link_index=link_index, spin=self.spin)
+        ci1 = contract_ss(fcivec, norb, nelec, nkpts, target_k,
+                          link_index=link_index, spin=self.spin)
+        _timer_debug1(self, "k-FCI contract_ss", t0)
+        return ci1
 
     def spin_square(self, fcivec, norb, nelec, nkpts=None, target_k=None,
                     link_index=None, **kwargs):
         if nkpts is None: nkpts = self.nkpts
         if target_k is None: target_k = self.target_k
+        t0 = _timer_start()
         nelec = _unpack_nelec(nelec, self.spin)
-        return spin_square(fcivec, norb, nelec, nkpts, target_k,
-                           link_index=link_index, spin=self.spin, **kwargs)
+        ss = spin_square(fcivec, norb, nelec, nkpts, target_k,
+                         link_index=link_index, spin=self.spin, **kwargs)
+        _timer_debug1(self, "k-FCI spin_square", t0)
+        return ss
 
     def make_precond(self, hdiag, pspaceig=None, pspaceci=None, addr=None):
         return make_diag_precond(hdiag, pspaceig, pspaceci, addr,
