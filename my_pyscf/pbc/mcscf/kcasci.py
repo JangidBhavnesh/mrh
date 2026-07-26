@@ -275,8 +275,15 @@ def compute_band_energies(charged_results, reference_energy, charge=None,
                           root=0, kpts=None, nkpts=None, per_cell=False,
                           reference_target_k=None, kmom=None, cell=None,
                           kconserv=None):
-    '''
+    r'''
     Convert charged-sector KCASCI energies into quasiparticle band energies.
+        [
+        \epsilon_\text{hole}(k)=E_N-E_{N-1}=-\mathrm{IP}
+        ]
+
+        [
+        \epsilon_\text{particle}(k)=E_{N+1}-E_N=-\mathrm{EA}
+        ]
 
     The returned removal (hole) pole is E(N) - E(N-1) = -IP, while the
     addition (particle) pole is E(N+1) - E(N) = -EA.  The charged KCASCI
