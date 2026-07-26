@@ -388,6 +388,33 @@ def _casdm1_for_kcasci(mc, ci, stav_dm1=False):
     return mc.fcisolver.make_rdm1(ci, nkpts * ncas, nelecastot)
 
 
+def _make_rdm1_ao(mc, mo_coeff, ci, ncas, ncore, nelecas, target_k):
+    '''
+    Transform a k-FCI active-space 1-RDM to the AO basis at each k-point.
+    '''
+    nkpts = mc.nkpts
+    ncastot = nkpts * ncas
+    casdm1 = mc.fcisolver.make_rdm1(
+        ci, ncastot, nelecas, nkpts=nkpts, target_k=target_k)
+    casdm1 = np.asarray(casdm1)
+    if casdm1.shape != (ncastot, ncastot):
+        raise ValueError(
+            f'Expected an active-space 1-RDM with shape '
+            f'{(ncastot, ncastot)}, got {casdm1.shape}')
+
+    nao = mo_coeff[0].shape[0]
+    dtype = np.result_type(casdm1, *[mo.dtype for mo in mo_coeff])
+    dm1 = np.empty((nkpts, nao, nao), dtype=dtype)
+    for k in range(nkpts):
+        mocore = mo_coeff[k][:, :ncore]
+        mocas = mo_coeff[k][:, ncore:ncore + ncas]
+        p0 = k * ncas
+        p1 = p0 + ncas
+        dm1[k] = 2.0 * mocore @ mocore.conj().T
+        dm1[k] += mocas @ casdm1[p0:p1, p0:p1] @ mocas.conj().T
+    return dm1
+
+
 def get_fock(mc, mo_coeff=None, ci=None, eris=None, casdm1=None,
              verbose=None):
     '''
@@ -567,6 +594,33 @@ class PBCKCASCI(casci.PBCCASCI):
         h1eff, h2eff, ecore = self.get_h1e_h2e(mo_coeff=mo_coeff)
         return h2eff
 
+    def make_rdm1(self, mo_coeff=None, ci=None, ncas=None, nelecas=None,
+                  ncore=None, **kwargs):
+        '''
+        Spin-summed one-particle density matrix in the AO basis at each
+        k-point.
+
+        Unlike PBC CASCI, KCASCI already uses a k-orbital active-space basis,
+        so no Wannier MO-phase transformation is applied.
+        '''
+        if mo_coeff is None:
+            mo_coeff = self.mo_coeff
+        if ci is None:
+            ci = self.ci
+        if ncas is None:
+            ncas = self.ncas
+        if nelecas is None:
+            nelecas = self.nelecas
+        if ncore is None:
+            ncore = self.ncore
+
+        nelecas = _unpack_nelec(nelecas, self.cell.spin)
+        nelecastot = (self.nkpts * nelecas[0],
+                      self.nkpts * nelecas[1])
+        target_k = int(self.target_k) % self.nkpts
+        return _make_rdm1_ao(
+            self, mo_coeff, ci, ncas, ncore, nelecastot, target_k)
+
     get_fock = get_fock
     canonicalize = canonicalize
 
@@ -722,6 +776,55 @@ class ChargedPBCKCASCI(PBCKCASCI):
         if target_k is None:
             return list(range(self.nkpts))
         return [int(target_k) % self.nkpts]
+
+    def make_rdm1(self, mo_coeff=None, ci=None, ncas=None, nelecas=None,
+                  ncore=None, target_k=None, **kwargs):
+        '''
+        Spin-summed one-particle density matrix in the AO basis for one
+        charged total-momentum sector.
+
+        target_k selects a result in charged_results when CI is not supplied.
+        nelecas is the total charged active-electron tuple.
+        '''
+        if mo_coeff is None:
+            mo_coeff = self.mo_coeff
+        if ncas is None:
+            ncas = self.ncas
+        if ncore is None:
+            ncore = self.ncore
+
+        if target_k is None:
+            if self.target_k is not None:
+                target_k = self.target_k
+            elif len(self.charged_results) == 1:
+                target_k = self.charged_results[0]['target_k']
+            else:
+                raise ValueError(
+                    'target_k is required when multiple charged KCASCI '
+                    'sectors are available')
+        target_k = int(target_k) % self.nkpts
+
+        result = next(
+            (result for result in self.charged_results
+             if int(result['target_k']) % self.nkpts == target_k),
+            None)
+        if ci is None:
+            if result is None:
+                raise ValueError(
+                    f'No charged KCASCI result is available for '
+                    f'target_k={target_k}')
+            ci = result['ci']
+        if nelecas is None:
+            if result is not None:
+                nelecas = result['nelecastot']
+            else:
+                nelecas = self.charged_nelecastot
+        if nelecas is None:
+            raise ValueError('The charged active-electron count is not set')
+        nelecas = tuple(nelecas)
+
+        return _make_rdm1_ao(
+            self, mo_coeff, ci, ncas, ncore, nelecas, target_k)
 
     get_fock = get_fock
 
