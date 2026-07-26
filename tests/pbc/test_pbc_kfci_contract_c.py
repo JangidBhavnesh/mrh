@@ -97,6 +97,58 @@ class KnownValues(unittest.TestCase):
 
         np.testing.assert_allclose(sigma_4, sigma_1, atol=1e-10, rtol=1e-10)
 
+    def test_contract_2e_k_streamed_ab_matches_python_reference(self):
+        nkpts = 3
+        ncas = 2
+        nelec = (2, 1)
+        norb = nkpts * ncas
+        rng = np.random.default_rng(31)
+        link_index = _unpack(norb, nelec, None, nkpts)
+        eri = rng.normal(
+            size=(nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas)
+        )
+        eri = eri + 1j * rng.normal(size=eri.shape)
+
+        for target_k in range(nkpts):
+            with self.subTest(target_k=target_k):
+                contract_map = make_kfci_contract_map(
+                    norb, nelec, nkpts, target_k, link_index=link_index,
+                    explicit_ab=False)
+                self.assertFalse(contract_map.explicit_ab)
+                self.assertEqual(contract_map.ab_src_addr.size, 0)
+
+                ci0 = rng.normal(size=contract_map.sector_size)
+                ci0 = ci0 + 1j * rng.normal(size=contract_map.sector_size)
+                ci0 = np.asarray(ci0, dtype=np.complex128, order="C")
+
+                sigma_ref = contract_2e_k_py(
+                    eri, ci0, norb, nelec, nkpts, target_k,
+                    link_index=link_index,
+                )
+                sigma_c = contract_2e_k(
+                    eri, ci0, norb, nelec, nkpts, target_k,
+                    contract_map=contract_map,
+                )
+                np.testing.assert_allclose(
+                    sigma_c, sigma_ref, atol=1e-10, rtol=1e-10
+                )
+
+    def test_contract_map_auto_skips_large_ab_structure(self):
+        nkpts = 8
+        ncas = 2
+        norb = nkpts * ncas
+        nelec = (8, 8)
+        target_k = 0
+        link_index = _unpack(norb, nelec, None, nkpts)
+        contract_map = make_kfci_contract_map(
+            norb, nelec, nkpts, target_k, link_index=link_index,
+            explicit_ab="auto")
+
+        self.assertFalse(contract_map.explicit_ab)
+        self.assertEqual(contract_map.ab_src_addr.size, 0)
+        self.assertGreater(contract_map.aa_src_addr.size, 0)
+        self.assertGreater(contract_map.bb_src_addr.size, 0)
+
     def test_contract_structure_size_guard(self):
         max_int32 = np.iinfo(np.int32).max
         with self.assertRaisesRegex(MemoryError, "ab_entries"):
