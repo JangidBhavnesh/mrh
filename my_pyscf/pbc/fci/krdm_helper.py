@@ -138,8 +138,8 @@ def extract_ksector_ci_from_full(ci_full, norb, nelec, nkpts, target_k=0,
 
     return fcivec
 
-def make_rdm1s_py(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
-                  spin=None):
+def make_rdm1s(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
+               spin=None):
     '''
     Python implementation of spin-separated 1-RDMs for a k-FCI vector.
     The returned arrays follow the same convention as rdm_helper.make_rdm1s_py.
@@ -150,19 +150,19 @@ def make_rdm1s_py(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
     return rdm_helper.make_rdm1s_py(ci_full, norb, _unpack_nelec(nelec, spin),
                                     link_index=None)
 
-def make_rdm1_py(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
-                 spin=None):
+def make_rdm1(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
+              spin=None):
     '''
     Python implementation of spin-summed 1-RDM for a k-FCI vector.
     '''
-    rdm1a, rdm1b = make_rdm1s_py(fcivec, norb, nelec, nkpts,
-                                 target_k=target_k, link_index=link_index,
-                                 spin=spin)
+    rdm1a, rdm1b = make_rdm1s(fcivec, norb, nelec, nkpts,
+                              target_k=target_k, link_index=link_index,
+                              spin=spin)
     rdm1 = rdm1a + rdm1b
     return rdm1.conj().T
 
-def make_rdm12s_py(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
-                   reorder=True, spin=None):
+def make_rdm12s(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
+                reorder=True, spin=None):
     '''
     Python implementation of spin-separated 1-RDMs and 2-RDMs for a k-FCI vector.
     returns:
@@ -176,12 +176,12 @@ def make_rdm12s_py(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
                                      _unpack_nelec(nelec, spin),
                                      link_index=None, reorder=reorder)
 
-def make_rdm12_py(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
-                  reorder=True, spin=None):
+def make_rdm12(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
+               reorder=True, spin=None):
     '''
     Python implementation of spin-summed 1-RDM and 2-RDM for a k-FCI vector.
     '''
-    (dm1a, dm1b), (dm2aa, dm2ab, dm2bb) = make_rdm12s_py(
+    (dm1a, dm1b), (dm2aa, dm2ab, dm2bb) = make_rdm12s(
         fcivec, norb, nelec, nkpts, target_k=target_k,
         link_index=link_index, reorder=reorder, spin=spin)
     rdm1 = dm1a + dm1b
