@@ -100,7 +100,7 @@ def _load_k_contract_lib():
     return libpbcfci_k
 
 def _as_contract_map(norb, nelec, nkpts, target_k, link_index=None,
-                     contract_map=None, plan=None, need_pair_tables=False):
+                     contract_map=None, need_pair_tables=False):
     '''
     Helper function to ensure that a KFCIContractMap is available for the given
     k-FCI contraction. If a contract_map is provided, it checks for consistency
@@ -119,13 +119,9 @@ def _as_contract_map(norb, nelec, nkpts, target_k, link_index=None,
             If None, it will be generated on the fly.
         contract_map : KFCIContractMap or None
             Precomputed contraction map. If None, a new one will be created.
-        plan : optional
-            Additional plan or configuration for contraction.
         need_pair_tables : bool
             If True, ensures that pair tables are built in the contract_map.
     '''
-    if contract_map is None:
-        contract_map = plan
     if contract_map is None and isinstance(link_index, KFCIContractMap):
         contract_map = link_index
         link_index = None
@@ -290,7 +286,7 @@ def contract_1e_k_py(h1e, fcivec, norb, nelec, nkpts, kindx, link_index=None):
     return sigma_ci
 
 def contract_1e_k(h1e, fcivec, norb, nelec, nkpts, kindx,
-                       link_index=None, contract_map=None, plan=None):
+                  link_index=None, contract_map=None):
     '''
     C implementation of contract_1e_k using structural k-sector contraction
     maps.  The result is returned as complex128 to match the C kernel.
@@ -312,8 +308,6 @@ def contract_1e_k(h1e, fcivec, norb, nelec, nkpts, kindx,
             If None, it will be generated on the fly.
         contract_map : KFCIContractMap or None
             Precomputed contraction map. If None, a new one will be created.
-        plan : optional
-            Additional plan or configuration for contraction.
         need_pair_tables : bool
             If True, ensures that pair tables are built in the contract_map.
     returns:
@@ -326,7 +320,7 @@ def contract_1e_k(h1e, fcivec, norb, nelec, nkpts, kindx,
 
     contract_map = _as_contract_map(
         norb, nelec, nkpts, kindx, link_index=link_index,
-        contract_map=contract_map, plan=plan)
+        contract_map=contract_map)
     assert fcivec.size == contract_map.sector_size
 
     h1e = np.asarray(h1e, dtype=np.complex128, order="C")
@@ -460,7 +454,7 @@ def contract_2e_k_py(eri, fcivec, norb, nelec, nkpts, target_k,
     return sigma_ci
 
 def contract_2e_k(eri, fcivec, norb, nelec, nkpts, target_k,
-                  link_index=None, contract_map=None, plan=None):
+                  link_index=None, contract_map=None):
     '''
     C implementation of contract_2e_k using structural k-sector contraction maps.
     The alpha-alpha and beta-beta same-spin contractions are applied with zgemm
@@ -484,8 +478,6 @@ def contract_2e_k(eri, fcivec, norb, nelec, nkpts, target_k,
             If None, it will be generated on the fly.
         contract_map : KFCIContractMap or None
             Precomputed contraction map. If None, a new one will be created.
-        plan : optional
-            Additional plan or configuration for contraction.
     returns:
         sigma_ci : ndarray, shape (sector_size,)
             Result of the Hamiltonian-vector product in the target momentum sector.
@@ -496,7 +488,7 @@ def contract_2e_k(eri, fcivec, norb, nelec, nkpts, target_k,
 
     contract_map = _as_contract_map(
         norb, nelec, nkpts, target_k, link_index=link_index,
-        contract_map=contract_map, plan=plan)
+        contract_map=contract_map)
     assert fcivec.size == contract_map.sector_size
 
     eri = np.asarray(eri, dtype=np.complex128, order="C")
