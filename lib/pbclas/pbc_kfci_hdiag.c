@@ -9,6 +9,7 @@
 #include <complex.h>
 #include <omp.h>
 #include <stdlib.h>
+#include "vhf/fblas.h"
 
 #define BLOCK_KA      0
 #define BLOCK_KB      1
@@ -300,6 +301,93 @@ static void add_same_spin_hdiag(double complex *hdiag,
         }
 }
 
+static void add_ab_hdiag_scalar_block(double complex *hdiag,
+                                      double complex *eri,
+                                      int nkpts, int ncas,
+                                      int *blocks,
+                                      int iblk,
+                                      int *linka, int nlinka,
+                                      int *linkb, int nlinkb,
+                                      int *stra_ids,
+                                      int *stra_offsets,
+                                      int *strb_ids,
+                                      int *strb_offsets)
+{
+        int *blk = blocks + iblk * 6;
+        int ka = blk[BLOCK_KA];
+        int kb = blk[BLOCK_KB];
+        int na = blk[BLOCK_NA];
+        int nb = blk[BLOCK_NB];
+        int offset = blk[BLOCK_OFFSET];
+
+        for (int ia = 0; ia < na; ia++) {
+                int astr0 = stra_ids[stra_offsets[ka] + ia];
+
+                for (int ib = 0; ib < nb; ib++) {
+                        int bstr0 = strb_ids[strb_offsets[kb] + ib];
+                        double complex val = 0.0 + 0.0 * I;
+
+                        for (int ilinka = 0; ilinka < nlinka; ilinka++) {
+                                int *la = linka + (astr0 * nlinka + ilinka) *
+                                        NLINK_FIELDS;
+                                int signa = la[LINK_SIGN];
+                                if (signa == 0) {
+                                        break;
+                                }
+                                if (la[LINK_TARGET] != astr0 ||
+                                    mod_pos(la[LINK_DK], nkpts) != 0 ||
+                                    mod_pos(la[LINK_K_CRE], nkpts) !=
+                                    mod_pos(la[LINK_K_DES], nkpts)) {
+                                        continue;
+                                }
+
+                                for (int ilinkb = 0; ilinkb < nlinkb;
+                                     ilinkb++) {
+                                        int *lb = linkb + (bstr0 * nlinkb +
+                                                           ilinkb) *
+                                                NLINK_FIELDS;
+                                        int signb = lb[LINK_SIGN];
+                                        long long idx_ab;
+                                        long long idx_ba;
+
+                                        if (signb == 0) {
+                                                break;
+                                        }
+                                        if (lb[LINK_TARGET] != bstr0 ||
+                                            mod_pos(lb[LINK_DK], nkpts) != 0 ||
+                                            mod_pos(lb[LINK_K_CRE], nkpts) !=
+                                            mod_pos(lb[LINK_K_DES], nkpts)) {
+                                                continue;
+                                        }
+
+                                        idx_ab = eri_index_k(
+                                                la[LINK_K_CRE],
+                                                la[LINK_K_DES],
+                                                lb[LINK_K_CRE],
+                                                la[LINK_CRE] % ncas,
+                                                la[LINK_DES] % ncas,
+                                                lb[LINK_CRE] % ncas,
+                                                lb[LINK_DES] % ncas,
+                                                nkpts, ncas);
+                                        idx_ba = eri_index_k(
+                                                lb[LINK_K_CRE],
+                                                lb[LINK_K_DES],
+                                                la[LINK_K_CRE],
+                                                lb[LINK_CRE] % ncas,
+                                                lb[LINK_DES] % ncas,
+                                                la[LINK_CRE] % ncas,
+                                                la[LINK_DES] % ncas,
+                                                nkpts, ncas);
+                                        val += (double)(signa * signb) *
+                                                (eri[idx_ab] + eri[idx_ba]);
+                                }
+                        }
+
+                        hdiag[offset + ia * nb + ib] += val;
+                }
+        }
+}
+
 void FCIhdiag_k(double complex *hdiag,
                 double complex *h1e,
                 double complex *eri,
@@ -379,9 +467,47 @@ void FCIhdiag_k_stream_ab(double complex *hdiag,
                           int *stra_ids, int *stra_offsets,
                           int *strb_ids, int *strb_offsets)
 {
+        const char TRANS_N = 'N';
+        const char TRANS_T = 'T';
+        const double complex Z0 = 0.0 + 0.0 * I;
+        const double complex Z1 = 1.0 + 0.0 * I;
+        int norb = nkpts * ncas;
+        double complex *wmat = malloc(sizeof(double complex) *
+                                      (size_t)norb * norb);
+
+        if (wmat == NULL) {
 #pragma omp parallel for schedule(dynamic) default(none) \
         shared(hdiag, eri, nkpts, ncas, nblocks, blocks, linka, nlinka, \
                linkb, nlinkb, stra_ids, stra_offsets, strb_ids, strb_offsets)
+                for (int iblk = 0; iblk < nblocks; iblk++) {
+                        add_ab_hdiag_scalar_block(
+                                hdiag, eri, nkpts, ncas, blocks, iblk,
+                                linka, nlinka, linkb, nlinkb,
+                                stra_ids, stra_offsets,
+                                strb_ids, strb_offsets);
+                }
+                return;
+        }
+
+        for (int gp = 0; gp < norb; gp++) {
+                int kp = gp / ncas;
+                int p = gp % ncas;
+                for (int gb = 0; gb < norb; gb++) {
+                        int kb = gb / ncas;
+                        int b = gb % ncas;
+                        long long idx_ab = eri_index_k(
+                                kp, kp, kb, p, p, b, b, nkpts, ncas);
+                        long long idx_ba = eri_index_k(
+                                kb, kb, kp, b, b, p, p, nkpts, ncas);
+                        wmat[gp + (size_t)gb * norb] =
+                                eri[idx_ab] + eri[idx_ba];
+                }
+        }
+
+#pragma omp parallel for schedule(dynamic) default(none) \
+        shared(hdiag, eri, wmat, nkpts, ncas, norb, nblocks, blocks, linka, \
+               nlinka, linkb, nlinkb, stra_ids, stra_offsets, strb_ids, \
+               strb_offsets, TRANS_N, TRANS_T, Z0, Z1)
         for (int iblk = 0; iblk < nblocks; iblk++) {
                 int *blk = blocks + iblk * 6;
                 int ka = blk[BLOCK_KA];
@@ -389,79 +515,90 @@ void FCIhdiag_k_stream_ab(double complex *hdiag,
                 int na = blk[BLOCK_NA];
                 int nb = blk[BLOCK_NB];
                 int offset = blk[BLOCK_OFFSET];
+                double complex *amat = malloc(sizeof(double complex) *
+                                              (size_t)norb * na);
+                double complex *bmat = malloc(sizeof(double complex) *
+                                              (size_t)nb * norb);
+                double complex *tmp = malloc(sizeof(double complex) *
+                                             (size_t)norb * na);
+
+                if (amat == NULL || bmat == NULL || tmp == NULL) {
+                        free(tmp);
+                        free(bmat);
+                        free(amat);
+                        add_ab_hdiag_scalar_block(
+                                hdiag, eri, nkpts, ncas, blocks, iblk,
+                                linka, nlinka, linkb, nlinkb,
+                                stra_ids, stra_offsets,
+                                strb_ids, strb_offsets);
+                        continue;
+                }
+
+                zset0(amat, (size_t)norb * na);
+                zset0(bmat, (size_t)nb * norb);
 
                 for (int ia = 0; ia < na; ia++) {
                         int astr0 = stra_ids[stra_offsets[ka] + ia];
-
-                        for (int ib = 0; ib < nb; ib++) {
-                                int bstr0 = strb_ids[strb_offsets[kb] + ib];
-                                double complex val = 0.0 + 0.0 * I;
-
-                                for (int ilinka = 0; ilinka < nlinka;
-                                     ilinka++) {
-                                        int *la = linka + (astr0 * nlinka +
-                                                           ilinka) *
-                                                NLINK_FIELDS;
-                                        int signa = la[LINK_SIGN];
-                                        if (signa == 0) {
-                                                break;
-                                        }
-                                        if (la[LINK_TARGET] != astr0 ||
-                                            mod_pos(la[LINK_DK], nkpts) != 0 ||
-                                            mod_pos(la[LINK_K_CRE], nkpts) !=
-                                            mod_pos(la[LINK_K_DES], nkpts)) {
-                                                continue;
-                                        }
-
-                                        for (int ilinkb = 0; ilinkb < nlinkb;
-                                             ilinkb++) {
-                                                int *lb = linkb +
-                                                        (bstr0 * nlinkb +
-                                                         ilinkb) *
-                                                        NLINK_FIELDS;
-                                                int signb = lb[LINK_SIGN];
-                                                long long idx_ab;
-                                                long long idx_ba;
-
-                                                if (signb == 0) {
-                                                        break;
-                                                }
-                                                if (lb[LINK_TARGET] != bstr0 ||
-                                                    mod_pos(lb[LINK_DK],
-                                                            nkpts) != 0 ||
-                                                    mod_pos(lb[LINK_K_CRE],
-                                                            nkpts) !=
-                                                    mod_pos(lb[LINK_K_DES],
-                                                            nkpts)) {
-                                                        continue;
-                                                }
-
-                                                idx_ab = eri_index_k(
-                                                        la[LINK_K_CRE],
-                                                        la[LINK_K_DES],
-                                                        lb[LINK_K_CRE],
-                                                        la[LINK_CRE] % ncas,
-                                                        la[LINK_DES] % ncas,
-                                                        lb[LINK_CRE] % ncas,
-                                                        lb[LINK_DES] % ncas,
-                                                        nkpts, ncas);
-                                                idx_ba = eri_index_k(
-                                                        lb[LINK_K_CRE],
-                                                        lb[LINK_K_DES],
-                                                        la[LINK_K_CRE],
-                                                        lb[LINK_CRE] % ncas,
-                                                        lb[LINK_DES] % ncas,
-                                                        la[LINK_CRE] % ncas,
-                                                        la[LINK_DES] % ncas,
-                                                        nkpts, ncas);
-                                                val += (double)(signa * signb) *
-                                                        (eri[idx_ab] +
-                                                         eri[idx_ba]);
-                                        }
+                        for (int ilink = 0; ilink < nlinka; ilink++) {
+                                int *link = linka + (astr0 * nlinka + ilink)
+                                        * NLINK_FIELDS;
+                                int sign = link[LINK_SIGN];
+                                int k;
+                                int p;
+                                int g;
+                                if (sign == 0) {
+                                        break;
                                 }
-
-                                hdiag[offset + ia * nb + ib] += val;
+                                if (link[LINK_TARGET] != astr0 ||
+                                    mod_pos(link[LINK_DK], nkpts) != 0 ||
+                                    mod_pos(link[LINK_K_CRE], nkpts) !=
+                                    mod_pos(link[LINK_K_DES], nkpts)) {
+                                        continue;
+                                }
+                                k = mod_pos(link[LINK_K_CRE], nkpts);
+                                p = link[LINK_CRE] % ncas;
+                                g = k * ncas + p;
+                                amat[g + (size_t)ia * norb] +=
+                                        (double)sign;
                         }
                 }
+
+                for (int ib = 0; ib < nb; ib++) {
+                        int bstr0 = strb_ids[strb_offsets[kb] + ib];
+                        for (int ilink = 0; ilink < nlinkb; ilink++) {
+                                int *link = linkb + (bstr0 * nlinkb + ilink)
+                                        * NLINK_FIELDS;
+                                int sign = link[LINK_SIGN];
+                                int k;
+                                int p;
+                                int g;
+                                if (sign == 0) {
+                                        break;
+                                }
+                                if (link[LINK_TARGET] != bstr0 ||
+                                    mod_pos(link[LINK_DK], nkpts) != 0 ||
+                                    mod_pos(link[LINK_K_CRE], nkpts) !=
+                                    mod_pos(link[LINK_K_DES], nkpts)) {
+                                        continue;
+                                }
+                                k = mod_pos(link[LINK_K_CRE], nkpts);
+                                p = link[LINK_CRE] % ncas;
+                                g = k * ncas + p;
+                                bmat[ib + (size_t)g * nb] += (double)sign;
+                        }
+                }
+
+                zgemm_(&TRANS_T, &TRANS_N, &norb, &na, &norb,
+                       &Z1, wmat, &norb, amat, &norb,
+                       &Z0, tmp, &norb);
+                zgemm_(&TRANS_N, &TRANS_N, &nb, &na, &norb,
+                       &Z1, bmat, &nb, tmp, &norb,
+                       &Z1, hdiag + offset, &nb);
+
+                free(tmp);
+                free(bmat);
+                free(amat);
         }
+
+        free(wmat);
 }
