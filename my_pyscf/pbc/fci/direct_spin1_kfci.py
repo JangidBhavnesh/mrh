@@ -13,8 +13,43 @@ from mrh.lib.helper import load_library
 
 
 from mrh.my_pyscf.pbc.fci.kcistrings import (
+    AB_A0,
+    AB_A1,
+    AB_B0,
+    AB_B1,
+    AB_SIGN,
+    AB_KA1,
+    AB_KB1,
+    AB_KPA,
+    AB_KQA,
+    AB_KRB,
+    AB_PA,
+    AB_QA,
+    AB_RB,
+    AB_SB,
+    AB_KPB,
+    AB_KQB,
+    AB_KRA,
+    AB_PB,
+    AB_QB,
+    AB_RA,
+    AB_SA,
     KFCIContractMap,
+    SS_0,
+    SS_1,
+    SS_SIGN,
+    SS_K1,
+    SS_KP,
+    SS_KQ,
+    SS_KR,
+    SS_P,
+    SS_Q,
+    SS_R,
+    SS_S,
+    build_ab_pair_tables,
     build_k_links_spin,
+    build_links_by_global_source_array,
+    build_same_spin_pair_tables,
     gen_k_sector_linkstr_info,
     gen_k_sector_maps,
     make_kfci_contract_map,
@@ -327,279 +362,6 @@ def _get_ci_sectors(fcivec, blocks, nkpts):
     return ci_blocks
 
 
-L_CRE_L       = 0
-L_DES_L       = 1
-L_STR0_LOCAL  = 2
-L_STR1_LOCAL  = 3
-L_STR0_GLOBAL = 4
-L_STR1_GLOBAL = 5
-L_SIGN        = 6
-L_K0          = 7
-L_K1          = 8
-L_K_CRE       = 9
-L_K_DES       = 10
-L_DK          = 11
-
-NLINK_FIELDS = 12
-
-
-def compact_links_from_object_links(links, nkpts):
-    rows = []
-
-    for k in range(nkpts):
-        for dK in range(nkpts):
-            for link in links["by_k_dk"][k][dK]:
-                rows.append([
-                    link.cre_l,
-                    link.des_l,
-                    link.str0_local,
-                    link.str1_local,
-                    link.str0_global,
-                    link.str1_global,
-                    link.sign,
-                    link.k0,
-                    link.k1,
-                    link.k_cre,
-                    link.k_des,
-                    link.dK,
-                ])
-
-    if len(rows) == 0:
-        linktab = np.zeros((0, NLINK_FIELDS), dtype=np.int32)
-    else:
-        linktab = np.asarray(rows, dtype=np.int32)
-
-    if linktab.shape[0] > 0:
-        order = np.lexsort((linktab[:, L_DK], linktab[:, L_K0]))
-        linktab = np.asarray(linktab[order], dtype=np.int32, order="C")
-
-    offset_k_dk = np.zeros((nkpts, nkpts + 1), dtype=np.int32)
-
-    pos = 0
-    for k in range(nkpts):
-        offset_k_dk[k, 0] = pos
-
-        for dK in range(nkpts):
-            while (
-                pos < linktab.shape[0]
-                and linktab[pos, L_K0] == k
-                and linktab[pos, L_DK] == dK
-            ):
-                pos += 1
-
-            offset_k_dk[k, dK + 1] = pos
-
-    compact = {
-        "str_k": links["str_k"],
-        "str_k2tot": links["str_k2tot"],
-        "linktab": linktab,
-        "offset_k_dk": offset_k_dk,
-    }
-
-    return compact
-
-
-def get_links_by_k(links, k):
-    linktab = links["linktab"]
-    offset = links["offset_k_dk"]
-
-    start = offset[k, 0]
-    end = offset[k, -1]
-
-    return linktab[start:end]
-
-
-def get_links_by_k_dk(links, k, dK):
-    linktab = links["linktab"]
-    offset = links["offset_k_dk"]
-
-    start = offset[k, dK]
-    end = offset[k, dK + 1]
-
-    return linktab[start:end]
-
-
-def build_links_by_global_source_array(links):
-    linktab = links["linktab"]
-    nlinks = linktab.shape[0]
-
-    if nlinks == 0:
-        links["global_source_order"] = np.zeros(0, dtype=np.int32)
-        links["global_source_ids"] = np.zeros(0, dtype=np.int32)
-        links["global_source_offsets"] = np.zeros(1, dtype=np.int32)
-        return links
-
-    src = linktab[:, L_STR0_GLOBAL]
-
-    order = np.argsort(src, kind="stable").astype(np.int32)
-    src_sorted = src[order]
-
-    unique_src, first = np.unique(src_sorted, return_index=True)
-
-    offsets = np.empty(unique_src.size + 1, dtype=np.int32)
-    offsets[:-1] = first.astype(np.int32)
-    offsets[-1] = nlinks
-
-    links["global_source_order"] = order
-    links["global_source_ids"] = unique_src.astype(np.int32)
-    links["global_source_offsets"] = offsets
-
-    return links
-
-
-def get_link_indices_from_global_source(links, src_global):
-    ids = links["global_source_ids"]
-    offsets = links["global_source_offsets"]
-    order = links["global_source_order"]
-
-    pos = np.searchsorted(ids, src_global)
-
-    if pos >= ids.size or ids[pos] != src_global:
-        return order[0:0]
-
-    start = offsets[pos]
-    end = offsets[pos + 1]
-
-    return order[start:end]
-
-AB_A0      = 0
-AB_A1      = 1
-AB_B0      = 2
-AB_B1      = 3
-AB_SIGN    = 4
-AB_KA1     = 5
-AB_KB1     = 6
-
-AB_KPA     = 7
-AB_KQA     = 8
-AB_KRB     = 9
-AB_PA      = 10
-AB_QA      = 11
-AB_RB      = 12
-AB_SB      = 13
-
-AB_KPB     = 14
-AB_KQB     = 15
-AB_KRA     = 16
-AB_PB      = 17
-AB_QB      = 18
-AB_RA      = 19
-AB_SA      = 20
-
-NAB_FIELDS = 21
-
-def build_ab_pair_tables(links_a, links_b, nkpts):
-    ab_pairs = [[None for _ in range(nkpts)] for _ in range(nkpts)]
-
-    for ka in range(nkpts):
-        la_tab = get_links_by_k(links_a, ka)
-
-        for kb in range(nkpts):
-            rows = []
-
-            for la in la_tab:
-                dKa = int(la[L_DK])
-                ka1 = int(la[L_K1])
-                dKb_needed = (-dKa) % nkpts
-
-                lb_tab = get_links_by_k_dk(links_b, kb, dKb_needed)
-
-                for lb in lb_tab:
-                    kb1 = int(lb[L_K1])
-
-                    rows.append([
-                        int(la[L_STR0_LOCAL]),
-                        int(la[L_STR1_LOCAL]),
-                        int(lb[L_STR0_LOCAL]),
-                        int(lb[L_STR1_LOCAL]),
-                        int(la[L_SIGN]) * int(lb[L_SIGN]),
-                        ka1,
-                        kb1,
-
-                        int(la[L_K_CRE]),
-                        int(la[L_K_DES]),
-                        int(lb[L_K_CRE]),
-                        int(la[L_CRE_L]),
-                        int(la[L_DES_L]),
-                        int(lb[L_CRE_L]),
-                        int(lb[L_DES_L]),
-
-                        int(lb[L_K_CRE]),
-                        int(lb[L_K_DES]),
-                        int(la[L_K_CRE]),
-                        int(lb[L_CRE_L]),
-                        int(lb[L_DES_L]),
-                        int(la[L_CRE_L]),
-                        int(la[L_DES_L]),
-                    ])
-
-            if len(rows) == 0:
-                ab_pairs[ka][kb] = np.zeros((0, NAB_FIELDS), dtype=np.int32)
-            else:
-                ab_pairs[ka][kb] = np.asarray(rows, dtype=np.int32)
-
-    return ab_pairs
-
-SS_0      = 0
-SS_1      = 1
-SS_SIGN   = 2
-SS_K1     = 3
-SS_KP     = 4
-SS_KQ     = 5
-SS_KR     = 6
-SS_P      = 7
-SS_Q      = 8
-SS_R      = 9
-SS_S      = 10
-
-NSS_FIELDS = 11
-
-def build_same_spin_pair_tables(links, nkpts):
-    linktab = links["linktab"]
-    ss_pairs = [None for _ in range(nkpts)]
-
-    for k in range(nkpts):
-        rows = []
-        l1_tab = get_links_by_k(links, k)
-
-        for l1 in l1_tab:
-            dK1 = int(l1[L_DK])
-            src_mid = int(l1[L_STR1_GLOBAL])
-
-            l2_indices = get_link_indices_from_global_source(links, src_mid)
-
-            for idx2 in l2_indices:
-                l2 = linktab[idx2]
-
-                if int(l2[L_K0]) != int(l1[L_K1]):
-                    continue
-
-                dK2 = int(l2[L_DK])
-
-                if (dK1 + dK2) % nkpts != 0:
-                    continue
-
-                # l1 acts first: E_rs
-                r = int(l1[L_CRE_L])
-                s = int(l1[L_DES_L])
-                kr = int(l1[L_K_CRE])
-
-                # l2 acts second: E_pq
-                p = int(l2[L_CRE_L])
-                q = int(l2[L_DES_L])
-                kp = int(l2[L_K_CRE])
-                kq = int(l2[L_K_DES])
-
-                rows.append([ int(l1[L_STR0_LOCAL]), int(l2[L_STR1_LOCAL]), int(l1[L_SIGN]) * int(l2[L_SIGN]), 
-                             int(l2[L_K1]), kp, kq, kr, p, q, r, s, ])
-
-        if len(rows) == 0:
-            ss_pairs[k] = np.zeros((0, NSS_FIELDS), dtype=np.int32)
-        else:
-            ss_pairs[k] = np.asarray(rows, dtype=np.int32)
-
-    return ss_pairs
-
 def contract_ab_pairs(eri, ci0_block, ci1_blocks, ab_pairs, ka, kb):
     pairtab = ab_pairs[ka][kb]
 
@@ -663,69 +425,6 @@ def contract_bb_pairs(eri, ci0_blocks, ci1_blocks, bb_pairs, ka, kb):
         val = eri[row[SS_KP], row[SS_KQ], row[SS_KR], row[SS_P], row[SS_Q], row[SS_R], row[SS_S]]
 
         ci1_block[:, b1] += val * sign * ci0_block[:, b0]
-
-def _flatten_pair_tables(ab_pairs, aa_pairs, bb_pairs, nkpts):
-    ab_rows = []
-    ab_offsets = [0]
-    for ka in range(nkpts):
-        for kb in range(nkpts):
-            tab = np.asarray(ab_pairs[ka][kb], dtype=np.int32, order="C")
-            if tab.size:
-                ab_rows.append(tab.reshape(-1, NAB_FIELDS))
-            ab_offsets.append(ab_offsets[-1] + tab.reshape(-1, NAB_FIELDS).shape[0])
-
-    aa_rows = []
-    aa_offsets = [0]
-    for k in range(nkpts):
-        tab = np.asarray(aa_pairs[k], dtype=np.int32, order="C")
-        if tab.size:
-            aa_rows.append(tab.reshape(-1, NSS_FIELDS))
-        aa_offsets.append(aa_offsets[-1] + tab.reshape(-1, NSS_FIELDS).shape[0])
-
-    bb_rows = []
-    bb_offsets = [0]
-    for k in range(nkpts):
-        tab = np.asarray(bb_pairs[k], dtype=np.int32, order="C")
-        if tab.size:
-            bb_rows.append(tab.reshape(-1, NSS_FIELDS))
-        bb_offsets.append(bb_offsets[-1] + tab.reshape(-1, NSS_FIELDS).shape[0])
-
-    if ab_rows:
-        ab_tab = np.asarray(np.vstack(ab_rows), dtype=np.int32, order="C")
-    else:
-        ab_tab = np.zeros((0, NAB_FIELDS), dtype=np.int32)
-
-    if aa_rows:
-        aa_tab = np.asarray(np.vstack(aa_rows), dtype=np.int32, order="C")
-    else:
-        aa_tab = np.zeros((0, NSS_FIELDS), dtype=np.int32)
-
-    if bb_rows:
-        bb_tab = np.asarray(np.vstack(bb_rows), dtype=np.int32, order="C")
-    else:
-        bb_tab = np.zeros((0, NSS_FIELDS), dtype=np.int32)
-
-    return (ab_tab, np.asarray(ab_offsets, dtype=np.int32, order="C"),
-            aa_tab, np.asarray(aa_offsets, dtype=np.int32, order="C"),
-            bb_tab, np.asarray(bb_offsets, dtype=np.int32, order="C"))
-
-def _build_contract_pair_tables(link_indexa, link_indexb, norb, nkpts):
-    straid_k, strbid_k, str2tot_a, str2tot_b = gen_k_sector_maps(
-        link_indexa, link_indexb, nkpts)
-
-    links_a = build_k_links_spin(link_indexa, norb, nkpts,
-                                 straid_k, str2tot_a)
-    links_b = build_k_links_spin(link_indexb, norb, nkpts,
-                                 strbid_k, str2tot_b)
-
-    links_a = build_links_by_global_source_array(links_a)
-    links_b = build_links_by_global_source_array(links_b)
-
-    ab_pairs = build_ab_pair_tables(links_a, links_b, nkpts)
-    aa_pairs = build_same_spin_pair_tables(links_a, nkpts)
-    bb_pairs = build_same_spin_pair_tables(links_b, nkpts)
-
-    return _flatten_pair_tables(ab_pairs, aa_pairs, bb_pairs, nkpts)
 
 def _contract_2e_k_lib(eri, fcivec, norb, nelec, nkpts, target_k,
                        link_index=None, contract_map=None, plan=None):
@@ -827,9 +526,6 @@ def contract_2e_k_py(eri, fcivec, norb, nelec, nkpts, target_k,
     links_a = build_k_links_spin(link_indexa, norb, nkpts, straid_k, str2tot_a)
     links_b = build_k_links_spin(link_indexb, norb, nkpts, strbid_k, str2tot_b)
     
-    # links_a = compact_links_from_object_links(links_a, nkpts)
-    # links_b = compact_links_from_object_links(links_b, nkpts)
-
     links_a = build_links_by_global_source_array(links_a)
     links_b = build_links_by_global_source_array(links_b)
 
