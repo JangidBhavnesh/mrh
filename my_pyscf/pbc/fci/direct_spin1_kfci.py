@@ -1,6 +1,5 @@
 import numpy as np
 import scipy.linalg
-import sys
 import types
 import warnings
 import ctypes
@@ -8,9 +7,9 @@ import ctypes
 from pyscf import lib, __config__
 from pyscf.fci import direct_spin1
 from pyscf.fci.addons import _unpack_nelec
+
 from mrh.my_pyscf.pbc.fci import rdm_helper, kcistrings, krdm_helper
 from mrh.lib.helper import load_library
-
 
 from mrh.my_pyscf.pbc.fci.kcistrings import (
     AB_A0,
@@ -67,15 +66,17 @@ logger = lib.logger
 HDIAG_IMAG_TOL = 1e-3
 HERMI_THRESH = 1e-8
 libpbcfci_k = None
-contract_2e_threads = getattr(
-    __config__, "pbc_k_contract_2e_threads",
-    getattr(__config__, "pbc_contract_2e_threads", None),
-)
+contract_2e_threads = getattr(__config__, "pbc_k_contract_2e_threads",
+                              getattr(__config__, "pbc_contract_2e_threads", None))
 
 def _load_k_contract_lib():
+    '''
+    Load the C library for k-FCI Hamiltonian-vector product.
+    '''
     global libpbcfci_k
     if libpbcfci_k is None:
         libpbcfci_k = load_library("libpbc_fci_contract_k")
+
         libpbcfci_k.FCIcontract_1e_k.argtypes = [
             ctypes.c_void_p,
             ctypes.c_void_p,
@@ -132,6 +133,29 @@ def _load_k_contract_lib():
 
 def _as_contract_map(norb, nelec, nkpts, target_k, link_index=None,
                      contract_map=None, plan=None, need_pair_tables=False):
+    '''
+    Helper function to ensure that a KFCIContractMap is available for the given
+    k-FCI contraction. If a contract_map is provided, it checks for consistency
+    with the provided parameters. If not, it creates a new KFCIContractMap.
+    args:
+        norb : int
+            Total number of orbitals across all k-points.
+        nelec : tuple of 2 ints
+            Number of alpha and beta electrons.s
+        nkpts : int
+            Number of k-points / momentum sectors.
+        target_k : int
+            Total momentum sector for the k-FCI contraction.
+        link_index : tuple of 2 ndarrays or None
+            Look up tables/link index for alpha and beta strings.
+            If None, it will be generated on the fly.
+        contract_map : KFCIContractMap or None
+            Precomputed contraction map. If None, a new one will be created.
+        plan : optional
+            Additional plan or configuration for contraction.
+        need_pair_tables : bool
+            If True, ensures that pair tables are built in the contract_map.
+    '''
     if contract_map is None:
         contract_map = plan
     if contract_map is None and isinstance(link_index, KFCIContractMap):
@@ -139,20 +163,22 @@ def _as_contract_map(norb, nelec, nkpts, target_k, link_index=None,
         link_index = None
 
     if contract_map is None:
-        return make_kfci_contract_map(norb, nelec, nkpts, target_k,
-                                      link_index=link_index,
-                                      build_pair_tables=need_pair_tables)
+        contract_map = make_kfci_contract_map(norb, nelec, nkpts, target_k,
+                                              link_index=link_index,
+                                              build_pair_tables=need_pair_tables)
+        return contract_map
 
     assert contract_map.norb == int(norb)
     assert contract_map.nkpts == int(nkpts)
     assert contract_map.ncas * contract_map.nkpts == contract_map.norb
     assert contract_map.target_k == int(target_k) % int(nkpts)
     assert tuple(contract_map.nelec) == tuple(_unpack_nelec(nelec))
+
     if need_pair_tables and not getattr(contract_map, "has_pair_tables", True):
-        return make_kfci_contract_map(
-            norb, nelec, nkpts, target_k,
-            link_index=contract_map.link_index,
-            build_pair_tables=True)
+        contract_map = make_kfci_contract_map(norb, nelec, nkpts, target_k,
+                                              link_index=contract_map.link_index,
+                                              build_pair_tables=True)
+        return contract_map
     return contract_map
 
 def _unpack(norb, nelec, link_index, nkpts, spin=None):
@@ -297,6 +323,35 @@ def contract_1e_k_py(h1e, fcivec, norb, nelec, nkpts, kindx, link_index=None):
 
 def _contract_1e_k_lib(h1e, fcivec, norb, nelec, nkpts, kindx,
                        link_index=None, contract_map=None, plan=None):
+    '''
+    C implementation of contract_1e_k using structural k-sector contraction
+    maps.  The result is returned as complex128 to match the C kernel.
+    args:
+        h1e : ndarray, shape (nkpts, norb_k, norb_k)
+            One-electron integrals in k-space, where norb_k = norb // nkpts.
+        fcivec : ndarray, shape (sector_size,)
+            k-FCI vector in the target total momentum sector.
+        norb : int
+            Total number of orbitals.
+        nelec : tuple of 2 ints
+            Number of alpha and beta electrons.
+        nkpts : int
+            Number of k-points / momentum sectors.
+        kindx : int
+            Target total momentum sector. (0<=kindx < nkpts)
+        link_index : tuple of 2 ndarrays or None
+            Look up tables/link index for alpha and beta strings. 
+            If None, it will be generated on the fly.
+        contract_map : KFCIContractMap or None
+            Precomputed contraction map. If None, a new one will be created.
+        plan : optional
+            Additional plan or configuration for contraction.
+        need_pair_tables : bool
+            If True, ensures that pair tables are built in the contract_map.
+    returns:
+        sigma_ci : ndarray, shape (sector_size,)
+            Result of the Hamiltonian-vector product in the target momentum sector.
+    '''
     nkpts = int(nkpts)
     ncas = int(norb) // nkpts
     assert ncas * nkpts == int(norb)
@@ -355,7 +410,8 @@ def _get_ci_sectors(fcivec, blocks, nkpts):
     '''
     Extract blocked CI vectors from a full CI vector based on k-sector information.
     '''
-    ci_blocks = [[None for _ in range(nkpts)] for _ in range(nkpts)]
+    ci_blocks = [[None for _ in range(nkpts)] 
+                 for _ in range(nkpts)]
     for blk in blocks:
         ka, kb, nstra, nstrb, offset, size = map(int, blk)
         ci_blocks[ka][kb] = fcivec[offset:offset + size].reshape(nstra, nstrb)
@@ -428,6 +484,35 @@ def contract_bb_pairs(eri, ci0_blocks, ci1_blocks, bb_pairs, ka, kb):
 
 def _contract_2e_k_lib(eri, fcivec, norb, nelec, nkpts, target_k,
                        link_index=None, contract_map=None, plan=None):
+    '''
+    C implementation of contract_2e_k using structural k-sector contraction maps.
+    The alpha-alpha and beta-beta same-spin contractions are applied with zgemm
+    and the alpha-beta terms are packed into sparse source/destination block groups.
+    OpenMP threads follow pbc_k_contract_2e_threads/pbc_contract_2e_threads.
+    args:
+        eri : ndarray, shape (nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas)
+            Two-electron integrals in k-space, in chemist notation.
+        fcivec : ndarray, shape (sector_size,)
+            k-FCI vector in the target total momentum sector.
+        norb : int
+            Total number of orbitals.
+        nelec : tuple of 2 ints
+            Number of alpha and beta electrons.
+        nkpts : int
+            Number of k-points / momentum sectors.
+        target_k : int
+            Target total momentum sector for the output sigma vector.
+        link_index : tuple of 2 ndarrays or None
+            Look up tables/link index for alpha and beta strings.
+            If None, it will be generated on the fly.
+        contract_map : KFCIContractMap or None
+            Precomputed contraction map. If None, a new one will be created.
+        plan : optional
+            Additional plan or configuration for contraction.
+    returns:
+        sigma_ci : ndarray, shape (sector_size,)
+            Result of the Hamiltonian-vector product in the target momentum sector.
+    '''
     nkpts = int(nkpts)
     ncas = int(norb) // nkpts
     assert ncas * nkpts == int(norb)
@@ -1031,8 +1116,6 @@ def fix_spin(fciobj, shift=0.1, ss=None, **kwargs):
         raise DeprecationWarning('fix_spin should be applied on FCI object only')
 
     if 'ss_value' in kwargs:
-        sys.stderr.write('fix_spin_: kwarg "ss_value" will be removed in future release. '
-                         'It was replaced by "ss"\n')
         ss_value = kwargs['ss_value']
     else:
         ss_value = ss
@@ -1111,59 +1194,37 @@ class FCISolver(direct_spin1.FCISolver):
         return energy(h1e, eri, fcivec, norb, nelec, nkpts, target_k,
                       link_index=link_index)
 
-    def make_rdm1s_py(self, fcivec, norb, nelec, nkpts=None, target_k=None,
-                      link_index=None):
-        if nkpts is None: nkpts = self.nkpts
-        if target_k is None: target_k = self.target_k
-        nelec = _unpack_nelec(nelec, self.spin)
-        return make_rdm1s_py(fcivec, norb, nelec, nkpts, target_k,
-                             link_index=link_index, spin=self.spin)
-
-    def make_rdm1_py(self, fcivec, norb, nelec, nkpts=None, target_k=None,
-                     link_index=None):
-        if nkpts is None: nkpts = self.nkpts
-        if target_k is None: target_k = self.target_k
-        nelec = _unpack_nelec(nelec, self.spin)
-        return make_rdm1_py(fcivec, norb, nelec, nkpts, target_k,
-                            link_index=link_index, spin=self.spin)
-
-    def make_rdm12s_py(self, fcivec, norb, nelec, nkpts=None, target_k=None,
-                       link_index=None, reorder=True):
-        if nkpts is None: nkpts = self.nkpts
-        if target_k is None: target_k = self.target_k
-        nelec = _unpack_nelec(nelec, self.spin)
-        return make_rdm12s_py(fcivec, norb, nelec, nkpts, target_k,
-                              link_index=link_index, reorder=reorder,
-                              spin=self.spin)
-
-    def make_rdm12_py(self, fcivec, norb, nelec, nkpts=None, target_k=None,
-                      link_index=None, reorder=True):
-        if nkpts is None: nkpts = self.nkpts
-        if target_k is None: target_k = self.target_k
-        nelec = _unpack_nelec(nelec, self.spin)
-        return make_rdm12_py(fcivec, norb, nelec, nkpts, target_k,
-                             link_index=link_index, reorder=reorder,
-                             spin=self.spin)
-
     def make_rdm1s(self, fcivec, norb, nelec, nkpts=None, target_k=None,
                    link_index=None):
-        return self.make_rdm1s_py(fcivec, norb, nelec, nkpts=nkpts,
+        if nkpts is None: nkpts = self.nkpts
+        if target_k is None: target_k = self.target_k
+        nelec = _unpack_nelec(nelec, self.spin)
+        return make_rdm1s_py(fcivec, norb, nelec, nkpts=nkpts,
                                   target_k=target_k, link_index=link_index)
 
     def make_rdm1(self, fcivec, norb, nelec, nkpts=None, target_k=None,
                   link_index=None):
-        return self.make_rdm1_py(fcivec, norb, nelec, nkpts=nkpts,
+        if nkpts is None: nkpts = self.nkpts
+        if target_k is None: target_k = self.target_k
+        nelec = _unpack_nelec(nelec, self.spin)
+        return make_rdm1_py(fcivec, norb, nelec, nkpts=nkpts,
                                  target_k=target_k, link_index=link_index)
 
     def make_rdm12s(self, fcivec, norb, nelec, nkpts=None, target_k=None,
                     link_index=None, reorder=True):
-        return self.make_rdm12s_py(fcivec, norb, nelec, nkpts=nkpts,
+        if nkpts is None: nkpts = self.nkpts
+        if target_k is None: target_k = self.target_k
+        nelec = _unpack_nelec(nelec, self.spin)
+        return make_rdm12s_py(fcivec, norb, nelec, nkpts=nkpts,
                                    target_k=target_k, link_index=link_index,
                                    reorder=reorder)
 
     def make_rdm12(self, fcivec, norb, nelec, nkpts=None, target_k=None,
                    link_index=None, reorder=True):
-        return self.make_rdm12_py(fcivec, norb, nelec, nkpts=nkpts,
+        if nkpts is None: nkpts = self.nkpts
+        if target_k is None: target_k = self.target_k
+        nelec = _unpack_nelec(nelec, self.spin)
+        return make_rdm12_py(fcivec, norb, nelec, nkpts=nkpts,
                                   target_k=target_k, link_index=link_index,
                                   reorder=reorder)
 
