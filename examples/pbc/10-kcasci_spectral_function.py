@@ -74,6 +74,11 @@ for row in roots.roots:
           f"  {row['nelecastot']}")
 
 poles = sfh.make_spectral_poles(roots, min_weight=1e-8)
+poles = sfh.label_pole_momenta(poles, kpts)
+spectrum = sfh.make_spectral_function(
+    poles, eta=0.05, npts=401, spin_resolved=False,
+    orbital_resolved=False)
+checks = sfh.spectral_weight_sum_rules(roots, poles=poles)
 
 print("")
 print("kind          k  target_k  root  orb  spin       omega        weight")
@@ -87,3 +92,16 @@ for row in poles:
           f"{spin:>6s}"
           f"{row['omega'].real:14.8f}"
           f"{row['weight'].real:14.8f}")
+
+print("")
+print("k       peak omega        peak A(k,w)")
+for k in range(roots.nkpts):
+    ak = spectrum['spectra']['total'][k, 0, 0]
+    imax = np.argmax(ak)
+    print(f"{k:1d}"
+          f"{spectrum['omega'][imax]:18.8f}"
+          f"{ak[imax]:18.8f}")
+
+max_missing = max(abs(row['total_missing']) for row in checks)
+print("")
+print(f"max spectral weight missing from supplied roots: {max_missing:.3e}")
