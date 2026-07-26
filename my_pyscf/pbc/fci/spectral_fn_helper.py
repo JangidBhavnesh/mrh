@@ -642,6 +642,322 @@ def make_spectral_poles(spectral_roots, neutral_root=0, neutral_target_k=None,
     return poles
 
 
+def make_omega_grid(poles, npts=801, eta=0.05, padding=None,
+                    omega_min=None, omega_max=None):
+    '''
+    Build a real-frequency grid around the pole energies.
+    '''
+    if omega_min is None or omega_max is None:
+        if not poles:
+            raise ValueError("omega_min/omega_max are required for no poles")
+        omegas = np.asarray([np.real_if_close(row['omega']).real
+                             for row in poles])
+        if omega_min is None:
+            omega_min = float(omegas.min())
+        if omega_max is None:
+            omega_max = float(omegas.max())
+
+    if padding is None:
+        padding = 8.0 * float(eta)
+    omega_min = float(omega_min) - float(padding)
+    omega_max = float(omega_max) + float(padding)
+    if omega_max <= omega_min:
+        omega_min -= float(eta)
+        omega_max += float(eta)
+    return np.linspace(omega_min, omega_max, int(npts))
+
+
+def broaden_delta(omega, omega0, eta=0.05, broadening='lorentzian'):
+    '''
+    Return a normalized broadened delta function on omega.
+    '''
+    omega = np.asarray(omega)
+    x = omega - float(np.real_if_close(omega0).real)
+    eta = float(eta)
+    if eta <= 0:
+        raise ValueError("eta must be positive")
+
+    key = broadening.lower()
+    if key in ('lorentzian', 'lorentz'):
+        return eta / np.pi / (x * x + eta * eta)
+    if key in ('gaussian', 'gauss'):
+        return np.exp(-0.5 * (x / eta) ** 2) / (eta * np.sqrt(2.0 * np.pi))
+    raise ValueError(f"unknown broadening {broadening}")
+
+
+def _infer_pole_axes(poles, nkpts=None, norb=None):
+    '''
+    Infer compact k/orbital dimensions from a pole table.
+    '''
+    if nkpts is None:
+        nkpts = max((int(row['k']) for row in poles), default=-1) + 1
+    if norb is None:
+        norb = max((int(row['orbital']) for row in poles), default=-1) + 1
+    return int(nkpts), int(norb)
+
+
+def make_spectral_function(poles, omega_grid=None, eta=0.05,
+                           broadening='lorentzian', npts=801,
+                           padding=None, omega_min=None, omega_max=None,
+                           nkpts=None, norb=None, spin_resolved=False,
+                           orbital_resolved=False):
+    '''
+    Broaden pole weights into A(k, omega).
+
+    The returned arrays have shape (nkpts, norb_axis, spin_axis, nomega).
+    If orbital_resolved/spin_resolved is False, the corresponding axis has
+    length one and contains the summed contribution.
+    '''
+    poles = list(poles)
+    if omega_grid is None:
+        omega_grid = make_omega_grid(
+            poles, npts=npts, eta=eta, padding=padding,
+            omega_min=omega_min, omega_max=omega_max)
+    else:
+        omega_grid = np.asarray(omega_grid)
+
+    nkpts, norb = _infer_pole_axes(poles, nkpts=nkpts, norb=norb)
+    norb_axis = norb if orbital_resolved else 1
+    spin_axis = 2 if spin_resolved else 1
+    shape = (nkpts, norb_axis, spin_axis, omega_grid.size)
+    spectra = {
+        'hole': np.zeros(shape),
+        'particle': np.zeros(shape),
+        'total': np.zeros(shape),
+    }
+
+    for row in poles:
+        kind = row['kind']
+        if kind not in ('hole', 'particle'):
+            continue
+        k = int(row['k'])
+        orb = int(row['orbital']) if orbital_resolved else 0
+        spin = int(row['spin']) if spin_resolved else 0
+        weight = float(np.real_if_close(row['weight']).real)
+        if weight == 0.0:
+            continue
+        delta = broaden_delta(omega_grid, row['omega'], eta=eta,
+                              broadening=broadening)
+        spectra[kind][k, orb, spin] += weight * delta
+        spectra['total'][k, orb, spin] += weight * delta
+
+    return {
+        'omega': omega_grid,
+        'eta': float(eta),
+        'broadening': broadening,
+        'spectra': spectra,
+        'k_axis': list(range(nkpts)),
+        'orbital_axis': list(range(norb)) if orbital_resolved else ['sum'],
+        'spin_axis': [0, 1] if spin_resolved else ['sum'],
+        'orbital_resolved': bool(orbital_resolved),
+        'spin_resolved': bool(spin_resolved),
+    }
+
+
+def label_pole_momenta(poles, kpts):
+    '''
+    Attach operator and charged-state momentum vectors to each pole record.
+    '''
+    kpts = np.asarray(kpts)
+    labelled = []
+    for row in poles:
+        out = dict(row)
+        out['operator_momentum'] = np.asarray(kpts[int(row['k'])]).copy()
+        out['charged_momentum'] = np.asarray(kpts[int(row['target_k'])]).copy()
+        labelled.append(out)
+    return labelled
+
+
+def _coeff_for_k(coeff, k):
+    '''
+    Return the active-to-band coefficient matrix for one k-point.
+    '''
+    if isinstance(coeff, dict):
+        return np.asarray(coeff[int(k)])
+    coeff = np.asarray(coeff)
+    if coeff.ndim == 2:
+        return coeff
+    if coeff.ndim == 3:
+        return coeff[int(k)]
+    raise ValueError("coeff must have shape (ncas, nband) or "
+                     "(nkpts, ncas, nband)")
+
+
+def project_poles_to_band_basis(poles, coeff, band_indices=None,
+                                min_weight=0.0):
+    '''
+    Project active-orbital pole amplitudes to a supplied band basis.
+
+    coeff[p, b] is the coefficient of active orbital p in band b.  Use
+    unfiltered active-orbital poles when possible, because amplitudes from
+    different active orbitals are summed before squaring.
+    '''
+    groups = {}
+    for row in poles:
+        key = (row['kind'], int(row['k']), int(row['target_k']),
+               int(row['root']), int(row['neutral_root']), int(row['spin']),
+               complex(row['omega']))
+        groups.setdefault(key, []).append(row)
+
+    projected = []
+    for key, rows in groups.items():
+        kind, k, target_k, root, neutral_root, spin, omega = key
+        c = _coeff_for_k(coeff, k)
+        if band_indices is None:
+            bands = range(c.shape[1])
+        else:
+            bands = [int(b) for b in band_indices]
+
+        amp_by_orb = {int(row['orbital']): row['amplitude'] for row in rows}
+        for band in bands:
+            if band < 0 or band >= c.shape[1]:
+                raise ValueError(f"band={band} is outside [0, {c.shape[1]})")
+            amp = 0.0j
+            for p in range(c.shape[0]):
+                if kind == 'hole':
+                    amp += np.conj(c[p, band]) * amp_by_orb.get(p, 0.0)
+                else:
+                    amp += c[p, band] * amp_by_orb.get(p, 0.0)
+            weight = abs(amp) ** 2
+            if weight < min_weight:
+                continue
+
+            out = dict(rows[0])
+            out.update({
+                'k': k,
+                'target_k': target_k,
+                'root': root,
+                'neutral_root': neutral_root,
+                'orbital': int(band),
+                'band': int(band),
+                'spin': spin,
+                'omega': np.real_if_close(omega),
+                'weight': np.real_if_close(weight),
+                'amplitude': amp,
+                'basis': 'band',
+            })
+            projected.append(out)
+    return projected
+
+
+def spectral_weight_sum_rules(spectral_roots, poles=None, neutral_root=0,
+                              neutral_target_k=None, k_indices=None,
+                              orbital_indices=None, spins=(0, 1)):
+    '''
+    Compare accumulated pole weights with exact operator norms.
+
+    Missing weight reports the contribution absent from the charged roots that
+    were supplied to make_spectral_poles.
+    '''
+    rows = _root_table(spectral_roots)
+    if isinstance(spectral_roots, KCASCISpectralRoots):
+        nkpts = spectral_roots.nkpts
+        ncas = spectral_roots.ncas
+        neutral_target_k = (spectral_roots.target_k if neutral_target_k is None
+                            else neutral_target_k)
+    else:
+        neutral0 = _select_neutral_root(rows, neutral_root,
+                                       target_k=neutral_target_k)
+        nkpts = neutral0['nkpts']
+        ncas = neutral0['ncastot'] // neutral0['nkpts']
+
+    neutral = _select_neutral_root(rows, neutral_root,
+                                  target_k=neutral_target_k)
+    if poles is None:
+        poles = make_spectral_poles(
+            spectral_roots, neutral_root=neutral_root,
+            neutral_target_k=neutral_target_k, k_indices=k_indices,
+            orbital_indices=orbital_indices, spins=spins, min_weight=0.0)
+
+    nkpts = int(nkpts)
+    ncas = int(ncas)
+    norb = nkpts * ncas
+    nelec = tuple(map(int, neutral['nelecastot']))
+    target_k = int(neutral['target_k'])
+    k_list = _index_list(k_indices, nkpts, 'k')
+    p_list = _index_list(orbital_indices, ncas, 'orbital')
+    spin_list = [_as_spin_id(spin) for spin in spins]
+
+    pole_weight = {}
+    for row in poles:
+        key = (row['kind'], int(row['k']), int(row['orbital']),
+               int(row['spin']))
+        pole_weight[key] = pole_weight.get(key, 0.0) + \
+            float(np.real_if_close(row['weight']).real)
+
+    checks = []
+    for k in k_list:
+        for p in p_list:
+            for spin in spin_list:
+                hole_norm = 0.0
+                particle_norm = 0.0
+                if nelec[spin] > 0:
+                    vec = des_k(neutral['ci'], norb, nelec, nkpts,
+                                target_k, k, p, spin)
+                    hole_norm = float(np.real_if_close(np.vdot(vec, vec)).real)
+                if nelec[spin] < norb:
+                    vec = cre_k(neutral['ci'], norb, nelec, nkpts,
+                                target_k, k, p, spin)
+                    particle_norm = float(
+                        np.real_if_close(np.vdot(vec, vec)).real)
+
+                h_wt = pole_weight.get(('hole', k, p, spin), 0.0)
+                p_wt = pole_weight.get(('particle', k, p, spin), 0.0)
+                checks.append({
+                    'k': int(k),
+                    'orbital': int(p),
+                    'spin': int(spin),
+                    'hole_norm': hole_norm,
+                    'hole_weight': h_wt,
+                    'hole_missing': hole_norm - h_wt,
+                    'particle_norm': particle_norm,
+                    'particle_weight': p_wt,
+                    'particle_missing': particle_norm - p_wt,
+                    'total_norm': hole_norm + particle_norm,
+                    'total_weight': h_wt + p_wt,
+                    'total_missing': hole_norm + particle_norm - h_wt - p_wt,
+                })
+    return checks
+
+
+def save_spectral_npz(filename, spectrum, poles=None):
+    '''
+    Save the broadened spectral function and optional pole table to npz.
+    '''
+    data = {
+        'omega': spectrum['omega'],
+        'hole': spectrum['spectra']['hole'],
+        'particle': spectrum['spectra']['particle'],
+        'total': spectrum['spectra']['total'],
+        'eta': np.asarray(spectrum['eta']),
+        'broadening': np.asarray(spectrum['broadening']),
+        'k_axis': np.asarray(spectrum['k_axis']),
+        'orbital_axis': np.asarray(spectrum['orbital_axis']),
+        'spin_axis': np.asarray(spectrum['spin_axis']),
+    }
+    if poles is not None:
+        data['poles'] = np.asarray(poles, dtype=object)
+    np.savez(filename, **data)
+
+
+def plot_spectral_function(spectrum, kind='total', k=0, orbital=0, spin=0,
+                           ax=None):
+    '''
+    Plot one A(k, omega) trace from make_spectral_function output.
+    '''
+    import matplotlib.pyplot as plt
+
+    if ax is None:
+        fig, ax = plt.subplots()
+    else:
+        fig = ax.figure
+    y = spectrum['spectra'][kind][int(k), int(orbital), int(spin)]
+    ax.plot(spectrum['omega'], y)
+    ax.set_xlabel(r'$\omega$')
+    ax.set_ylabel(f'A_{kind}(k={int(k)})')
+    return fig, ax
+
+
 def des_k(fcivec, norb, nelec, nkpts, target_k, k, p, spin,
           context=None, return_info=False, source_link_index=None,
           target_link_index=None, nelec_spin=None):
@@ -676,6 +992,14 @@ __all__ = [
     'make_k_op_context',
     'compute_kcasci_spectral_roots',
     'make_spectral_poles',
+    'make_omega_grid',
+    'broaden_delta',
+    'make_spectral_function',
+    'label_pole_momenta',
+    'project_poles_to_band_basis',
+    'spectral_weight_sum_rules',
+    'save_spectral_npz',
+    'plot_spectral_function',
     'apply_k_op',
     'des_k',
     'cre_k',
