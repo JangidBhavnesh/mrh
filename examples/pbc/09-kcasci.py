@@ -9,7 +9,6 @@ from mrh.my_pyscf.pbc import mcscf
 
 '''
 Basic k-CASCI example.
-
 The k-CASCI solver works in one total momentum sector at a time.  This example
 runs the same active space for each target_k sector in a small periodic H2
 system.
@@ -46,12 +45,28 @@ mo_coeff = np.asarray(kmf.mo_coeff)
 
 print(f"k-RHF energy: {kmf.e_tot.real:12.8f}")
 
-for target_k in range(nkpts):
-    kmc = mcscf.KCASCI(kmf, 2, 2, target_k=target_k)
-    kmc.kmesh = kmesh
-    kmc.canonicalization = False
+# Ground-State:
+# Neutral reference energy in the KCASCI per-cell convention.
+kmc_neutral = mcscf.KCASCI(kmf, 2, 2, target_k=0)
+kmc_neutral.kmesh = kmesh
+kmc_neutral.fcisolver.fix_spin_(shift=0.2, ss=0.0)
+e_neutral = kmc_neutral.kernel(mo_coeff)[0]
+    
+# Charged state:
+# charge=1 means one electron is removed from the complete k-mesh active
+# space.  target_k=None sweeps all charged momentum sectors.
+kmc_hole = mcscf.KCASCI(kmf, 2, 2, charge=1)
+kmc_hole.kmesh = kmesh
+kmc_hole.fcisolver.nroots = 1
+kmc_hole.fcisolver.fix_spin_(shift=0.2, ss=0.75)
+kmc_hole.kernel(mo_coeff)
 
-    e_tot, e_cas, ci, mo_coeff, mo_energy = kmc.kernel(mo_coeff)
+print(f"charged active space: {sum(kmc_hole.charged_nelecastot)}e, "
+      f"{kmc_hole.nkpts * kmc_hole.ncas}o")
+for band in kmc_hole.band_energies(e_neutral, kpts=kpts):
+    kvec = np.asarray(band["hole_momentum"]).real
+    print("hole momentum: "
+          f"[{kvec[0]:9.6f}, {kvec[1]:9.6f}, {kvec[2]:9.6f}]  "
+          f"target_k = {band['target_k']}  "
+          f"band energy = {band['energy'].real:12.8f}")
 
-    print(f"target_k = {target_k}")
-    print(f"k-CASCI energy: {e_tot.real:12.8f}")
