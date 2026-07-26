@@ -1,6 +1,7 @@
 # !/usr/bin/env python
 
 import numpy as np
+from functools import reduce
 
 from pyscf import lib, __config__
 from pyscf.lib import logger
@@ -135,6 +136,149 @@ def kernel(mc, mo_coeff=None, ci0=None, verbose=logger.NOTE, envs=None):
     e_tot /= nkpts
     return e_tot, e_cas, fcivec
 
+
+def _casdm1_for_kcasci(mc, ci, stav_dm1=False):
+    '''
+    Build the k-basis active-space 1-RDM for KCASCI.
+    '''
+    from pyscf.mcscf import addons
+
+    nkpts = mc.nkpts
+    ncas = mc.ncas
+    nelecas = mc.nelecas
+    nelecastot = (nkpts * nelecas[0], nkpts * nelecas[1])
+
+    if (isinstance(ci, (list, tuple, casci.RANGE_TYPE)) and
+            not isinstance(mc.fcisolver, addons.StateAverageFCISolver)):
+        if not stav_dm1:
+            return mc.fcisolver.make_rdm1(ci[0], nkpts * ncas, nelecastot)
+
+        casdm1 = mc.fcisolver.make_rdm1(ci[0], nkpts * ncas, nelecastot)
+        for root in range(1, len(ci)):
+            casdm1 += mc.fcisolver.make_rdm1(
+                ci[root], nkpts * ncas, nelecastot)
+        return casdm1 / len(ci)
+
+    return mc.fcisolver.make_rdm1(ci, nkpts * ncas, nelecastot)
+
+
+def get_fock(mc, mo_coeff=None, ci=None, eris=None, casdm1=None,
+             verbose=None):
+    '''
+    Generalized Fock matrix for KCASCI using the k-basis active-space RDM.
+    '''
+    if ci is None:
+        ci = mc.ci
+    if mo_coeff is None:
+        mo_coeff = mc.mo_coeff
+    if casdm1 is None:
+        casdm1 = _casdm1_for_kcasci(mc, ci)
+
+    nkpts = mc.nkpts
+    ncore = mc.ncore
+    ncas = mc.ncas
+    nocc = ncore + ncas
+    kmf = mc._scf
+    dtype = np.result_type(casdm1, *[mo.dtype for mo in mo_coeff])
+
+    mo_core = [mo[:, :ncore] for mo in mo_coeff]
+    dm_k = np.asarray([2.0 * mo_core[k] @ mo_core[k].conj().T
+                       for k in range(nkpts)], dtype=dtype)
+
+    for k in range(nkpts):
+        mocas = mo_coeff[k][:, ncore:nocc]
+        p0 = k * ncas
+        p1 = p0 + ncas
+        dm_k[k] += reduce(np.dot, (mocas, casdm1[p0:p1, p0:p1],
+                                   mocas.conj().T))
+
+    hcore = mc.get_hcore()
+    veff = mc.get_veff(mc.cell, dm_k, hermi=1, kpts=kmf.kpts)
+    return np.asarray([hcore[k] + veff[k] for k in range(nkpts)], dtype=dtype)
+
+
+@lib.with_doc(casci.canonicalize.__doc__)
+def canonicalize(mc, mo_coeff=None, ci=None, eris=None, sort=False,
+                 cas_natorb=False, casdm1=None, verbose=logger.NOTE,
+                 with_meta_lowdin=casci.WITH_META_LOWDIN, stav_dm1=False):
+    log = logger.new_logger(mc, verbose)
+    log.debug('Canonicalizing KCASCI orbitals')
+
+    if mo_coeff is None:
+        mo_coeff = mc.mo_coeff
+    if ci is None:
+        ci = mc.ci
+    if cas_natorb:
+        raise NotImplementedError
+
+    if casdm1 is None:
+        casdm1 = _casdm1_for_kcasci(mc, ci, stav_dm1=stav_dm1)
+
+    nkpts = mc.nkpts
+    ncas = mc.ncas
+    ncore = mc.ncore
+    nocc = ncore + ncas
+    nmo = mo_coeff[0].shape[1]
+
+    fock_ao = get_fock(mc, mo_coeff=mo_coeff, ci=ci, casdm1=casdm1,
+                       verbose=verbose)
+    mo_coeff1 = mo_coeff.copy()
+
+    log.info('Density matrix diagonal elements')
+    for k in range(nkpts):
+        p0 = k * ncas
+        p1 = p0 + ncas
+        dm_k = casdm1[p0:p1, p0:p1]
+        log.info("k-point %d, only real diagonal = %s",
+                 k,
+                 np.array2string(np.diag(dm_k).real, precision=5,
+                                 floatmode='fixed', separator=', '))
+
+    mo_energy = [
+        np.einsum('pi,pi->i', mo_coeff1[k].conj(), fock_ao[k] @ mo_coeff1[k])
+        for k in range(nkpts)
+    ]
+
+    orbsym_extra = np.zeros(nmo, dtype=int)
+
+    def _diag_subfock_(idx):
+        if idx.size > 1:
+            for k in range(nkpts):
+                c = mo_coeff1[k][:, idx]
+                fock = reduce(np.dot, (c.conj().T, fock_ao[k], c))
+                w, c = mc._eig(fock, None, None, orbsym_extra[idx])
+
+                if sort:
+                    sub_order = np.argsort(w.round(9), kind='mergesort')
+                    w = w[sub_order]
+                    c = c[:, sub_order]
+
+                mo_coeff1[k][:, idx] = mo_coeff1[k][:, idx].dot(c)
+                mo_energy[k][idx] = w
+
+    mask = np.ones(nmo, dtype=bool)
+    frozen = getattr(mc, 'frozen', None)
+    if frozen is not None:
+        if isinstance(frozen, (int, np.integer)):
+            mask[:frozen] = False
+        else:
+            mask[frozen] = False
+
+    core_idx = np.where(mask[:ncore])[0]
+    vir_idx = np.where(mask[nocc:])[0] + nocc
+    _diag_subfock_(core_idx)
+    _diag_subfock_(vir_idx)
+
+    if log.verbose >= logger.DEBUG:
+        for k in range(nkpts):
+            log.debug('k-point %d', k)
+            for i in range(nmo):
+                log.debug('i = %d  <i|F|i> = %12.8f',
+                          i + 1, mo_energy[k][i].real)
+
+    return mo_coeff1, ci, mo_energy
+
+
 class PBCKCASCI(casci.PBCCASCI):
     '''
     Child class for the PBC k-CASCI.
@@ -186,6 +330,20 @@ class PBCKCASCI(casci.PBCCASCI):
         h1eff, h2eff, ecore = self.get_h1e_h2e(mo_coeff=mo_coeff)
         return h2eff
 
+    get_fock = get_fock
+    canonicalize = canonicalize
+
+    @lib.with_doc(canonicalize.__doc__)
+    def canonicalize_(self, mo_coeff=None, ci=None, eris=None, sort=False,
+                      cas_natorb=False, casdm1=None, verbose=None,
+                      with_meta_lowdin=casci.WITH_META_LOWDIN):
+        self.mo_coeff, ci, self.mo_energy = \
+            canonicalize(self, mo_coeff, ci, eris, sort, cas_natorb,
+                         casdm1, verbose, with_meta_lowdin)
+        if cas_natorb:
+            self.ci = ci
+        return self.mo_coeff, ci, self.mo_energy
+
     def kernel(self, mo_coeff=None, ci0=None, verbose=None):
         '''
         args:
@@ -235,4 +393,3 @@ class PBCKCASCI(casci.PBCCASCI):
         return self.e_tot, self.e_cas, self.ci, self.mo_coeff, self.mo_energy
 
 KCASCI = PBCKCASCI
-
