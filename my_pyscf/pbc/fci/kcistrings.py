@@ -1475,6 +1475,11 @@ def _resolve_explicit_ab(link_indexa, link_indexb, blocks, nkpts,
     nentries = estimate_ab_entries_upper_bound(
         link_indexa, link_indexb, blocks, nkpts, kmom=kmom,
         kconserv=kconserv)
+    # The explicit sparse AB map uses int32 entry offsets.  Even when a
+    # large-memory node could hold the arrays, the representation cannot
+    # address more than int32.max entries, so force the streamed AB kernel.
+    if nentries > np.iinfo(np.int32).max:
+        return False
     required = estimate_ab_structure_bytes(nentries)
     if max_memory is None:
         max_memory = _available_memory_bytes()
