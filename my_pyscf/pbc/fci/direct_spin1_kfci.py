@@ -1151,7 +1151,7 @@ def make_rdm12(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
                                   kconserv=kconserv)
 
 def contract_ss(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
-                spin=None, kmom=None, kconserv=None):
+                spin=None, contract_map=None, kmom=None, kconserv=None):
     r'''
     Apply S^2 to a k-FCI vector in a fixed total momentum sector.
     ``` \psi' = S^2 \psi ```
@@ -1160,7 +1160,8 @@ def contract_ss(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
     return krdm_helper.contract_ss(fcivec, norb, nelec, nkpts,
                                    target_k=target_k,
                                    link_index=link_index, spin=spin,
-                                   kmom=kmom, kconserv=kconserv)
+                                   contract_map=contract_map, kmom=kmom,
+                                   kconserv=kconserv)
 
 def spin_square(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
                 spin=None, kmom=None, kconserv=None, **kwargs):
@@ -1174,7 +1175,8 @@ def spin_square(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
 
 def _get_spin_penalty(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
                       spin=None, ss_value=None, ss_penalty=0.1,
-                      log_obj=None, kmom=None, kconserv=None):
+                      log_obj=None, contract_map=None, kmom=None,
+                      kconserv=None):
     '''
     Apply the spin penalty operator to a k-FCI vector in one momentum sector.
     This follows the same logic as pyscf.fci.addons.SpinPenaltyFCISolver.
@@ -1192,7 +1194,8 @@ def _get_spin_penalty(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
         # (S^2-ss)|Psi> to shift state other than the lowest state.
         ci1 = contract_ss(fcivec, norb, nelec, nkpts,
                           target_k=target_k,
-                          link_index=link_index, spin=spin, kmom=kmom,
+                          link_index=link_index, spin=spin,
+                          contract_map=contract_map, kmom=kmom,
                           kconserv=kconserv).reshape(fcivec.shape)
         ci1 -= ss * fcivec
         t0 = _timer_debug1(log_obj, "k-FCI spin penalty contract_ss", t0)
@@ -1200,14 +1203,16 @@ def _get_spin_penalty(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
         # (S^2-ss)^2|Psi> to shift states except the given spin.
         tmp = contract_ss(fcivec, norb, nelec, nkpts,
                           target_k=target_k,
-                          link_index=link_index, spin=spin, kmom=kmom,
+                          link_index=link_index, spin=spin,
+                          contract_map=contract_map, kmom=kmom,
                           kconserv=kconserv).reshape(fcivec.shape)
         tmp -= ss * fcivec
         t0 = _timer_debug1(log_obj, "k-FCI spin penalty first contract_ss", t0)
         ci1 = -ss * tmp
         ci1 += contract_ss(tmp, norb, nelec, nkpts,
                            target_k=target_k,
-                           link_index=link_index, spin=spin, kmom=kmom,
+                           link_index=link_index, spin=spin,
+                           contract_map=contract_map, kmom=kmom,
                            kconserv=kconserv).reshape(fcivec.shape)
         tmp = None
         t0 = _timer_debug1(log_obj, "k-FCI spin penalty second contract_ss", t0)
@@ -1432,7 +1437,7 @@ class SpinPenaltyFCISolver:
             fcivec, norb, nelec, nkpts, target_k=target_k,
             link_index=link_index, spin=self.spin,
             ss_value=self.ss_value, ss_penalty=self.ss_penalty,
-            log_obj=self, kmom=kmom)
+            log_obj=self, contract_map=contract_map, kmom=kmom)
         ci1 += ci0.reshape(fcivec.shape)
         return ci1
 
@@ -1683,14 +1688,15 @@ class FCISolver(direct_spin1.FCISolver):
         return rdm12
 
     def contract_ss(self, fcivec, norb, nelec, nkpts=None, target_k=None,
-                    link_index=None):
+                    link_index=None, contract_map=None):
         if nkpts is None: nkpts = self.nkpts
         if target_k is None: target_k = self.target_k
         kmom = self.get_kmom(nkpts) if hasattr(self, "get_kmom") else None
         t0 = _timer_start()
         nelec = _unpack_nelec(nelec, self.spin)
         ci1 = contract_ss(fcivec, norb, nelec, nkpts, target_k,
-                          link_index=link_index, spin=self.spin, kmom=kmom)
+                          link_index=link_index, spin=self.spin,
+                          contract_map=contract_map, kmom=kmom)
         _timer_debug1(self, "k-FCI contract_ss", t0)
         return ci1
 
