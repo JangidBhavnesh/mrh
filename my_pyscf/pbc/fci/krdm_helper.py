@@ -11,6 +11,7 @@ from mrh.my_pyscf.pbc.fci import (
     rdm_helper,
     spin_op,
 )
+from mrh.lib.helper import load_library
 
 # Author: Bhavnesh Jangid
 
@@ -24,6 +25,8 @@ convention identical to direct_spin1_cplx.
 '''
 
 _kci_lib_initialized = False
+_contract_ss_lib_initialized = False
+libpbcfci_k = None
 
 
 def _init_kci_lib():
@@ -60,6 +63,39 @@ def _init_kci_lib():
     _kci_lib_initialized = True
 
 
+def _init_contract_ss_lib():
+    global _contract_ss_lib_initialized
+    global libpbcfci_k
+    if _contract_ss_lib_initialized:
+        return
+
+    libpbcfci_k = load_library("libpbc_fci_contract_k")
+    libpbcfci_k.FCIcontract_ss_k.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+    ]
+    libpbcfci_k.FCIcontract_ss_k.restype = None
+    _contract_ss_lib_initialized = True
+
+
 def _as_contract_map(norb, nelec, nkpts, target_k=0, link_index=None,
                      spin=None, contract_map=None, kmom=None,
                      kconserv=None):
@@ -70,7 +106,8 @@ def _as_contract_map(norb, nelec, nkpts, target_k=0, link_index=None,
                            spin=spin, kmom=kmom, kconserv=kconserv)
     return kfci_helper.make_kfci_contract_map(
         norb, nelec, nkpts, target_k, link_index=link_index,
-        build_pair_tables=False, kmom=kmom, kconserv=kconserv)
+        build_pair_tables=False, explicit_ab=False, kmom=kmom,
+        kconserv=kconserv)
 
 def _unpack_k(norb, nelec, nkpts, link_index=None, spin=None, kmom=None,
               kconserv=None):
@@ -218,23 +255,65 @@ def make_rdm12(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
     rdm2 = dm2aa + dm2bb + dm2ab + dm2ab.transpose(2, 3, 0, 1)
     return rdm1.conj().T, rdm2
 
-def contract_ss(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
-                spin=None, kmom=None, kconserv=None):
+def contract_ss_embedded(fcivec, norb, nelec, nkpts, target_k=0,
+                         link_index=None, spin=None, contract_map=None,
+                         kmom=None, kconserv=None):
     '''
-    Apply S^2 to a k-FCI vector in a fixed total momentum sector.
-    The S^2 operator does not change the spatial total momentum sector, so the
-    full-space result is extracted back to the same k sector.
+    Apply S^2 after embedding the k-FCI vector in the full CI space.
     '''
     ci_full = embed_ksector_ci_to_full(fcivec, norb, nelec, nkpts,
                                        target_k=target_k,
                                        link_index=link_index, spin=spin,
-                                       kmom=kmom, kconserv=kconserv)
+                                       contract_map=contract_map, kmom=kmom,
+                                       kconserv=kconserv)
     ci_full = np.asarray(ci_full, dtype=np.complex128, order="C")
     ci1_full = spin_op.contract_ss0(ci_full, norb, _unpack_nelec(nelec, spin))
     return extract_ksector_ci_from_full(ci1_full, norb, nelec, nkpts,
                                         target_k=target_k,
                                         link_index=link_index, spin=spin,
-                                        kmom=kmom, kconserv=kconserv)
+                                        contract_map=contract_map, kmom=kmom,
+                                        kconserv=kconserv)
+
+def contract_ss(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
+                spin=None, contract_map=None, kmom=None, kconserv=None):
+    '''
+    Apply S^2 to a k-FCI vector in a fixed total momentum sector.
+    '''
+    neleca, nelecb = _unpack_nelec(nelec, spin)
+    contract_map = _as_contract_map(
+        norb, (neleca, nelecb), nkpts, target_k=target_k,
+        link_index=link_index, spin=spin, contract_map=contract_map,
+        kmom=kmom, kconserv=kconserv)
+    assert fcivec.size == contract_map.sector_size
+
+    fcivec = np.asarray(fcivec, dtype=np.complex128, order="C")
+    ci1 = np.empty(fcivec.shape, dtype=np.complex128, order="C")
+    link_indexa, link_indexb = contract_map.link_index
+
+    _init_contract_ss_lib()
+    libpbcfci_k.FCIcontract_ss_k(
+        fcivec.ctypes.data_as(ctypes.c_void_p),
+        ci1.ctypes.data_as(ctypes.c_void_p),
+        ctypes.c_int(norb),
+        ctypes.c_int(neleca),
+        ctypes.c_int(nelecb),
+        ctypes.c_int(nkpts),
+        ctypes.c_int(contract_map.blocks.shape[0]),
+        contract_map.blocks.ctypes.data_as(ctypes.c_void_p),
+        link_indexa.ctypes.data_as(ctypes.c_void_p),
+        ctypes.c_int(link_indexa.shape[0]),
+        ctypes.c_int(link_indexa.shape[1]),
+        link_indexb.ctypes.data_as(ctypes.c_void_p),
+        ctypes.c_int(link_indexb.shape[0]),
+        ctypes.c_int(link_indexb.shape[1]),
+        contract_map.stra_ids.ctypes.data_as(ctypes.c_void_p),
+        contract_map.stra_offsets.ctypes.data_as(ctypes.c_void_p),
+        contract_map.strb_ids.ctypes.data_as(ctypes.c_void_p),
+        contract_map.strb_offsets.ctypes.data_as(ctypes.c_void_p),
+        contract_map.str2tot_a.ctypes.data_as(ctypes.c_void_p),
+        contract_map.str2tot_b.ctypes.data_as(ctypes.c_void_p),
+    )
+    return ci1
 
 def spin_square(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
                 spin=None, kmom=None, kconserv=None, **kwargs):
