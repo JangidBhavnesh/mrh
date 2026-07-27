@@ -11,7 +11,7 @@ from mrh.my_pyscf.pbc import mcscf
 from mrh.my_pyscf.pbc import fci as pbc_fci
 from mrh.my_pyscf.pbc.fci import direct_spin1_cplx, direct_spin1_cplx_opt
 from mrh.my_pyscf.pbc.fci import direct_spin1_kfci
-from mrh.my_pyscf.pbc.fci import kcistrings
+from mrh.my_pyscf.pbc.fci import kcistrings, krdm_helper
 from mrh.my_pyscf.pbc.fci.direct_spin1_kfci import contract_2e_k, contract_1e_k, _unpack
 from mrh.my_pyscf.pbc.fci.kcistrings import gen_k_sector_maps, gen_k_sector_linkstr_info
 
@@ -542,11 +542,17 @@ class KnownValues(unittest.TestCase):
                     refsolver = direct_spin1_cplx.FCISolver()
 
                     ci1_k = kcisolver.contract_ss(fcivec_k.copy(), norb, nelec)
+                    ci1_embedded = krdm_helper.contract_ss_embedded(
+                        fcivec_k.copy(), norb, nelec, nkpts,
+                        target_k=target_k,
+                        link_index=(link_indexa, link_indexb))
                     ci1_full = refsolver.contract_ss(ci_full.copy(), norb, nelec)
                     ci1_ref = helper.extract_sector_from_full_ci(ci1_full, blocks, straid_k, strbid_k)
 
                     self.assertEqual(ci1_k.shape, ci1_ref.shape)
                     self.assertTrue(np.allclose(ci1_k, ci1_ref, atol=1e-12, rtol=1e-12))
+                    self.assertTrue(np.allclose(
+                        ci1_k, ci1_embedded, atol=1e-12, rtol=1e-12))
 
                     ss_k, mult_k = kcisolver.spin_square(fcivec_k.copy(), norb, nelec)
                     ss_ref, mult_ref = refsolver.spin_square(ci_full.copy(), norb, nelec)
