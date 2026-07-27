@@ -132,6 +132,13 @@ static int make_link_order_k(int *link_index, int nstr, int nlink,
         return 0;
 }
 
+/*
+ * Group links by target string and momentum transfer.
+ *
+ * offsets[target * nkpts + dK] gives the first link ending at target with
+ * transfer dK.  This reverse ordering lets a thread gather all contributions
+ * to an output string instead of scattering contributions from source strings.
+ */
 static int make_link_order_target_k(int *link_index, int nstr, int nlink,
                                     int nkpts, LinkOrderK *order)
 {
@@ -559,15 +566,22 @@ void FCIcontract_ss_k(double complex *ci0,
         free(block_nb);
 }
 
-void FCIcontract_2e_k_stream_ab_legacy(double complex *eri,
-                                       double complex *ci0,
-                                       double complex *ci1,
-                                       int nkpts, int ncas,
-                                       int nblocks, int *blocks,
-                                       int *linka, int nstra, int nlinka,
-                                       int *linkb, int nstrb, int nlinkb,
-                                       int *str2tot_a, int *str2tot_b,
-                                       int *ksub, int *kneg)
+/*
+ * Old streamed alpha-beta contraction.
+ *
+ * This source-driven version is kept as a reference.  It parallelizes over
+ * destination momentum blocks, so a fixed-k calculation exposes only nkpts
+ * useful OpenMP tasks.
+ */
+void FCIcontract_2e_k_stream_ab_old(double complex *eri,
+                                    double complex *ci0,
+                                    double complex *ci1,
+                                    int nkpts, int ncas,
+                                    int nblocks, int *blocks,
+                                    int *linka, int nstra, int nlinka,
+                                    int *linkb, int nstrb, int nlinkb,
+                                    int *str2tot_a, int *str2tot_b,
+                                    int *ksub, int *kneg)
 {
         int ndet = 0;
         int table_size = nkpts * nkpts;
@@ -710,6 +724,17 @@ void FCIcontract_2e_k_stream_ab_legacy(double complex *eri,
         free(block_nb);
 }
 
+/*
+ * Stream the alpha-beta two-electron contraction in one momentum sector.
+ *
+ * Alpha and beta links are paired when their momentum transfers are dK and
+ * -dK.  Reverse link tables are used to gather contributions for each target
+ * determinant directly from the packed source blocks.
+ *
+ * One OpenMP task owns one alpha-string row of an output block.  All writes
+ * made by that task are therefore disjoint from the writes of other tasks, so
+ * the contraction does not need atomics, locks, or thread-local CI vectors.
+ */
 void FCIcontract_2e_k_stream_ab(double complex *eri,
                                 double complex *ci0,
                                 double complex *ci1,
@@ -742,6 +767,7 @@ void FCIcontract_2e_k_stream_ab(double complex *eri,
                               &ndet) != 0) {
                 return;
         }
+        /* Reverse links are indexed by target string and dK. */
         if (make_link_order_target_k(
                     linka, nstra, nlinka, nkpts, &order_a) != 0 ||
             make_link_order_target_k(
@@ -768,6 +794,7 @@ void FCIcontract_2e_k_stream_ab(double complex *eri,
                 return;
         }
 
+        /* Flatten the alpha rows from all packed momentum blocks. */
         alpha_prefix[0] = 0;
         for (int iblk = 0; iblk < nblocks; iblk++) {
                 alpha_prefix[iblk + 1] = alpha_prefix[iblk]
@@ -782,6 +809,7 @@ void FCIcontract_2e_k_stream_ab(double complex *eri,
                str2tot_a, str2tot_b, block_offset, block_nb, \
                order_a, order_b, kneg, alpha_prefix, alpha_tasks)
         for (int itask = 0; itask < alpha_tasks; itask++) {
+                /* This task owns the complete output row (ia1, all ib1). */
                 int iblk = 0;
                 while (alpha_prefix[iblk + 1] <= itask) {
                         iblk++;
@@ -800,6 +828,7 @@ void FCIcontract_2e_k_stream_ab(double complex *eri,
                         double complex value = 0.0 + 0.0 * I;
 
                         for (int dka = 0; dka < nkpts; dka++) {
+                                /* Total momentum is conserved by dKb = -dKa. */
                                 int dkb = kneg[dka];
                                 int akey = astr1 * nkpts + dka;
                                 int bkey = bstr1 * nkpts + dkb;
@@ -841,6 +870,10 @@ void FCIcontract_2e_k_stream_ab(double complex *eri,
                                                         continue;
                                                 }
 
+                                                /*
+                                                 * Both spin orderings enter
+                                                 * the alpha-beta contraction.
+                                                 */
                                                 long long eri_idx_ab =
                                                         eri_index_k(
                                                         la[LINK_K_CRE],
@@ -864,6 +897,10 @@ void FCIcontract_2e_k_stream_ab(double complex *eri,
                                                 double sign = (double)(
                                                         la[LINK_SIGN]
                                                         * lb[LINK_SIGN]);
+                                                /*
+                                                 * Address in the packed
+                                                 * source block.
+                                                 */
                                                 int src = src_offset
                                                         + aloc0
                                                         * block_nb[src_key]
