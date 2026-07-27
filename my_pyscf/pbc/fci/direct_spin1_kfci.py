@@ -143,9 +143,12 @@ def _load_k_contract_lib():
             ctypes.c_void_p,  # linkb
             ctypes.c_int,     # nstrb
             ctypes.c_int,     # nlinkb
+            ctypes.c_void_p,  # stra_ids
+            ctypes.c_void_p,  # stra_offsets
+            ctypes.c_void_p,  # strb_ids
+            ctypes.c_void_p,  # strb_offsets
             ctypes.c_void_p,  # str2tot_a
             ctypes.c_void_p,  # str2tot_b
-            ctypes.c_void_p,  # ksub
             ctypes.c_void_p,  # kneg
         ]
         libpbcfci_k.FCIcontract_2e_k_stream_ab.restype = None
@@ -688,9 +691,12 @@ def contract_2e_k(eri, fcivec, norb, nelec, nkpts, target_k,
                 link_indexb.ctypes.data_as(ctypes.c_void_p),
                 ctypes.c_int(link_indexb.shape[0]),
                 ctypes.c_int(link_indexb.shape[1]),
+                contract_map.stra_ids.ctypes.data_as(ctypes.c_void_p),
+                contract_map.stra_offsets.ctypes.data_as(ctypes.c_void_p),
+                contract_map.strb_ids.ctypes.data_as(ctypes.c_void_p),
+                contract_map.strb_offsets.ctypes.data_as(ctypes.c_void_p),
                 contract_map.str2tot_a.ctypes.data_as(ctypes.c_void_p),
                 contract_map.str2tot_b.ctypes.data_as(ctypes.c_void_p),
-                contract_map.kmom.ksub.ctypes.data_as(ctypes.c_void_p),
                 contract_map.kmom.kneg.ctypes.data_as(ctypes.c_void_p),
             )
     _timer_debug1(log_obj, "k-FCI contract_2e C kernel", t0)
