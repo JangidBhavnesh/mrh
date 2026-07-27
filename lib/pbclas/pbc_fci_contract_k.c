@@ -340,6 +340,163 @@ void FCIcontract_1e_k(double complex *h1e,
         free(beta_prefix);
 }
 
+void FCIcontract_ss_k(double complex *ci0,
+                      double complex *ci1,
+                      int norb, int neleca, int nelecb, int nkpts,
+                      int nblocks, int *blocks,
+                      int *linka, int nstra, int nlinka,
+                      int *linkb, int nstrb, int nlinkb,
+                      int *stra_ids, int *stra_offsets,
+                      int *strb_ids, int *strb_offsets,
+                      int *str2tot_a, int *str2tot_b)
+{
+        int ndet = 0;
+        int *block_offset = NULL;
+        int *block_na = NULL;
+        int *block_nb = NULL;
+
+        if (make_block_tables(nkpts, nblocks, blocks,
+                              &block_offset, &block_na, &block_nb,
+                              &ndet) != 0) {
+                return;
+        }
+
+        size_t lookup_size = (size_t)nstrb * norb * norb;
+        int *beta_target = malloc(sizeof(int) * (lookup_size > 0
+                                                  ? lookup_size : 1));
+        int *beta_sign = calloc(lookup_size > 0 ? lookup_size : 1,
+                                sizeof(int));
+        int *strk_a = malloc(sizeof(int) * (size_t)(nstra > 0 ? nstra : 1));
+        int *strk_b = malloc(sizeof(int) * (size_t)(nstrb > 0 ? nstrb : 1));
+        int *alpha_prefix = malloc(sizeof(int) * (size_t)(nblocks + 1));
+
+        if (beta_target == NULL || beta_sign == NULL ||
+            strk_a == NULL || strk_b == NULL || alpha_prefix == NULL) {
+                free(alpha_prefix);
+                free(strk_b);
+                free(strk_a);
+                free(beta_sign);
+                free(beta_target);
+                free(block_offset);
+                free(block_na);
+                free(block_nb);
+                return;
+        }
+
+        for (size_t i = 0; i < lookup_size; i++) {
+                beta_target[i] = -1;
+        }
+        for (int bstr = 0; bstr < nstrb; bstr++) {
+                for (int ilink = 0; ilink < nlinkb; ilink++) {
+                        int *link = linkb + (bstr * nlinkb + ilink)
+                                * NLINK_FIELDS;
+                        int target = link[LINK_TARGET];
+                        int sign = link[LINK_SIGN];
+                        if (target < 0 || sign == 0) {
+                                continue;
+                        }
+                        int p = link[LINK_CRE];
+                        int q = link[LINK_DES];
+                        size_t idx = ((size_t)bstr * norb + p) * norb + q;
+                        beta_target[idx] = target;
+                        beta_sign[idx] = sign;
+                }
+        }
+
+        for (int k = 0; k < nkpts; k++) {
+                for (int i = stra_offsets[k]; i < stra_offsets[k + 1]; i++) {
+                        strk_a[stra_ids[i]] = k;
+                }
+                for (int i = strb_offsets[k]; i < strb_offsets[k + 1]; i++) {
+                        strk_b[strb_ids[i]] = k;
+                }
+        }
+
+        alpha_prefix[0] = 0;
+        for (int iblk = 0; iblk < nblocks; iblk++) {
+                alpha_prefix[iblk + 1] = alpha_prefix[iblk]
+                        + blocks[iblk * 6 + BLOCK_NA];
+        }
+        int alpha_tasks = alpha_prefix[nblocks];
+        double ss0 = 0.25 * (neleca - nelecb) * (neleca - nelecb)
+                + 0.5 * (neleca + nelecb);
+
+#pragma omp parallel for schedule(dynamic) default(none) \
+        shared(ci0, ci1, norb, nkpts, nblocks, blocks, \
+               linka, nstra, nlinka, nstrb, \
+               stra_ids, stra_offsets, strb_ids, strb_offsets, \
+               str2tot_a, str2tot_b, block_offset, block_nb, \
+               beta_target, beta_sign, strk_a, strk_b, \
+               alpha_prefix, alpha_tasks, ss0)
+        for (int itask = 0; itask < alpha_tasks; itask++) {
+                int iblk = 0;
+                while (alpha_prefix[iblk + 1] <= itask) {
+                        iblk++;
+                }
+
+                int *blk = blocks + iblk * 6;
+                int ka1 = blk[BLOCK_KA];
+                int kb1 = blk[BLOCK_KB];
+                int nb1 = blk[BLOCK_NB];
+                int dst_offset = blk[BLOCK_OFFSET];
+                int ia1 = itask - alpha_prefix[iblk];
+                int astr1 = stra_ids[stra_offsets[ka1] + ia1];
+
+                for (int ib1 = 0; ib1 < nb1; ib1++) {
+                        int bstr1 = strb_ids[strb_offsets[kb1] + ib1];
+                        int dst = dst_offset + ia1 * nb1 + ib1;
+                        double complex value = ss0 * ci0[dst];
+
+                        for (int ilink = 0; ilink < nlinka; ilink++) {
+                                int *la = linka + (astr1 * nlinka + ilink)
+                                        * NLINK_FIELDS;
+                                int astr0 = la[LINK_TARGET];
+                                int signa = la[LINK_SIGN];
+                                if (astr0 < 0 || signa == 0) {
+                                        continue;
+                                }
+
+                                int p = la[LINK_CRE];
+                                int q = la[LINK_DES];
+                                size_t idx = ((size_t)bstr1 * norb + q)
+                                        * norb + p;
+                                int bstr0 = beta_target[idx];
+                                if (bstr0 < 0) {
+                                        continue;
+                                }
+
+                                int ka0 = strk_a[astr0];
+                                int kb0 = strk_b[bstr0];
+                                int src_key = ka0 * nkpts + kb0;
+                                int src_offset = block_offset[src_key];
+                                if (src_offset < 0) {
+                                        continue;
+                                }
+
+                                int ia0 = str2tot_a[ka0 * nstra + astr0];
+                                int ib0 = str2tot_b[kb0 * nstrb + bstr0];
+                                if (ia0 < 0 || ib0 < 0) {
+                                        continue;
+                                }
+
+                                int src = src_offset
+                                        + ia0 * block_nb[src_key] + ib0;
+                                value -= signa * beta_sign[idx] * ci0[src];
+                        }
+                        ci1[dst] = value;
+                }
+        }
+
+        free(alpha_prefix);
+        free(strk_b);
+        free(strk_a);
+        free(beta_sign);
+        free(beta_target);
+        free(block_offset);
+        free(block_na);
+        free(block_nb);
+}
+
 void FCIcontract_2e_k_stream_ab(double complex *eri,
                                 double complex *ci0,
                                 double complex *ci1,
