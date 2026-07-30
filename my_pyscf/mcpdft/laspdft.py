@@ -53,12 +53,7 @@ class _LASPDFT(_PDFT):
         return eri
 
     def multi_state(self, method='Lin'):
-        if method.upper() == "LIN":
-            from mrh.my_pyscf.mcpdft._lpdft import linear_multi_state
-            return linear_multi_state(self)
-        else:
-            raise NotImplementedError(f"StateAverageMix not available for {method}")
-
+        raise NotImplementedError(f"MS-PDFT not avaialble for the LAS wave functions.")
 
 def get_mcpdft_child_class(mc, ot, DoLASSI=False, states=None, **kwargs):
     mc_doc = (mc.__class__.__doc__ or 'No docstring for MC-SCF parent method')
@@ -82,15 +77,6 @@ def get_mcpdft_child_class(mc, ot, DoLASSI=False, states=None, **kwargs):
                                  grids_level=None, grids_attr=None, dump_chk=False, **kwargs):
             return _LASPDFT.compute_pdft_energy_(self, mo_coeff=mo_coeff, ci=ci, ot=ot, otxc=otxc,
                     grids_level=grids_level, grids_attr=grids_attr, dump_chk=False, **kwargs)
-
-        def multi_state(self, **kwargs):
-            """
-            In future will have to change this to consider the modal space selection, weights...
-            """
-            assert self.DoLASSI, "multi_state is only defined for post LAS methods"
-            return _LASPDFT.multi_state(self, **kwargs)
-
-        multi_state_mix = multi_state
 
         if DoLASSI:
             _mc_class.DoLASSI = True

@@ -16,12 +16,11 @@ pes = np.loadtxt ('c2h6n4_pes_old.dat')[:34,:]
 pes = np.hstack ((pes, np.zeros ((34,1))))
 pes[33,3] = las.e_tot
 
-# ISN'T THIS SO MUCH BETTER RIDDHISH?????
 for ix, dr_nn in enumerate (np.arange (2.9, -0.301, -0.1)):
     mol1 = struct (dr_nn, dr_nn, '6-31g', symmetry=False)
     pes[32-ix,3] = las_scanner (mol1)
 
-print ("  r_NN  {:>11s}  {:>13s}  {:>13s}".format ("CASSCF", "vLASSCF(v1)", "vLASSCF(test)"))
+print ("  r_NN  {:>11s}  {:>13s}  {:>13s}".format ("CASSCF", "LASSCF(ref)", "LASSCF(test)"))
 for row in pes:
     print (" {:5.3f}  {:11.6f}  {:13.8f}  {:13.8f}".format (*row))
 
