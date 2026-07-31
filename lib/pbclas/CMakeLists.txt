@@ -24,3 +24,13 @@ set_target_properties (clib_mrh_pbc_fci_contract_opt PROPERTIES
     CLEAN_DIRECT_OUTPUT 1
     LIBRARY_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}
     OUTPUT_NAME "pbc_fci_contract_opt")
+
+
+set (CPLX_CSF_SOURCE_FILES "cplx_csf.c")
+add_library (clib_mrh_cplx_csf SHARED ${CPLX_CSF_SOURCE_FILES})
+target_link_libraries(clib_mrh_cplx_csf ${FCI_LIBRARY} ${LAPACK_LIBRARIES})
+set_target_properties (clib_mrh_cplx_csf PROPERTIES
+    LINKER_LANGUAGE C
+    CLEAN_DIRECT_OUTPUT 1
+    LIBRARY_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}
+    OUTPUT_NAME "cplx_csf")
