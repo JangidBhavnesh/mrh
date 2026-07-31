@@ -382,8 +382,10 @@ def kernel (las, mo_coeff=None, ci0=None, lroots=None, lweights=None, verbose=0,
         ncas=las.ncas, ncore=las.ncore)
     eri_cas = las.get_h2cas (mo_coeff)
 
+    phase_per_frag = None
     if isinstance(las, PBCLASCITransSymm):
         las._sanity_check_trans_symmetry(mo_coeff, h1eff, eri_cas)
+        phase_per_frag = las.get_phase_per_frag(mo_coeff)
     
     if (ci0 is None or any ([c is None for c in ci0]) or
             any ([any ([c2 is None for c2 in c1]) for c1 in ci0])):
@@ -403,6 +405,7 @@ def kernel (las, mo_coeff=None, ci0=None, lroots=None, lweights=None, verbose=0,
                 fcisolvers, stdout=las.stdout,
                 lweights=[l[state] for l in lweights], verbose=verbose,
                 ref_cell=las.ref_cell,
+                phase_per_frag=phase_per_frag,
             )
         else:
             solver = ImpureProductStateFCISolver(
