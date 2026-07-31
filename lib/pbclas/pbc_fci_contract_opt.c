@@ -3,7 +3,10 @@
 This file is generalization of fci_contract_nosym.c to complex version. Instead of
 calling the FCIContract_2es1 function four times, In this file I have written the FCIcontract_2es1_zgemm 
 with complex arrays.
+*/
 
+/*
+* Author: Bhavnesh Jangid
 */
 
 #include <stdlib.h>
