@@ -523,6 +523,90 @@ class PBCTransSymmImpureProductStateFCISolver(ImpureProductStateFCISolver):
         )
         return self._unpack_grad(grad_ref)
 
+    def _1shot_ref(self, h0eff_ref, h1eff_ref, h2, ci_ref,
+                   norb_f, nelec_f, orbsym=None, **kwargs):
+        '''Optimize only the reference-fragment CI vector once.'''
+        ref = self.ref_cell
+        i = sum(norb_f[:ref])
+        j = i + norb_f[ref]
+        norb = norb_f[ref]
+        solver = self.fcisolvers[ref]
+        nelec = self._get_nelec(solver, nelec_f[ref])
+        h2_ref = h2[i:j, i:j, i:j, i:j]
+
+        orbsym_ref = getattr(solver, 'orbsym', None)
+        if orbsym is not None:
+            orbsym_ref = orbsym[i:j]
+        energy_ref, ci_ref = solver.kernel(
+            h1eff_ref, h2_ref, norb, nelec, ci0=ci_ref,
+            ecore=h0eff_ref, orbsym=orbsym_ref, **kwargs,
+        )
+        return energy_ref, np.array(ci_ref, copy=True)
+
+    def kernel(self, h1, h2, norb_f, nelec_f, ecore=0, ci0=None,
+               orbsym=None, conv_tol_grad=1e-4, conv_tol_self=1e-10,
+               max_cycle_macro=50, serialfrag=False, **kwargs):
+        '''Optimize the packed reference CI and expand it on return.'''
+        log = self.log
+        converged = False
+        energy_ref = 0.0
+        energy_sigma = 0.0
+        ci_ref = self._pack_ci(ci0)
+        solver_ref = self.fcisolvers[self.ref_cell]
+        if max_cycle_macro < 1:
+            raise ValueError("max_cycle_macro must be positive")
+
+        log.info(
+            'Entering translation-symmetric reference-cell CI iteration'
+        )
+        for it in range(max_cycle_macro):
+            ci_ref = self._get_ref_init_guess(
+                ci_ref, norb_f, nelec_f, h1, h2,
+            )
+            h1eff_ref, h0eff_ref = self._project_ref_hfrag(
+                h1, h2, ci_ref, norb_f, nelec_f,
+                ecore=ecore, **kwargs,
+            )
+            grad_ref = self._get_ref_grad(
+                h1eff_ref, h2, ci_ref, norb_f, nelec_f,
+                orbsym=orbsym, **kwargs,
+            )
+            grad_max = np.amax(np.abs(grad_ref))
+            solver_converged = np.all(
+                np.asarray(getattr(solver_ref, 'converged', False))
+            )
+            log.info(
+                'Cycle %d: max ref grad = %e ; sigma = %e ; '
+                'reference solver converged = %s',
+                it, grad_max, energy_sigma, solver_converged,
+            )
+            if (grad_max < conv_tol_grad
+                    and energy_sigma < conv_tol_self
+                    and solver_converged and it > 0):
+                converged = True
+                break
+
+            energy_ref, ci_ref = self._1shot_ref(
+                h0eff_ref, h1eff_ref, h2, ci_ref,
+                norb_f, nelec_f, orbsym=orbsym, **kwargs,
+            )
+            # All translated fragment energies are identical, so their spread
+            # is zero by construction.
+            energy_sigma = 0.0
+
+        conv_str = ['NOT converged', 'converged'][int(converged)]
+        log.info(
+            'Translation-symmetric reference-cell CI iteration %s after %d '
+            'cycles', conv_str, it + 1,
+        )
+
+        ci = self._unpack_cif(ci_ref)
+        energy_elec = self.energy_elec(
+            h1, h2, ci, norb_f, nelec_f,
+            ecore=ecore, efinal=energy_ref, **kwargs,
+        )
+        return converged, energy_elec, ci
+
     def _project_ref_hfrag(self, h1, h2, ci_ref, norb_f, nelec_f,
                            ecore=0, phases=None, dm1s=None, dm2=None,
                            **kwargs):
