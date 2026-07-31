@@ -8,7 +8,11 @@ from pyscf.pbc import gto, scf
 
 from mrh.my_pyscf.pbc.mcscf import avas
 from mrh.my_pyscf.pbc.mcscf import klasci as klasci_module
-from mrh.my_pyscf.pbc.mcscf.klasci import kLASCI
+from mrh.my_pyscf.pbc.mcscf.klasci import (
+    PBCLASCINoSymm,
+    PBCLASCITransSymm,
+    kLASCI,
+)
 from mrh.my_pyscf.pbc.util.orth import meta_lowdin_orbitals
 
 # Author: Bhavnesh Jangid
@@ -21,8 +25,8 @@ from mrh.my_pyscf.pbc.util.orth import meta_lowdin_orbitals
 #         than the active-band space with a clear error.
 # Test-3: For a simple periodic Be atom, the localized active orbital should
 #         align with the orthonormal Be 2s orbital at every k-point.
-# Test-4: trans_sym=True should check both Wannier-basis Hamiltonians before
-#         the product-state solver runs.
+# Test-4: trans_sym=True should select the translation-symmetric child class
+#         and check its active space, Wannier orbitals, and Hamiltonians.
 
 cell = kmf = mo_coeff = klas = None
 kmesh = [2, 1, 1]
@@ -178,7 +182,8 @@ class KnownValues(unittest.TestCase):
             )
 
     def test_trans_sym_checks_wannier_hamiltonians(self):
-        self.assertFalse(klas.trans_sym)
+        self.assertIs(type(klas), PBCLASCINoSymm)
+        self.assertFalse(hasattr(klas, "trans_sym"))
         trans_klas = kLASCI(
             kmf, 2, (1, 1), kmesh=kmesh, trans_sym=True,
         )
@@ -187,6 +192,10 @@ class KnownValues(unittest.TestCase):
         )
 
         with mock.patch.object(
+                klasci_module, "check_wannier_orbital_translation",
+                wraps=klasci_module.check_wannier_orbital_translation
+             ) as check_orbitals, \
+             mock.patch.object(
                 klasci_module, "check_h1e_translation",
                 wraps=klasci_module.check_h1e_translation) as check_h1e, \
              mock.patch.object(
@@ -194,9 +203,20 @@ class KnownValues(unittest.TestCase):
                 wraps=klasci_module.check_h2e_translation) as check_h2e:
             trans_klas.kernel(mo_loc)
 
+        self.assertIs(type(trans_klas), PBCLASCITransSymm)
         self.assertTrue(trans_klas.trans_sym)
+        check_orbitals.assert_called_once()
         check_h1e.assert_called_once()
         check_h2e.assert_called_once()
+
+        ncas_sub = trans_klas.ncas_sub.copy()
+        try:
+            trans_klas.ncas_sub[1] += 1
+            with self.assertRaisesRegex(
+                    ValueError, "active-space consistency check failed"):
+                trans_klas.check_active_space_consistency(mo_loc)
+        finally:
+            trans_klas.ncas_sub = ncas_sub
 
         with self.assertRaisesRegex(TypeError, "trans_sym must be a boolean"):
             kLASCI(kmf, 2, (1, 1), kmesh=kmesh, trans_sym="yes")
