@@ -84,3 +84,177 @@ def _interpret_fragment_orbitals(cell, frag_atoms, frags_by_AOs=False):
     return ao_idx
 
 _interpret_unit_cell_orbitals = _interpret_fragment_orbitals
+
+
+def localize_init_guess(klas, frag_atoms=None, mo_coeff=None, spin=None, 
+                        lo_coeff=None,fock=None, mo_occ=None, freeze_cas_spaces=True,
+                        frags_by_AOs=False, smults_f=None, nelec_f=None, 
+                        return_umat=False, return_svals=False, sval_thresh=1e-8):
+    '''
+    Localize one active space per unit cell.Some args are not used in this function
+    but are kept for API compatibility with molecular LAS localization. Those variables
+    are ``spin``, ``fock``, ``smults_f`` and ``nelec_f``.  They are not required
+    when there is one translationally repeated active space per unit cell.
+
+    Now coming back to this function, it is the periodic, active-space-preserving 
+    analogue of molecular ``localize_init_guess``.  At every k-point, an overlap
+    SVD selects the combinations of the complete active-band manifold with the largest
+    projection onto the same unit-cell orbital space.
+    
+    args:
+        klas: instance of mrh.my_pyscf.pbc.mcscf.klasci 
+              periodic LASCI object
+        frag_atoms: one unit-cell fragment, specified by atom indices, 
+                    AO-label strings, or AO indices when ``frags_by_AOs=True``
+
+    kwargs:
+        mo_coeff: np.ndarray or the list of np.arrays, Shape: (nkpts, nao, nmo)
+            molecular orbitals for each k-point. If not provided, the orbitals 
+            from klas._scf.mo_coeff are used.
+        lo_coeff: np.ndarray or the list of np.arrays, Shape: (nkpts, nao, nmo)
+                  orthonormal trial orbitals.  meta-Lowdin AOs are used by default.
+        mo_occ: np.array or the list of np.arrays, Shape: (nkpts, nmo)
+            optional occupation labels.  When supplied, only active
+            orbitals with the same occupation are mixed, as in the molecular
+            implementation. Basically trying to preserve the reference HF Det.
+        freeze_cas_spaces: bool, optional, (default: True)
+            If True, the active space is preserved and only the gauge of the
+            active orbitals is changed.  If False, the active space is allowed to
+            change, as in the molecular implementation.  But currently, this is not
+            implemented for periodic systems and with the LAS framework.
+        frags_by_AOs: see above.
+
+    returns:
+        return_umat: bool, optional, (default: False)
+            If True, also return the full k-point MO rotation matrices.
+            Umat[k] is the unitary matrix that transforms the input orbitals at k-point k
+            to the localized orbitals at k-point k.
+        return_svals: bool, optional, (default: False)
+            If True, also return the fragment-overlap singular values.
+        sval_thresh: float, optional, (default: 1e-8)
+            Minimum accepted singular value.  If any singular value is below this
+            threshold, an error is raised. 
+    '''
+    # making sure that the unused args are not used in this function
+    del spin, fock, smults_f, nelec_f
+
+    if not freeze_cas_spaces:
+        msg = ("Periodic active-band localization always preserves the"
+               "active space; freeze_cas_spaces must be True")
+        raise NotImplementedError(msg)
+    
+    if mo_coeff is None: mo_coeff = klas.mo_coeff
+    mo_coeff = np.asarray(mo_coeff)
+
+    kmf = klas._scf
+    cell = kmf.cell
+    kpts = kmf.kpts
+    nkpts = len(kpts)
+    ncore = klas.ncore
+    ncas = klas.ncas
+    nocc = ncore + ncas
+
+    # Some sanity checks for mo_coeff
+    if mo_coeff.ndim != 3:
+        msg = f"mo_coeff must have shape (nkpts, nao, nmo); got {mo_coeff.shape}"
+        raise ValueError(msg)
+    
+    if mo_coeff.shape[0] != nkpts:
+        msg = (f"mo_coeff contains {mo_coeff.shape[0]} k-points; "
+               f"expected {nkpts}")
+        raise ValueError(msg)
+    
+    nao, nmo = mo_coeff.shape[1:]
+    if nao != cell.nao_nr():
+        msg = (f"mo_coeff AO dimension is {nao}; expected {cell.nao_nr()}")
+        raise ValueError(msg)
+
+    # Get the ovlp from the kmf object only, in case of the pseudo-potential
+    # directly using the cell.pbc_intro might be dangerous.
+    ovlp = np.asarray(kmf.get_ovlp(kpts=kpts))
+
+    # Localize the orbitals
+    if lo_coeff is None: lo_coeff = meta_lowdin_orbitals(cell, ovlp)
+    lo_coeff = np.asarray(lo_coeff)
+
+    if lo_coeff.ndim != 3 or lo_coeff.shape[:2] != (nkpts, nao):
+        msg = (f"lo_coeff must have shape (nkpts, nao, nlo); got {lo_coeff.shape}")
+        raise ValueError(msg)
+
+    frag_orbs = _interpret_unit_cell_orbitals(cell, frag_atoms, frags_by_AOs=frags_by_AOs
+    )
+    if frag_orbs is None:
+        frag_orbs = np.arange(lo_coeff.shape[2])
+    if np.any(frag_orbs >= lo_coeff.shape[2]):
+        msg = ("Fragment AO index is outside the localized trial-orbital space")
+        raise IndexError(msg)
+    
+    if frag_orbs.size < ncas:
+        msg = (f"Cannot localize {ncas} active bands using only "
+               f"{frag_orbs.size} trial orbitals")
+        raise ValueError(msg)
+
+    # If we want to preserve the active space determinant.
+    # Collect the active-band occupations for each k-point.  If not provided,
+    # the default is to allow all active bands to mix.
+    active_occ = _active_occupations(klas, mo_occ, nkpts, nmo, ncore, ncas)
+
+
+    result_dtype = np.result_type(mo_coeff.dtype, lo_coeff.dtype)
+    mo_out = np.array(mo_coeff, dtype=result_dtype, copy=True)
+    umat = np.zeros((nkpts, nmo, nmo), dtype=mo_out.dtype)
+    svals_out = []
+
+    for k in range(nkpts):
+        c_act = mo_coeff[k, :, ncore:nocc]
+        trial = lo_coeff[k][:, frag_orbs]
+        if active_occ[k] is None:
+            # The right singular vectors alone choose principal directions in
+            # the active space, but rotate the trial orbitals at the same
+            # time.  For one complete active space per unit cell, use the
+            # polar factor instead so each active band is aligned with the
+            # requested trial orbital and obtains a reproducible k-point
+            # gauge.  This is also invariant to the input active-band gauge.
+            overlap = c_act.conj().T @ ovlp[k] @ trial
+            left, svals, right_h = np.linalg.svd(
+                overlap, full_matrices=False
+            )
+            if trial.shape[1] == ncas:
+                c_local = c_act @ left @ right_h
+            else:
+                # With an overcomplete trial space there is no one-to-one
+                # orbital labelling.  Retain its best ncas principal
+                # directions, consistent with the molecular SVD framework.
+                c_local = c_act @ left
+        else:
+            _, svals, c_local, _ = klas._svd(
+                trial, c_act, s=ovlp[k], mo_occ=active_occ[k]
+            )
+        if len(svals) < ncas:
+            raise ValueError(
+                f"k-point {k}: only {len(svals)} trial directions are "
+                f"available for {ncas} active bands"
+            )
+        svals = np.asarray(svals[:ncas])
+        if np.min(svals) < sval_thresh:
+            raise ValueError(
+                f"k-point {k}: active/trial overlap is rank deficient; "
+                f"singular values = {svals}"
+            )
+        c_local = np.asarray(c_local[:, :ncas])
+        mo_out[k, :, ncore:nocc] = c_local
+
+        umat[k] = np.eye(nmo, dtype=mo_out.dtype)
+        umat[k, ncore:nocc, ncore:nocc] = (
+            c_act.conj().T @ ovlp[k] @ c_local
+        )
+        svals_out.append(svals)
+
+    orthogonality_check(mo_out, ovlp)
+    svals_out = np.asarray(svals_out)
+    result = [mo_out]
+    if return_umat:
+        result.append(umat)
+    if return_svals:
+        result.append(svals_out)
+    return result[0] if len(result) == 1 else tuple(result)
