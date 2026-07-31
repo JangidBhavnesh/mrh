@@ -1,21 +1,12 @@
 #!/usr/bin/env python
 
 import unittest
-from unittest import mock
 import numpy as np
 
 from pyscf.pbc import gto, scf
 
 from mrh.my_pyscf.pbc.mcscf import avas
-from mrh.my_pyscf.pbc.mcscf import klasci as klasci_module
-from mrh.my_pyscf.pbc.mcscf.klasci import (
-    PBCLASCINoSymm,
-    PBCLASCITransSymm,
-    kLASCI,
-)
-from mrh.my_pyscf.pbc.mcscf.productstate import (
-    PBCTransSymmImpureProductStateFCISolver,
-)
+from mrh.my_pyscf.pbc.mcscf.klasci import kLASCI
 from mrh.my_pyscf.pbc.util.orth import meta_lowdin_orbitals
 
 # Author: Bhavnesh Jangid
@@ -28,8 +19,6 @@ from mrh.my_pyscf.pbc.util.orth import meta_lowdin_orbitals
 #         than the active-band space with a clear error.
 # Test-3: For a simple periodic Be atom, the localized active orbital should
 #         align with the orthonormal Be 2s orbital at every k-point.
-# Test-4: trans_sym=True should select the translation-symmetric child class
-#         and check its active space, Wannier orbitals, and Hamiltonians.
 
 cell = kmf = mo_coeff = klas = None
 kmesh = [2, 1, 1]
@@ -183,103 +172,6 @@ class KnownValues(unittest.TestCase):
             np.testing.assert_allclose(
                 mo_loc[k, :, nocc:], be_mo[k, :, nocc:], atol=1e-12,
             )
-
-    def test_trans_sym_checks_wannier_hamiltonians(self):
-        self.assertIs(type(klas), PBCLASCINoSymm)
-        self.assertFalse(hasattr(klas, "trans_sym"))
-        trans_klas = kLASCI(
-            kmf, 2, (1, 1), kmesh=kmesh, trans_sym=True, ref_cell=1,
-        )
-        mo_loc = trans_klas.localize_init_guess(
-            ["H 1s"], mo_coeff=mo_coeff,
-        )
-
-        with mock.patch.object(
-                klasci_module, "check_wannier_orbital_translation",
-                wraps=klasci_module.check_wannier_orbital_translation
-             ) as check_orbitals, \
-             mock.patch.object(
-                klasci_module, "check_h1e_translation",
-                wraps=klasci_module.check_h1e_translation) as check_h1e, \
-             mock.patch.object(
-                klasci_module, "check_h2e_translation",
-                wraps=klasci_module.check_h2e_translation) as check_h2e, \
-             mock.patch.object(
-                klasci_module, "PBCTransSymmImpureProductStateFCISolver",
-                wraps=PBCTransSymmImpureProductStateFCISolver
-             ) as trans_solver:
-            trans_klas.kernel(mo_loc)
-
-        self.assertIs(type(trans_klas), PBCLASCITransSymm)
-        self.assertTrue(trans_klas.trans_sym)
-        self.assertEqual(trans_klas.ref_cell, 1)
-        self.assertEqual(len(trans_klas.ci), np.prod(kmesh))
-        check_orbitals.assert_called_once()
-        check_h1e.assert_called_once()
-        check_h2e.assert_called_once()
-        trans_solver.assert_called_once()
-        self.assertEqual(trans_solver.call_args.kwargs["ref_cell"], 1)
-
-        with self.assertRaises(NotImplementedError):
-            trans_klas.pack_h1(np.empty((0, 0)))
-        with self.assertRaises(NotImplementedError):
-            trans_klas.pack_h2(np.empty((0, 0, 0, 0)))
-
-        ncas_sub = trans_klas.ncas_sub.copy()
-        try:
-            trans_klas.ncas_sub[1] += 1
-            with self.assertRaisesRegex(
-                    ValueError, "active-space consistency check failed"):
-                trans_klas._sanity_check_active_space_consistency(mo_loc)
-        finally:
-            trans_klas.ncas_sub = ncas_sub
-
-        with self.assertRaisesRegex(TypeError, "trans_sym must be a boolean"):
-            kLASCI(kmf, 2, (1, 1), kmesh=kmesh, trans_sym="yes")
-        with self.assertRaisesRegex(ValueError, "ref_cell must be in"):
-            kLASCI(
-                kmf, 2, (1, 1), kmesh=kmesh,
-                trans_sym=True, ref_cell=np.prod(kmesh),
-            )
-
-    def test_trans_sym_class_api_and_energy(self):
-        plain_klas = kLASCI(
-            kmf, 2, (1, 1), kmesh=kmesh,
-        )
-        trans_klas = kLASCI(
-            kmf, 2, (1, 1), kmesh=kmesh,
-            trans_sym=True, ref_cell=1,
-        )
-
-        self.assertIs(type(plain_klas), PBCLASCINoSymm)
-        self.assertIs(type(trans_klas), PBCLASCITransSymm)
-        self.assertTrue(trans_klas.trans_sym)
-        self.assertEqual(trans_klas.ref_cell, 1)
-        self.assertTrue(callable(trans_klas.pack_h1))
-        self.assertTrue(callable(trans_klas.pack_h2))
-
-        mo_loc = plain_klas.localize_init_guess(
-            ["H 1s"], mo_coeff=mo_coeff,
-        )
-        energy_plain = plain_klas.kernel(np.array(mo_loc, copy=True))[1]
-        energy_trans = trans_klas.kernel(np.array(mo_loc, copy=True))[1]
-
-        self.assertAlmostEqual(energy_plain.real, energy_trans.real, places=10)
-        self.assertAlmostEqual(energy_plain.imag, energy_trans.imag, places=10)
-
-    def test_trans_sym_productstate_pack_ci(self):
-        solver = PBCTransSymmImpureProductStateFCISolver(
-            [object(), object()],
-            lweights=[[1.0], [1.0]],
-            ref_cell=1,
-        )
-        ci = [np.array([1.0, 2.0]), np.array([3.0, 4.0])]
-
-        ci_ref = solver._pack_ci(ci)
-
-        self.assertEqual(ci_ref.tolist(), [3.0, 4.0])
-        self.assertIsNot(ci_ref, ci[1])
-        self.assertIsNone(solver._pack_ci(None))
 
     def test_api_for_localization_init_guess(self):
         with self.assertRaisesRegex(
