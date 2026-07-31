@@ -7,7 +7,6 @@ from pyscf.pbc import gto as pgto
 
 from mrh.my_pyscf.pbc import mcscf
 from mrh.my_pyscf.pbc.mcscf import avas
-from mrh.my_pyscf.pbc.util.transym import localize_mo_coeff
 
 np.set_printoptions(precision=4, suppress=True)
 
@@ -29,14 +28,12 @@ cell.verbose = lib.logger.INFO
 cell.build()
 
 # Define the k-point mesh and the k-points for the calculation.
-kmesh = [3, 1, 1]
+kmesh = [10, 1, 1]
 kpts = cell.make_kpts(kmesh, wrap_around=True)
 
 # Mean-field calculation.
 kmf = scf.KRHF(cell, kpts=kpts).density_fit(auxbasis='def2-svp-jkfit')
-kmf.max_cycle=1000
-# kmf.with_df._cderi_to_save = "cderi.h5"
-# kmf.with_df._cderi = 'cderi.h5'
+kmf.max_cycle=100
 kmf.exxdiv = None
 kmf.conv_tol = 1e-10
 kmf.kernel()
@@ -47,5 +44,5 @@ mo_coeff = avas.kernel(kmf, ['H 1s'], minao=cell.basis)[2]
 # Now we can run the k-LASCI calculation.
 klas = mcscf.KLASCI(kmf, 2, (1, 1), kmesh=kmesh)
 # Localization of the active space orbitals, this is important.
-lo_coeff = localize_mo_coeff(klas, mo_coeff, ['H 1s'])[0]
+lo_coeff = klas.localize_init_guess(['H 1s'], mo_coeff=mo_coeff)
 klas.kernel(lo_coeff)
