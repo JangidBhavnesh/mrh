@@ -14,8 +14,10 @@ from mrh.my_pyscf.mcscf.lasci import LASCINoSymm
 from mrh.my_pyscf.mcscf.addons import state_average_n_mix, get_h1e_zipped_fcisolver
 
 from mrh.my_pyscf.pbc.mcscf import casci
+from mrh.my_pyscf.pbc.mcscf import klasci_guess
 from mrh.my_pyscf.pbc.mcscf.productstate import ImpureProductStateFCISolver
-from mrh.my_pyscf.pbc.util.transym import TranslationSymm, get_wannier_orbs
+from mrh.my_pyscf.pbc.util.transym import TranslationSymm
+from mrh.my_pyscf.pbc.util.wannier import get_wannier_orbs
 from mrh.my_pyscf.pbc.fci import csf_solver
 
 # Author: Bhavnesh Jangid
@@ -114,7 +116,7 @@ def h1e_for_cas(mc, mo_coeff=None, ncas=None, ncore=None):
     # Fourier transform h1ao_k to real space to get h1ao_R, which is the one we will use 
     # for constructing the effective 1e Hamiltonian in the Wannier basis.
     ts = TranslationSymm(cell, kmesh)
-    R_indices = ts.lattice_indices(kmesh)
+    R_indices = ts.R_indices
     R_cart = np.array([ts.lattice_cart(R) for R in R_indices])
     ncell = len(R_indices)
 
@@ -216,7 +218,7 @@ def convert_h1e_mo_k_to_wann(kmf, kmesh, h1e_mo_k):
     dtype = np.result_type(h1e_mo_k.dtype, np.complex128)
 
     ts = TranslationSymm(cell, kmesh)
-    R_indices = ts.lattice_indices(kmesh)
+    R_indices = ts.R_indices
     R_cart = np.array([ts.lattice_cart(R) for R in R_indices])
 
     ncell = len(R_indices)
@@ -401,7 +403,7 @@ def convert_dmao_R_to_dmao_k(kmf, kmesh, dm_R):
     dtype = dm_R.dtype
     
     ts = TranslationSymm(cell, kmesh)
-    R_indices = ts.lattice_indices(kmesh)
+    R_indices = ts.R_indices
     R_cart = np.array([ts.lattice_cart(R) for R in R_indices])
 
     nkpts = len(kpts)
@@ -553,6 +555,7 @@ class PBCLASCINoSymm(casci.PBCCASCI, LASCINoSymm):
     get_h2eff_slice = LASCINoSymm.get_h2eff_slice
     get_h1cas = h1e_for_cas = h1e_for_cas 
     get_h2cas = h2e_for_cas = h2e_for_cas 
+    localize_init_guess = klasci_guess.localize_init_guess
     
     @lib.with_doc(kernel.__doc__)
     def kernel (self, mo_coeff=None, ci0=None, lroots=None, lweights=None, verbose=None,
@@ -717,4 +720,3 @@ class PBCLASCINoSymm(casci.PBCCASCI, LASCINoSymm):
                 dm1a, dm1b = fcibox.states_make_rdm1s (ci_i, ncas, nelecas)
             casdm1s.append (np.stack ([dm1a, dm1b], axis=1))
         return casdm1s
-    
