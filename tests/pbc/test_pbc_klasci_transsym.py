@@ -28,6 +28,9 @@ from mrh.my_pyscf.pbc.mcscf.productstate import (
 # Test-2: The product-state CI helpers should select the reference-cell CI
 #         vector and reconstruct independent fragment vectors with optional
 #         translation phases.
+# Test-3: The reference-cell initial guess should be generated from the real
+#         H2 active-space Hamiltonian and preserve a supplied CI vector.
+
 
 
 cell = kmf = mo_coeff = None
@@ -136,23 +139,81 @@ class KnownValues(unittest.TestCase):
         self.assertAlmostEqual(energy_plain.imag, energy_trans.imag, places=10)
 
     def test_productstate_pack_and_unpack_ci(self):
+
+        trans_klas = kLASCI(
+            kmf, 2, (1, 1), kmesh=kmesh,
+            trans_sym=True, ref_cell=1,)
+        
+        mo_loc = trans_klas.localize_init_guess(
+            ["H 1s"], mo_coeff=mo_coeff,
+        )
+        trans_klas.kernel(mo_loc)
+
+        fcisolvers = [box.fcisolvers[0] for box in trans_klas.fciboxes]
         solver = PBCTransSymmImpureProductStateFCISolver(
-            [object(), object()],
+            fcisolvers,
             lweights=[[1.0], [1.0]],
             ref_cell=1,
         )
-        ci = [np.array([1.0, 2.0]), np.array([3.0, 4.0])]
+        ci = [np.asarray(ci_frag) 
+              for ci_frag in trans_klas.ci]
 
         ci_ref = solver._pack_ci(ci)
-        ci_fragments = solver._unpack_cif(ci_ref, phases=[1.0, 1.0j])
+        phases = []
+        for ci_frag in ci:
+            overlap = np.vdot(ci_ref, ci_frag)
+            phases.append(overlap / abs(overlap))
 
-        self.assertEqual(ci_ref.tolist(), [3.0, 4.0])
+        ci_fragments = solver._unpack_cif(ci_ref, phases=phases)
+
+        self.assertEqual(ci_ref.shape, (1, 2, 2))
+        self.assertAlmostEqual(np.linalg.norm(ci_ref), 1.0, places=10)
+        self.assertLess(np.max(np.abs(ci_ref - ci[1])), 1e-12)
         self.assertIsNot(ci_ref, ci[1])
-        self.assertEqual(ci_fragments[0].tolist(), [3.0, 4.0])
-        self.assertEqual(ci_fragments[1].tolist(), [3.0j, 4.0j])
-        self.assertIsNot(ci_fragments[0], ci_fragments[1])
+
+        for ci_unpacked, ci_actual in zip(ci_fragments, ci):
+            self.assertLess(
+                np.max(np.abs(ci_unpacked - ci_actual)), 1e-10,
+            )
+            self.assertFalse(np.shares_memory(ci_unpacked, ci_ref))
+            
         self.assertIsNone(solver._pack_ci(None))
         self.assertEqual(solver._unpack_cif(None), [None, None])
+
+    def test_productstate_ref_init_guess(self):
+        trans_klas = kLASCI(
+            kmf, 2, (1, 1), kmesh=kmesh,
+            trans_sym=True, ref_cell=1,
+        )
+        mo_loc = trans_klas.localize_init_guess(
+            ["H 1s"], mo_coeff=mo_coeff,
+        )
+        h1e = trans_klas.h1e_for_cas(
+            mo_coeff=mo_loc, ncas=trans_klas.ncas,
+            ncore=trans_klas.ncore,
+        )[0]
+        h2e = trans_klas.get_h2cas(mo_loc)
+
+        fcisolvers = [box.fcisolvers[0] for box in trans_klas.fciboxes]
+        solver = PBCTransSymmImpureProductStateFCISolver(
+            fcisolvers,
+            lweights=[[1.0], [1.0]],
+            ref_cell=1,
+        )
+        ci_ref = solver._get_ref_init_guess(
+            None, trans_klas.ncas_sub, trans_klas.nelecas_sub, h1e, h2e,
+        )
+
+        self.assertEqual(ci_ref.shape, (1, 2, 2))
+        self.assertAlmostEqual(np.linalg.norm(ci_ref), 1.0, places=10)
+
+        ci_supplied = np.exp(0.3j) * ci_ref
+        ci_preserved = solver._get_ref_init_guess(
+            ci_supplied, trans_klas.ncas_sub, trans_klas.nelecas_sub,
+            h1e, h2e,
+        )
+        self.assertLess(np.max(np.abs(ci_preserved - ci_supplied)), 1e-12)
+        self.assertIsNot(ci_preserved, ci_supplied)
 
 
 if __name__ == "__main__":
