@@ -36,6 +36,8 @@ from mrh.my_pyscf.pbc.mcscf.productstate import (
 #         section of the parent full-fragment gradient.
 # Test-6: The translation-symmetric product-state kernel should optimize only
 #         the reference fragment and assemble all returned CI vectors.
+# Test-7: Full one- and two-body density matrices should be assembled from the
+#         reference-fragment density matrices.
 
 
 
@@ -416,6 +418,59 @@ class KnownValues(unittest.TestCase):
                     ci_frag - solver.phase_per_frag[ifrag] * ci_ref
                 )), 1e-12,
             )
+
+    def test_productstate_reference_rdms(self):
+        trans_klas = kLASCI(
+            kmf, 2, (1, 1), kmesh=kmesh,
+            trans_sym=True, ref_cell=1,
+        )
+        mo_loc = trans_klas.localize_init_guess(
+            ["H 1s"], mo_coeff=mo_coeff,
+        )
+        trans_klas.kernel(mo_loc)
+
+        fcisolvers = [box.fcisolvers[0] for box in trans_klas.fciboxes]
+        solver = PBCTransSymmImpureProductStateFCISolver(
+            fcisolvers,
+            lweights=[[1.0], [1.0]],
+            ref_cell=1,
+            phase_per_frag=np.exp(1j * np.array([0.3, -0.2])),
+        )
+        ci_ref = np.asarray(trans_klas.ci[1])[0]
+        ci = solver._unpack_cif(ci_ref)
+
+        dm1s_ref = super(
+            PBCTransSymmImpureProductStateFCISolver, solver
+        ).make_rdm1s(
+            ci, trans_klas.ncas_sub, trans_klas.nelecas_sub,
+        )
+        dm1_ref = super(
+            PBCTransSymmImpureProductStateFCISolver, solver
+        ).make_rdm1(
+            ci, trans_klas.ncas_sub, trans_klas.nelecas_sub,
+        )
+        dm2_ref = super(
+            PBCTransSymmImpureProductStateFCISolver, solver
+        ).make_rdm2(
+            ci, trans_klas.ncas_sub, trans_klas.nelecas_sub,
+        )
+
+        dm1s = solver.make_rdm1s(
+            ci, trans_klas.ncas_sub, trans_klas.nelecas_sub,
+        )
+        dm1 = solver.make_rdm1(
+            ci, trans_klas.ncas_sub, trans_klas.nelecas_sub,
+        )
+        dm2 = solver.make_rdm2(
+            ci, trans_klas.ncas_sub, trans_klas.nelecas_sub,
+        )
+
+        self.assertEqual(dm1.shape, dm1_ref.shape)
+        self.assertEqual(dm2.shape, dm2_ref.shape)
+        self.assertLess(np.max(np.abs(dm1s[0] - dm1s_ref[0])), 1e-12)
+        self.assertLess(np.max(np.abs(dm1s[1] - dm1s_ref[1])), 1e-12)
+        self.assertLess(np.max(np.abs(dm1 - dm1_ref)), 1e-12)
+        self.assertLess(np.max(np.abs(dm2 - dm2_ref)), 1e-12)
 
 
 if __name__ == "__main__":
