@@ -366,9 +366,9 @@ class PBCTransSymmImpureProductStateFCISolver(ImpureProductStateFCISolver):
     implementation retains the generalized multi-root and state-averaged
     code paths.
 
-    For now this class retains the parent algorithm and solves every fragment.
-    ref_cell records the representative cell that will be used by a future
-    packed, single-fragment implementation.
+    The full-fragment interface is assembled from a reference-cell value and
+    its translation phases.  The one-shot update still uses the parent
+    implementation and solves every fragment for now.
 
     #TODOs:
     '''
@@ -376,7 +376,7 @@ class PBCTransSymmImpureProductStateFCISolver(ImpureProductStateFCISolver):
     trans_sym = True
 
     def __init__(self, fcisolvers, stdout=None, verbose=0, lroots=None,
-                 lweights=None, ref_cell=0, **kwargs):
+                 lweights=None, ref_cell=0, phase_per_frag=None, **kwargs):
         super().__init__(fcisolvers, stdout=stdout, verbose=verbose, lroots=lroots,
                          lweights=lweights, **kwargs)
         # Checks:
@@ -387,14 +387,42 @@ class PBCTransSymmImpureProductStateFCISolver(ImpureProductStateFCISolver):
             msg = f"ref_cell must be in [0, {len(self.fcisolvers)}); got {ref_cell}"
             raise ValueError(msg)
         self.ref_cell = int(ref_cell)
+        self.phase_per_frag = self._normalize_phase_per_frag(phase_per_frag)
+
+    def _normalize_phase_per_frag(self, phase_per_frag):
+        '''Validate fragment phases and fix the reference-cell phase to one.'''
+        nfrag = len(self.fcisolvers)
+        if phase_per_frag is None:
+            return np.ones(nfrag, dtype=np.complex128)
+
+        phase_per_frag = np.asarray(
+            phase_per_frag, dtype=np.complex128,
+        )
+        if phase_per_frag.shape != (nfrag,):
+            raise ValueError(
+                f"phase_per_frag must have shape ({nfrag},)"
+            )
+        magnitudes = np.abs(phase_per_frag)
+        if np.any(~np.isfinite(magnitudes)) or np.any(magnitudes == 0):
+            raise ValueError("phase_per_frag must contain finite nonzero phases")
+        if np.max(np.abs(magnitudes - 1.0)) >= 1e-8:
+            raise ValueError("phase_per_frag entries must have unit magnitude")
+
+        phase_per_frag = phase_per_frag / magnitudes
+        phase_per_frag *= phase_per_frag[self.ref_cell].conjugate()
+        phase_per_frag[self.ref_cell] = 1.0
+        return phase_per_frag
 
     def _pack_ci(self, ci):
         '''
-        Select and copy the CI vector belonging to the reference cell.
+        Select the reference CI and remove its stored translation phase.
         '''
-        if ci is None:
+        if ci is None or ci[self.ref_cell] is None:
             return None
-        return np.array(ci[self.ref_cell], copy=True)
+        ci_ref = np.asarray(ci[self.ref_cell])
+        return np.array(
+            ci_ref / self.phase_per_frag[self.ref_cell], copy=True,
+        )
 
     def _unpack_cif(self, ci_ref, phases=None):
         '''
@@ -405,8 +433,8 @@ class PBCTransSymmImpureProductStateFCISolver(ImpureProductStateFCISolver):
             ci_ref: np.ndarray
                 Reference cell CI vector to be expanded.
             phases: array_like of shape (nfrag,) or None
-                Optional phase factors for each fragment. 
-                If None, all phases are set to 1.
+                Optional phase factors for each fragment. If None, the stored
+                ``phase_per_frag`` values are used.
         returns:
             ci_tot: list of np.ndarray
                 List of CI vectors for each fragment, with the reference cell
@@ -418,15 +446,82 @@ class PBCTransSymmImpureProductStateFCISolver(ImpureProductStateFCISolver):
             return [None for _ in range(nfrag)]
 
         if phases is None:
-            phases = np.ones(nfrag)
-
-        phases = np.asarray(phases)
-        if phases.shape != (nfrag,):
-            raise ValueError(f"phases must have shape ({nfrag},)")
+            phases = self.phase_per_frag
+        else:
+            phases = self._normalize_phase_per_frag(phases)
 
         ci_tot = [np.array(phases[ifrag] * ci_ref, copy=True) 
                   for ifrag in range(nfrag)]
         return ci_tot
+
+    def _unpack_hfrag(self, h1eff_ref, h0eff_ref):
+        '''Assemble full-fragment effective Hamiltonians from the reference.'''
+        nfrag = len(self.fcisolvers)
+        h1eff = [np.array(h1eff_ref, copy=True) for _ in range(nfrag)]
+        h0eff = [np.array(h0eff_ref, copy=True) for _ in range(nfrag)]
+        return h1eff, h0eff
+
+    def _unpack_grad(self, grad_ref):
+        '''Assemble the packed full-fragment gradient from the reference.'''
+        ref_solver = self.fcisolvers[self.ref_cell]
+        nroots = ref_solver.nroots
+        external_size = nroots * ref_solver.transformer.ncsf
+        internal_size = 0
+        if nroots > 1 and getattr(ref_solver, 'weights', None) is not None:
+            internal_size = nroots * (nroots - 1) // 2
+
+        grad_ref = np.asarray(grad_ref).reshape(-1)
+        if grad_ref.size != external_size + internal_size:
+            raise ValueError("reference gradient has an inconsistent size")
+
+        grad = []
+        for phase, solver in zip(self.phase_per_frag, self.fcisolvers):
+            solver_external_size = solver.nroots * solver.transformer.ncsf
+            solver_internal_size = 0
+            if (solver.nroots > 1
+                    and getattr(solver, 'weights', None) is not None):
+                solver_internal_size = solver.nroots * (solver.nroots - 1) // 2
+            if (solver_external_size != external_size
+                    or solver_internal_size != internal_size):
+                raise ValueError(
+                    "translated fragment gradients have inconsistent sizes"
+                )
+
+            grad_external = phase * grad_ref[:external_size]
+            grad.append(grad_external)
+            if internal_size:
+                grad.append(np.array(grad_ref[external_size:], copy=True))
+        return np.concatenate(grad)
+
+    def get_init_guess(self, ci0, norb_f, nelec_f, h1, h2, nroots=None):
+        '''Assemble the full initial guess from the reference-cell guess.'''
+        ci_ref = self._pack_ci(ci0)
+        ci_ref = self._get_ref_init_guess(
+            ci_ref, norb_f, nelec_f, h1, h2, nroots=nroots,
+        )
+        return self._unpack_cif(ci_ref)
+
+    def project_hfrag(self, h1, h2, ci, norb_f, nelec_f,
+                      ecore=0, dm1s=None, dm2=None, **kwargs):
+        '''Assemble all effective fragment Hamiltonians from the reference.'''
+        ci_ref = self._pack_ci(ci)
+        h1eff_ref, h0eff_ref = self._project_ref_hfrag(
+            h1, h2, ci_ref, norb_f, nelec_f, ecore=ecore,
+            dm1s=dm1s, dm2=dm2, **kwargs,
+        )
+        h1eff, h0eff = self._unpack_hfrag(h1eff_ref, h0eff_ref)
+        return h1eff, h0eff, self._unpack_cif(ci_ref)
+
+    def _get_grad(self, h1eff, h2, ci, norb_f, nelec_f, orbsym=None,
+                  **kwargs):
+        '''Assemble the full CI gradient from the reference-cell gradient.'''
+        h1eff_ref = h1eff[self.ref_cell]
+        ci_ref = self._pack_ci(ci)
+        grad_ref = self._get_ref_grad(
+            h1eff_ref, h2, ci_ref, norb_f, nelec_f,
+            orbsym=orbsym, **kwargs,
+        )
+        return self._unpack_grad(grad_ref)
 
     def _project_ref_hfrag(self, h1, h2, ci_ref, norb_f, nelec_f,
                            ecore=0, phases=None, dm1s=None, dm2=None,
