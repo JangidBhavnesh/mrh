@@ -14,6 +14,7 @@ from pyscf.csf_fci.csfstring import count_all_csfs
 from mrh.my_pyscf.pbc.fci import direct_spin1_cplx
 from mrh.my_pyscf.pbc.fci import direct_spin1_cplx_opt
 from mrh.my_pyscf.pbc.fci import direct_spin0_cplx
+from mrh.my_pyscf.pbc.fci import cplx_csf_helper
 
 
 # Author: Bhavnesh Jangid
@@ -668,16 +669,12 @@ class cplxCSFFCISolver:
     print_transformer_cache = realCSFFCISolver.print_transformer_cache
 
     def contract_2e(self, eris, fcivec, norb, nelec, link_index=None, **kwargs):
-        hc = super().contract_2e(eris, fcivec, norb, nelec, link_index=link_index, **kwargs)
+        hc = super().contract_2e(eris, fcivec, norb, nelec, 
+                                 link_index=link_index, **kwargs)
         if hasattr(eris, 'h1e_s'):
-            hc_real = direct_uhf.contract_1e ([eris.h1e_s.real, -eris.h1e_s.real], fcivec.real, norb, nelec, link_index)
-            hc_real -= direct_uhf.contract_1e ([eris.h1e_s.imag, -eris.h1e_s.imag], fcivec.imag, norb, nelec, link_index)
-            hc.real += hc_real.ravel() if hc.ndim == 1 else hc_real.reshape(hc.shape)
-            hc_real = None
-            hc_imag = direct_uhf.contract_1e ([eris.h1e_s.real, -eris.h1e_s.real], fcivec.imag, norb, nelec, link_index)
-            hc_imag += direct_uhf.contract_1e ([eris.h1e_s.imag, -eris.h1e_s.imag], fcivec.real, norb, nelec, link_index)
-            hc.imag += hc_imag.ravel() if hc.ndim == 1 else hc_imag.reshape(hc.shape)
-            hc_imag = None
+            hc_s = cplx_csf_helper.contract_1e([eris.h1e_s, -eris.h1e_s],
+                                               fcivec, norb, nelec, link_index,)
+            hc += hc_s.ravel() if hc.ndim == 1 else hc_s.reshape(hc.shape)
         return hc
     
     def pspace (self, h1e, eri, norb, nelec, hdiag_det=None, hdiag_csf=None, npsp=200, **kwargs):
