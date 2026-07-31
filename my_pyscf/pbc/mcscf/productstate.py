@@ -391,3 +391,35 @@ class PBCTransSymmImpureProductStateFCISolver(ImpureProductStateFCISolver):
         if ci is None:
             return None
         return np.array(ci[self.ref_cell], copy=True)
+
+    def _unpack_cif(self, ci_ref, phases=None):
+        '''
+        Expand a reference cell CI vector into one independent vector per fragment.
+        Optional phase factors allow translated fragment CI vectors to use
+        different global phases.
+        args:
+            ci_ref: np.ndarray
+                Reference cell CI vector to be expanded.
+            phases: array_like of shape (nfrag,) or None
+                Optional phase factors for each fragment. 
+                If None, all phases are set to 1.
+        returns:
+            ci_tot: list of np.ndarray
+                List of CI vectors for each fragment, with the reference cell
+                vector copied and optionally phase-shifted.
+        '''
+        nfrag = len(self.fcisolvers)
+
+        if ci_ref is None:
+            return [None for _ in range(nfrag)]
+
+        if phases is None:
+            phases = np.ones(nfrag)
+
+        phases = np.asarray(phases)
+        if phases.shape != (nfrag,):
+            raise ValueError(f"phases must have shape ({nfrag},)")
+
+        ci_tot = [np.array(phases[ifrag] * ci_ref, copy=True) 
+                  for ifrag in range(nfrag)]
+        return ci_tot
