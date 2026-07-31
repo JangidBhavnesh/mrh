@@ -91,6 +91,12 @@ class KnownValues(unittest.TestCase):
         self.assertTrue(trans_klas.trans_sym)
         self.assertEqual(trans_klas.ref_cell, 1)
         self.assertEqual(len(trans_klas.ci), np.prod(kmesh))
+        phase_per_frag = trans_klas.get_phase_per_frag(mo_loc)
+        self.assertEqual(phase_per_frag.shape, (np.prod(kmesh),))
+        self.assertLess(
+            np.max(np.abs(phase_per_frag - np.ones(np.prod(kmesh)))),
+            1e-12,
+        )
         check_orbitals.assert_called_once()
         check_h1e.assert_called_once()
         check_h2e.assert_called_once()
