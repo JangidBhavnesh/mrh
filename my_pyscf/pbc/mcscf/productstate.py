@@ -358,4 +358,30 @@ class ImpureProductStateFCISolver (PBCProductStateFCISolver):
                 self.fcisolvers[ix] = state_average_fcisolver (fcisolver, weights=weights)
 
 
+class PBCTransSymmImpureProductStateFCISolver(ImpureProductStateFCISolver):
+    '''
+    Translation-symmetry adapted product-state solver.
+
+    For now this class retains the parent algorithm and solves every fragment.
+    ref_cell records the representative cell that will be used by a future
+    packed, single-fragment implementation.
+
+    #TODOs:
+    '''
+
+    trans_sym = True
+
+    def __init__(self, fcisolvers, stdout=None, verbose=0, lroots=None,
+                 lweights=None, ref_cell=0, **kwargs):
+        super().__init__(fcisolvers, stdout=stdout, verbose=verbose, lroots=lroots,
+                         lweights=lweights, **kwargs)
+        # Checks:
+        if not isinstance(ref_cell, (int, np.integer)):
+            msg = f"ref_cell must be an integer, got {type(ref_cell)}"
+            raise TypeError(msg)
+        if not 0 <= ref_cell < len(self.fcisolvers):
+            msg = f"ref_cell must be in [0, {len(self.fcisolvers)}); got {ref_cell}"
+            raise ValueError(msg)
+        self.ref_cell = int(ref_cell)
+        
 
