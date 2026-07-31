@@ -406,6 +406,8 @@ def kernel (las, mo_coeff=None, ci0=None, lroots=None, lweights=None, verbose=0,
                 lweights=[l[state] for l in lweights], verbose=verbose,
                 ref_cell=las.ref_cell,
                 phase_per_frag=phase_per_frag,
+                pack_h1=las.pack_h1,
+                pack_h2=las.pack_h2,
             )
         else:
             solver = ImpureProductStateFCISolver(
