@@ -9,6 +9,9 @@ from mrh.my_pyscf.pbc.util.transym import TranslationSymm
 from mrh.my_pyscf.pbc.util import wannier
 
 get_wannier_orbs = wannier.get_wannier_orbs
+check_h1e_translation = wannier.check_h1e_translation
+check_h2e_translation = wannier.check_h2e_translation
+check_wannier_orbital_translation = wannier.check_wannier_orbital_translation
 make_ovlp_mat_in_wannier_basis = wannier.make_ovlp_mat_in_wannier_basis
 make_wannier_matrix = wannier.make_wannier_matrix
 pack_wannier_orb = wannier.pack_wannier_orb
@@ -18,6 +21,8 @@ unpack_wannier_orb = wannier.unpack_wannier_orb
 #         same translation operator in reciprocal and real space.
 # Test-1: Bloch-to-Wannier transformation should preserve orthonormality.
 # Test-2: Packed Wannier orbitals should reconstruct every translated cell.
+# Test-3: Wannier orbitals and one- and two-electron Hamiltonians should be
+#         invariant under a simultaneous translation of all cell indices.
 
 cell = kmf = None
 kmesh = [3, 1, 1]
@@ -96,6 +101,67 @@ class KnownValues(unittest.TestCase):
             packed, cell, kmesh, ref_cell=1,
         )
         np.testing.assert_allclose(unpacked, wannier_orb, atol=1e-12)
+
+    def test_wannier_and_hamiltonian_translation(self):
+        ts = TranslationSymm(cell, kmesh, kpts=kmf.kpts)
+        phases = np.exp(1j * np.array([0.2, -0.3, 0.5]))
+        wannier_orb, R_indices = get_wannier_orbs(
+            kmf, kmesh, phases[:, None, None],
+        )[:2]
+
+        max_abs, rel_err, _ = check_wannier_orbital_translation(
+            ts, wannier_orb, R_indices,
+        )
+        self.assertLess(max_abs, 1e-12)
+        self.assertLess(rel_err, 1e-12)
+
+        rng = np.random.default_rng(12)
+        ncell = ts.ncell
+        norb = 2
+
+        # A translationally invariant h1 depends only on S - R.
+        h1_by_delta = rng.standard_normal((ncell, norb, norb))
+        h1_blocks = np.empty((ncell, norb, ncell, norb))
+        for iR, R in enumerate(ts.R_indices):
+            for iS, S in enumerate(ts.R_indices):
+                delta = ts.R_to_i[ts.mod_index(S - R)]
+                h1_blocks[iR, :, iS, :] = h1_by_delta[delta]
+        h1e = h1_blocks.reshape(ncell*norb, ncell*norb)
+
+        max_abs, rel_err, _ = check_h1e_translation(ts, h1e)
+        self.assertLess(max_abs, 1e-12)
+        self.assertLess(rel_err, 1e-12)
+
+        # A translationally invariant h2 depends on three cell differences
+        # after one of its four cell indices is chosen as the origin.
+        h2_by_delta = rng.standard_normal(
+            (ncell, ncell, ncell, norb, norb, norb, norb)
+        )
+        h2_blocks = np.empty((ncell, norb) * 4)
+        for iR, R in enumerate(ts.R_indices):
+            for iS, S in enumerate(ts.R_indices):
+                dS = ts.R_to_i[ts.mod_index(S - R)]
+                for iU, U in enumerate(ts.R_indices):
+                    dU = ts.R_to_i[ts.mod_index(U - R)]
+                    for iV, V in enumerate(ts.R_indices):
+                        dV = ts.R_to_i[ts.mod_index(V - R)]
+                        h2_blocks[iR, :, iS, :, iU, :, iV, :] = (
+                            h2_by_delta[dS, dU, dV]
+                        )
+        h2e = h2_blocks.reshape((ncell*norb,) * 4)
+
+        max_abs, rel_err, _ = check_h2e_translation(ts, h2e)
+        self.assertLess(max_abs, 1e-12)
+        self.assertLess(rel_err, 1e-12)
+
+        # Both Hamiltonian checks must detect a broken translated block.
+        h1e_broken = h1e.copy()
+        h1e_broken[0, 0] += 0.25
+        self.assertGreater(check_h1e_translation(ts, h1e_broken)[0], 0.1)
+
+        h2e_broken = h2e.copy()
+        h2e_broken[0, 0, 0, 0] += 0.25
+        self.assertGreater(check_h2e_translation(ts, h2e_broken)[0], 0.1)
 
 
 if __name__ == "__main__":
