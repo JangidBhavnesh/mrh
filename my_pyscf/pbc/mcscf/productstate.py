@@ -461,6 +461,115 @@ class PBCTransSymmImpureProductStateFCISolver(ImpureProductStateFCISolver):
         h0eff = [np.array(h0eff_ref, copy=True) for _ in range(nfrag)]
         return h1eff, h0eff
 
+    def _make_ref_rdm1s(self, ci_ref, norb_f, nelec_f):
+        '''Calculate spin-separated one-body RDMs for the reference cell.'''
+        ref = self.ref_cell
+        norb_ref = norb_f[ref]
+        solver_ref = self.fcisolvers[ref]
+        nelec_ref = self._get_nelec(solver_ref, nelec_f[ref])
+        ci_solver = ci_ref
+        if getattr(ci_solver, 'ndim', 3) == 3:
+            ci_solver = list(ci_solver)
+        dm1a_ref, dm1b_ref = solver_ref.make_rdm1s(
+            ci_solver, norb_ref, nelec_ref,
+        )
+        return np.asarray(dm1a_ref), np.asarray(dm1b_ref)
+
+    def _unpack_rdm1s(self, dm1a_ref, dm1b_ref, norb_f, nelec_f):
+        '''Assemble full one-body RDMs from the reference-cell blocks.'''
+        ref = self.ref_cell
+        norb_ref = norb_f[ref]
+        nelec_ref = self._get_nelec(
+            self.fcisolvers[ref], nelec_f[ref],
+        )
+        norb = sum(norb_f)
+        dtype = np.result_type(dm1a_ref.dtype, dm1b_ref.dtype)
+        dm1a = np.zeros((norb, norb), dtype=dtype)
+        dm1b = np.zeros((norb, norb), dtype=dtype)
+
+        nj = np.cumsum(norb_f)
+        ni = nj - norb_f
+        for ifrag, (i, j, solver) in enumerate(
+                zip(ni, nj, self.fcisolvers)):
+            nelec = self._get_nelec(solver, nelec_f[ifrag])
+            if norb_f[ifrag] != norb_ref or tuple(nelec) != tuple(nelec_ref):
+                raise ValueError(
+                    "translated fragments have inconsistent active spaces"
+                )
+            dm1a[i:j, i:j] = dm1a_ref
+            dm1b[i:j, i:j] = dm1b_ref
+        return dm1a, dm1b
+
+    def make_rdm1s(self, ci, norb_f, nelec_f, **kwargs):
+        '''Assemble full spin-separated one-body RDMs from the reference.'''
+        ci_ref = self._pack_ci(ci)
+        dm1a_ref, dm1b_ref = self._make_ref_rdm1s(
+            ci_ref, norb_f, nelec_f,
+        )
+        return self._unpack_rdm1s(
+            dm1a_ref, dm1b_ref, norb_f, nelec_f,
+        )
+
+    def make_rdm1(self, ci, norb_f, nelec_f, **kwargs):
+        '''Assemble the full spin-summed one-body RDM from the reference.'''
+        dm1a, dm1b = self.make_rdm1s(
+            ci, norb_f, nelec_f, **kwargs,
+        )
+        return dm1a + dm1b
+
+    def make_rdm2(self, ci, norb_f, nelec_f, **kwargs):
+        '''
+        Assemble the full product-state two-body RDM from the reference.
+        #TODO: add the doc_str
+        '''
+
+        ci_ref = self._pack_ci(ci)
+        ref = self.ref_cell
+        norb_ref = norb_f[ref]
+        solver_ref = self.fcisolvers[ref]
+        nelec_ref = self._get_nelec(solver_ref, nelec_f[ref])
+        ci_solver = ci_ref
+        if getattr(ci_solver, 'ndim', 3) == 3:
+            ci_solver = list(ci_solver)
+
+        dm2_ref = np.asarray(
+            solver_ref.make_rdm2(ci_solver, norb_ref, nelec_ref)
+        )
+        dm1a_ref, dm1b_ref = self._make_ref_rdm1s(
+            ci_ref, norb_f, nelec_f,
+        )
+        dm1a, dm1b = self._unpack_rdm1s(
+            dm1a_ref, dm1b_ref, norb_f, nelec_f,
+        )
+        dm1 = dm1a + dm1b
+
+        norb = sum(norb_f)
+        dtype = np.result_type(dm2_ref.dtype, dm1.dtype)
+        dm2 = np.zeros((norb,) * 4, dtype=dtype)
+        nj = np.cumsum(norb_f)
+        ni = nj - norb_f
+
+        for i, j in zip(ni, nj):
+            dm2[i:j, i:j, i:j, i:j] = dm2_ref
+
+        for (i, j), (k, l) in combinations(zip(ni, nj), 2):
+            d1_ij = dm1[i:j, i:j]
+            d1a_ij = dm1a[i:j, i:j]
+            d1b_ij = dm1b[i:j, i:j]
+            d1_kl = dm1[k:l, k:l]
+            d1a_kl = dm1a[k:l, k:l]
+            d1b_kl = dm1b[k:l, k:l]
+
+            d2 = np.multiply.outer(d1_ij, d1_kl)
+            dm2[i:j, i:j, k:l, k:l] = d2
+            dm2[k:l, k:l, i:j, i:j] = d2.transpose(2, 3, 0, 1)
+
+            d2 = np.multiply.outer(d1a_ij, d1a_kl)
+            d2 += np.multiply.outer(d1b_ij, d1b_kl)
+            dm2[i:j, k:l, k:l, i:j] = -d2.transpose(0, 2, 3, 1)
+            dm2[k:l, i:j, i:j, k:l] = -d2.transpose(2, 0, 1, 3)
+        return dm2
+
     def _unpack_grad(self, grad_ref):
         '''Assemble the packed full-fragment gradient from the reference.'''
         ref_solver = self.fcisolvers[self.ref_cell]
