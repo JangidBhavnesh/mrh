@@ -26,6 +26,10 @@ mol = mf = h0 = h1 = h2 = h0cplx = h1cplx = h2cplx = None
 #       packed-triangular link-index tables.
 # Test-5: Verify the spin-dependent one-electron contribution through the
 #          complex CSF solver's absorb_h1e and contract_2e path.
+# Test-6: Compare the batched complex determinant-to-CSF transformation
+#         against separate real and imaginary transformations.
+# Test-7: Compare the batched complex CSF-to-determinant transformation
+#         against separate real and imaginary transformations.
 
 def gen_hermi_ham(h0, h1, h2):
     np.random.seed(12)
@@ -96,6 +100,13 @@ def setUpModule():
     norb = mol.nao_nr ()
 
 class KnownValues(unittest.TestCase):
+    def get_transformer(self, norb=5, nelec=(3, 2), smult=2):
+        solver = csf_cplx.FCISolver(gto.M(verbose=0), smult=smult)
+        solver.norb = norb
+        solver.nelec = nelec
+        solver.check_transformer_cache()
+        return solver.transformer
+
     def get_random_uhf_h1e_data(self):
         norb = 5
         nelec = (3, 2)
@@ -151,6 +162,58 @@ class KnownValues(unittest.TestCase):
         )
         reference = contract_1e_reference(h1e, fcivec, link_index)
         self.assertLess(np.max(np.abs(result - reference)), 1e-11)
+
+    def test_vec_det2csf_cplx(self):
+        transformer = self.get_transformer()
+        rng = np.random.default_rng(32)
+        civec = (
+            rng.standard_normal((3, transformer.ndet))
+            + 1j * rng.standard_normal((3, transformer.ndet))
+        )
+        reference = (
+            transformer.vec_det2csf(civec.real, normalize=False)
+            + 1j * transformer.vec_det2csf(civec.imag, normalize=False)
+        )
+        result = cplx_csf_helper.vec_det2csf_cplx(
+            transformer, civec, normalize=False
+        )
+        self.assertLess(np.max(np.abs(result - reference)), 1e-12)
+        result_single = cplx_csf_helper.vec_det2csf_cplx(
+            transformer, civec[0], normalize=False
+        )
+        self.assertLess(np.max(np.abs(result_single - reference[0])), 1e-12)
+
+        result, norms = cplx_csf_helper.vec_det2csf_cplx(
+            transformer, civec, normalize=True, return_norm=True
+        )
+        self.assertLess(np.max(np.abs(norms - np.linalg.norm(reference, axis=1))), 1e-12)
+        self.assertLess(np.max(np.abs(np.linalg.norm(result, axis=1) - 1)), 1e-12)
+
+    def test_vec_csf2det_cplx(self):
+        transformer = self.get_transformer()
+        rng = np.random.default_rng(33)
+        civec = (
+            rng.standard_normal((3, transformer.ncsf))
+            + 1j * rng.standard_normal((3, transformer.ncsf))
+        )
+        reference = (
+            transformer.vec_csf2det(civec.real, normalize=False)
+            + 1j * transformer.vec_csf2det(civec.imag, normalize=False)
+        )
+        result = cplx_csf_helper.vec_csf2det_cplx(
+            transformer, civec, normalize=False
+        )
+        self.assertLess(np.max(np.abs(result - reference)), 1e-12)
+        result_single = cplx_csf_helper.vec_csf2det_cplx(
+            transformer, civec[0], normalize=False
+        )
+        self.assertLess(np.max(np.abs(result_single - reference[0])), 1e-12)
+
+        result, norms = cplx_csf_helper.vec_csf2det_cplx(
+            transformer, civec, normalize=True, return_norm=True
+        )
+        self.assertLess(np.max(np.abs(norms - np.linalg.norm(reference, axis=1))), 1e-12)
+        self.assertLess(np.max(np.abs(np.linalg.norm(result, axis=1) - 1)), 1e-12)
 
     def test_vanilla_csf_solver_cplx(self):
         nelec = (5, 5)
