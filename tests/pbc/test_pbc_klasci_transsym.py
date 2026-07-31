@@ -30,6 +30,10 @@ from mrh.my_pyscf.pbc.mcscf.productstate import (
 #         translation phases.
 # Test-3: The reference-cell initial guess should be generated from the real
 #         H2 active-space Hamiltonian and preserve a supplied CI vector.
+# Test-4: The reference-fragment Hamiltonian projection should match the
+#         reference block selected from the parent full-fragment projection.
+# Test-5: The reference-fragment CI gradient should match the corresponding
+#         section of the parent full-fragment gradient.
 
 
 
@@ -214,6 +218,98 @@ class KnownValues(unittest.TestCase):
         )
         self.assertLess(np.max(np.abs(ci_preserved - ci_supplied)), 1e-12)
         self.assertIsNot(ci_preserved, ci_supplied)
+
+    def test_productstate_project_ref_hfrag(self):
+        trans_klas = kLASCI(
+            kmf, 2, (1, 1), kmesh=kmesh,
+            trans_sym=True, ref_cell=1,
+        )
+        mo_loc = trans_klas.localize_init_guess(
+            ["H 1s"], mo_coeff=mo_coeff,
+        )
+        h1e = trans_klas.h1e_for_cas(
+            mo_coeff=mo_loc, ncas=trans_klas.ncas,
+            ncore=trans_klas.ncore,
+        )[0]
+        h2e = trans_klas.get_h2cas(mo_loc)
+
+        fcisolvers = [box.fcisolvers[0] for box in trans_klas.fciboxes]
+        solver = PBCTransSymmImpureProductStateFCISolver(
+            fcisolvers,
+            lweights=[[1.0], [1.0]],
+            ref_cell=1,
+        )
+        ci_ref = solver._get_ref_init_guess(
+            None, trans_klas.ncas_sub, trans_klas.nelecas_sub, h1e, h2e,
+        )
+        ci = solver._unpack_cif(ci_ref)
+
+        h1eff, h0eff, _ = solver.project_hfrag(
+            h1e, h2e, ci, trans_klas.ncas_sub, trans_klas.nelecas_sub,
+        )
+        h1eff_ref, h0eff_ref = solver._project_ref_hfrag(
+            h1e, h2e, ci_ref,
+            trans_klas.ncas_sub, trans_klas.nelecas_sub,
+        )
+
+        self.assertEqual(h1eff_ref.shape, h1eff[1].shape)
+        self.assertLess(np.max(np.abs(h1eff_ref - h1eff[1])), 1e-12)
+        self.assertAlmostEqual(h0eff_ref.real, h0eff[1].real, places=10)
+        self.assertAlmostEqual(h0eff_ref.imag, h0eff[1].imag, places=10)
+
+    def test_productstate_get_ref_grad(self):
+        trans_klas = kLASCI(
+            kmf, 2, (1, 1), kmesh=kmesh,
+            trans_sym=True, ref_cell=1,
+        )
+        mo_loc = trans_klas.localize_init_guess(
+            ["H 1s"], mo_coeff=mo_coeff,
+        )
+        h1e = trans_klas.h1e_for_cas(
+            mo_coeff=mo_loc, ncas=trans_klas.ncas,
+            ncore=trans_klas.ncore,
+        )[0]
+        h2e = trans_klas.get_h2cas(mo_loc)
+
+        fcisolvers = [box.fcisolvers[0] for box in trans_klas.fciboxes]
+        solver = PBCTransSymmImpureProductStateFCISolver(
+            fcisolvers,
+            lweights=[[1.0], [1.0]],
+            ref_cell=1,
+        )
+        ci_ref = solver._get_ref_init_guess(
+            None, trans_klas.ncas_sub, trans_klas.nelecas_sub, h1e, h2e,
+        )
+        for ifrag, fcisolver in enumerate(solver.fcisolvers):
+            fcisolver.norb = trans_klas.ncas_sub[ifrag]
+            fcisolver.nelec = solver._get_nelec(
+                fcisolver, trans_klas.nelecas_sub[ifrag],
+            )
+            fcisolver.check_transformer_cache()
+        ci = solver._unpack_cif(ci_ref[0])
+        h1eff, _, _ = solver.project_hfrag(
+            h1e, h2e, ci, trans_klas.ncas_sub, trans_klas.nelecas_sub,
+        )
+
+        grad = solver._get_grad(
+            h1eff, h2e, ci,
+            trans_klas.ncas_sub, trans_klas.nelecas_sub,
+        )
+        grad_ref = solver._get_ref_grad(
+            h1eff[1], h2e, ci_ref,
+            trans_klas.ncas_sub, trans_klas.nelecas_sub,
+        )
+        ref_offset = (
+            solver.fcisolvers[0].nroots
+            * solver.fcisolvers[0].transformer.ncsf
+        )
+
+        self.assertEqual(grad_ref.shape, (grad_ref.size,))
+        self.assertLess(
+            np.max(np.abs(
+                grad_ref - grad[ref_offset:ref_offset + grad_ref.size]
+            )), 1e-12,
+        )
 
 
 if __name__ == "__main__":
