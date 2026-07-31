@@ -22,6 +22,7 @@ from mrh.my_pyscf.pbc.fci import csf_solver
 
 check_h1e_translation = wannier.check_h1e_translation
 check_h2e_translation = wannier.check_h2e_translation
+check_wannier_orbital_translation = wannier.check_wannier_orbital_translation
 get_wannier_orbs = wannier.get_wannier_orbs
 
 
@@ -34,6 +35,10 @@ get_wannier_orbs = wannier.get_wannier_orbs
 2. Implement the k-LASSCF
 3. Implement the LASSI algorithm
 '''
+
+# Some global variable:
+TRNS_SYMM_TOL = 1e-8
+
 
 def kLASCI(kmf, ncas, nelecas, ncore=None, spin_mult=None, kmesh=None,
            kpts=None, trans_sym=False):
@@ -83,9 +88,17 @@ def kLASCI(kmf, ncas, nelecas, ncore=None, spin_mult=None, kmesh=None,
     assert isinstance(kmf.with_df, df.df.GDF), \
         "k-LASCI only works with GDF density fitting object"
 
-    klas = PBCLASCINoSymm(
+
+    if not isinstance(trans_sym, (bool, np.bool_)):
+        raise TypeError("trans_sym must be a boolean")
+
+    # I am making a big change here: as in defining the PBCLASCITransSymm class.
+    # The CI vectors, mo_coeff, hamiltonian everything would be packed different in this
+    # class.
+    klas_cls = PBCLASCITransSymm if trans_sym else PBCLASCINoSymm
+    klas = klas_cls(
         kmf, ncas, nelecas, ncore=ncore, spin_mult=spin_mult,
-        kmesh=kmesh, kpts=kpts, trans_sym=trans_sym,
+        kmesh=kmesh, kpts=kpts,
     )
 
     return klas
@@ -257,7 +270,8 @@ def convert_h1e_mo_k_to_wann(kmf, kmesh, h1e_mo_k):
     return h1eff_R
 
 @lib.with_doc(mollasci.h1e_for_las.__doc__)
-def h1e_for_las (las, mo_coeff=None, ncas=None, ncore=None, nelecas=None, ci=None, ncas_sub=None,
+def h1e_for_las (las, mo_coeff=None, ncas=None, ncore=None, nelecas=None, 
+                 ci=None, ncas_sub=None,
                  nelecas_sub=None, veff=None, h2eff_sub=None, casdm1s_sub=None, casdm1frs=None,
                  eri_cas=None):
     cell = las._scf.cell
@@ -325,19 +339,6 @@ def h1e_for_las (las, mo_coeff=None, ncas=None, ncore=None, nelecas=None, ci=Non
 
     return h1e_fr
 
-def _translation_symmetry_check(las, h1eff, eri_cas, trans_sym_tol=1e-8):
-    ts = TranslationSymm(las.cell, las.kmesh, kpts=las.kpts)
-    h1e_error = check_h1e_translation(ts, h1eff, tol=trans_sym_tol)
-    h2e_error = check_h2e_translation(ts, eri_cas, tol=trans_sym_tol)
-    failed = []
-    if h1e_error[1] >= trans_sym_tol:
-        failed.append(f"h1e (relative error {h1e_error[1]:.3e})")
-    if h2e_error[1] >= trans_sym_tol:
-        failed.append(f"h2e (relative error {h2e_error[1]:.3e})")
-    if failed:
-        msg = "Wannier-basis translation symmetry check failed for " + " and ".join(failed)
-        raise RuntimeError(msg)
-    
 @lib.with_doc(mollasci.kernel.__doc__)
 def kernel (las, mo_coeff=None, ci0=None, lroots=None, lweights=None, verbose=0,
                assert_no_dupes=False, _dry_run=False):
@@ -371,7 +372,8 @@ def kernel (las, mo_coeff=None, ci0=None, lroots=None, lweights=None, verbose=0,
         ncas=las.ncas, ncore=las.ncore)
     eri_cas = las.get_h2cas (mo_coeff)
 
-    _translation_symmetry_check(las, h1eff, eri_cas, trans_sym_tol=1e-8)
+    if isinstance(las, PBCLASCITransSymm):
+        las._sanity_check_trans_symmetry(mo_coeff, h1eff, eri_cas)
     
     if (ci0 is None or any ([c is None for c in ci0]) or
             any ([any ([c2 is None for c2 in c1]) for c1 in ci0])):
@@ -474,9 +476,6 @@ class PBCLASCINoSymm(casci.PBCCASCI, LASCINoSymm):
             k-point mesh for the calculation.
         kpts: array_like, optional
             k-points for the calculation.
-        trans_sym: bool, optional
-            If True, check translation symmetry of the Wannier-basis one- and
-            two-electron Hamiltonians before the product-state calculation.
     '''
       
     # def __init__(self, kmf, ncas, nelecas, ncore=None, spin_mult=None, 
@@ -518,8 +517,7 @@ class PBCLASCINoSymm(casci.PBCCASCI, LASCINoSymm):
     # This is not a clean way to do it but it is the fastest way to get it working. I will refactor this later.
     
     def __init__(self, kmf, ncas, nelecas, ncore=None, spin_mult=None,
-                 kmesh=None, kpts=None, frozen=None, frozen_ci=None,
-                 trans_sym=False, **kwargs):
+                 kmesh=None, kpts=None, frozen=None, frozen_ci=None, **kwargs):
         self.init_guess_ci = 'aufbau1'
         self.nroots = 1 # This line is required before initializing the parent class, because of self.converged ..
         casci.PBCCASCI.__init__(self, kmf, ncas, nelecas, ncore=ncore)
@@ -540,9 +538,6 @@ class PBCLASCINoSymm(casci.PBCCASCI, LASCINoSymm):
         assert nkpts_check == nkpts, "kmesh and kpts do not match."
         self.kmesh = kmesh
         self.kpts = kpts
-        if not isinstance(trans_sym, (bool, np.bool_)):
-            raise TypeError("trans_sym must be a boolean")
-        self.trans_sym = bool(trans_sym)
 
         if spin_mult is None: spin_mult = 1 + abs(nelecas[0]-nelecas[1])
         spin_sub = [spin_mult,] * nkpts
@@ -560,8 +555,7 @@ class PBCLASCINoSymm(casci.PBCCASCI, LASCINoSymm):
         self.trust_radius = np.pi
         keys = set(('e_states', 'fciboxes', 'nroots', 'weights', 'ncas_sub', 'nelecas_sub',
                     'conv_tol_grad', 'conv_tol_self', 'max_cycle_macro', 'max_cycle_micro',
-                    'ah_level_shift', 'states_converged', 'chkfile', 'e_lexc', 'trust_radius',
-                    'trans_sym'))
+                    'ah_level_shift', 'states_converged', 'chkfile', 'e_lexc', 'trust_radius'))
         self._keys = set(self.__dict__.keys()).union(keys)
         self.fciboxes = []
         if isinstance(spin_sub,int):
@@ -756,3 +750,110 @@ class PBCLASCINoSymm(casci.PBCCASCI, LASCINoSymm):
                 dm1a, dm1b = fcibox.states_make_rdm1s (ci_i, ncas, nelecas)
             casdm1s.append (np.stack ([dm1a, dm1b], axis=1))
         return casdm1s
+
+
+class PBCLASCITransSymm(PBCLASCINoSymm):
+    """
+    Translation-symmetric adapted periodic LASCI implementation.
+
+    This class currently enforces translation-symmetry prerequisites and
+    validates the Wannier orbitals and Hamiltonians. Translation-packed state
+    and integral representations can be added here without changing the
+    general ``PBCLASCINoSymm`` implementation.
+    """
+
+    trans_sym = True
+
+    def _sanity_check_active_space_consistency(self, mo_coeff):
+        """
+        Validate that every translated cell has the same active space
+        and that the number of k-points, LAS fragments, and FCI boxes are
+        consistent with the number of translated cells.
+        """
+        ncell = int(np.prod(self.kmesh))
+        problems = []
+
+        if len(self.kpts) != ncell:
+            msg = f"number of k-points ({len(self.kpts)}) != ncell ({ncell})"
+            problems.append(msg)
+
+        if self.nfrags != ncell:
+            msg = f"number of LAS fragments ({self.nfrags}) != ncell ({ncell})"
+            problems.append(msg)
+
+        if len(self.fciboxes) != ncell:
+            msg = f"number of FCI boxes ({len(self.fciboxes)}) != ncell ({ncell})"
+            problems.append(msg)
+
+        ncas_sub = np.asarray(self.ncas_sub)
+        if ncas_sub.shape != (ncell,) or np.any(ncas_sub != self.ncas):
+            msg = f"all translated cells must have the same number of active \
+                orbitals ({self.ncas}); got {ncas_sub.tolist()}"
+            problems.append(msg)
+
+        nelecas_sub = np.asarray(self.nelecas_sub)
+        if (nelecas_sub.shape != (ncell, 2)
+                or np.any(nelecas_sub != nelecas_sub[0])):
+            msg = "all translated cells must have identical active-electron "
+            msg += f"counts; got {nelecas_sub.tolist()}"
+            problems.append(msg)
+
+        mo_coeff = np.asarray(mo_coeff)
+        if mo_coeff.ndim != 3 or mo_coeff.shape[0] != ncell:
+            msg = f"mo_coeff must have shape (ncell, nao, nmo); got {mo_coeff.shape}"
+            problems.append(msg)
+        elif self.ncore + self.ncas > mo_coeff.shape[2]:
+            msg = "mo_coeff does not contain the complete core and active spaces"
+            problems.append(msg)
+
+        # Now print the problems and raise an error if there are any.
+        if problems:
+            msg = "Translation-symmetric active-space consistency check failed:\n"
+            for problem in problems:
+                msg += f"  - {problem}\n"
+            raise ValueError(msg)
+
+    def _sanity_check_trans_symmetry(self, mo_coeff, h1e, h2e, tol=TRNS_SYMM_TOL):
+        """
+        Check the translation symmetry of the active-space, Wannier-orbital, 
+        h1e, and h2e.
+        
+        args:
+            mo_coeff: ndarray of shape (nkpts, nao, nmo) (# Block orb basis)
+                Molecular orbital coefficients for each k-point.
+            h1e: ndarray of shape (ncell*ncas, ncell*ncas)
+                One-electron Hamiltonian in the Wannier basis.
+            h2e: ndarray of shape (ncell*ncas, ncell*ncas, ncell*ncas, ncell*ncas)
+                Two-electron Hamiltonian in the Wannier basis.
+            tol: float
+                Tolerance for checking translation symmetry.
+        """
+        self._sanity_check_active_space_consistency(mo_coeff)
+
+        ts = TranslationSymm(self.cell, self.kmesh, kpts=self.kpts)
+        active = slice(self.ncore, self.ncore + self.ncas)
+        mo_active = np.asarray(mo_coeff)[:, :, active]
+
+        # Get the Wannier orbitals.
+        wannier_orb, R_indices = get_wannier_orbs(self._scf, self.kmesh, mo_active,)[:2]
+
+        # Check translation symmetry of Wannier orbitals, h1e, and h2e.
+        errors = {}
+        errors['Wannier orbitals'] = check_wannier_orbital_translation(
+            ts, wannier_orb, R_indices=R_indices, tol=tol,
+        )
+        errors['h1e'] = check_h1e_translation(ts, h1e, tol=tol)
+        errors['h2e'] = check_h2e_translation(ts, h2e, tol=tol)
+
+        # If any of the translation symmetry checks failed, raise a RuntimeError.
+        failed = [f"{name} (relative error {error[1]:.3e})" 
+                  for name, error in errors.items() if error[1] >= tol]
+        
+        if failed:
+            msg = "Wannier-basis translation symmetry check failed for "
+            msg += " and ".join(failed)
+            raise RuntimeError(msg)
+
+        # Clean up temporary variables to free memory.
+        del errors, failed, wannier_orb, R_indices, mo_active, ts
+        return errors
