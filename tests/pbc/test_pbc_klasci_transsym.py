@@ -34,6 +34,8 @@ from mrh.my_pyscf.pbc.mcscf.productstate import (
 #         reference block selected from the parent full-fragment projection.
 # Test-5: The reference-fragment CI gradient should match the corresponding
 #         section of the parent full-fragment gradient.
+# Test-6: The translation-symmetric product-state kernel should optimize only
+#         the reference fragment and assemble all returned CI vectors.
 
 
 
@@ -363,6 +365,57 @@ class KnownValues(unittest.TestCase):
             np.max(np.abs(grad_tot - solver._unpack_grad(grad_ref))),
             1e-12,
         )
+
+    def test_productstate_reference_only_kernel(self):
+        trans_klas = kLASCI(
+            kmf, 2, (1, 1), kmesh=kmesh,
+            trans_sym=True, ref_cell=1,
+        )
+        mo_loc = trans_klas.localize_init_guess(
+            ["H 1s"], mo_coeff=mo_coeff,
+        )
+        h1e = trans_klas.h1e_for_cas(
+            mo_coeff=mo_loc, ncas=trans_klas.ncas,
+            ncore=trans_klas.ncore,
+        )[0]
+        h2e = trans_klas.get_h2cas(mo_loc)
+
+        fcisolvers = [box.fcisolvers[0] for box in trans_klas.fciboxes]
+        phases = np.exp(1j * np.array([0.3, -0.2]))
+        solver = PBCTransSymmImpureProductStateFCISolver(
+            fcisolvers,
+            lweights=[[1.0], [1.0]],
+            ref_cell=1,
+            phase_per_frag=phases,
+        )
+        for ifrag, fcisolver in enumerate(solver.fcisolvers):
+            fcisolver.norb = trans_klas.ncas_sub[ifrag]
+            fcisolver.nelec = solver._get_nelec(
+                fcisolver, trans_klas.nelecas_sub[ifrag],
+            )
+            fcisolver.check_transformer_cache()
+
+        with mock.patch.object(
+                solver.fcisolvers[0], 'kernel',
+                wraps=solver.fcisolvers[0].kernel) as other_kernel, \
+             mock.patch.object(
+                solver.fcisolvers[1], 'kernel',
+                wraps=solver.fcisolvers[1].kernel) as ref_kernel:
+            _, _, ci = solver.kernel(
+                h1e, h2e, trans_klas.ncas_sub,
+                trans_klas.nelecas_sub,
+            )
+
+        self.assertEqual(other_kernel.call_count, 0)
+        self.assertGreater(ref_kernel.call_count, 0)
+        self.assertEqual(len(ci), len(fcisolvers))
+        ci_ref = solver._pack_ci(ci)
+        for ifrag, ci_frag in enumerate(ci):
+            self.assertLess(
+                np.max(np.abs(
+                    ci_frag - solver.phase_per_frag[ifrag] * ci_ref
+                )), 1e-12,
+            )
 
 
 if __name__ == "__main__":
