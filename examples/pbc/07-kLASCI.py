@@ -19,7 +19,7 @@ cell.atom ='''
 H 0.0 0.0 0.0
 H 0.74 0.0 0.0
 '''
-cell.basis = '631G'
+cell.basis = 'CC-PVDZ'
 cell.unit = 'Angstrom'
 cell.max_memory = 120000
 cell.ke_cutoff = 100
@@ -41,12 +41,31 @@ kmf.kernel()
 # Active space selection.
 mo_coeff = avas.kernel(kmf, ['H 1s'], minao=cell.basis)[2]
 
-# Now we can run the k-LASCI calculation.
+# Now we can run the k-LASCI calculations with and without translation
+# symmetry.
 # Currently, we are using nkpts=10, so in total
 # the active space of 20e, 20o
 
-klas = mcscf.KLASCI(
+klas_no_trans = mcscf.KLASCI(
+    kmf, 2, (1, 1), kmesh=kmesh, trans_sym=False,
+)
+klas_trans = mcscf.KLASCI(
     kmf, 2, (1, 1), kmesh=kmesh, trans_sym=True,
 )
-lo_coeff = klas.localize_init_guess(['H 1s'], mo_coeff=mo_coeff)
-klas.kernel(lo_coeff)
+
+# Use exactly the same localized orbitals in both calculations so that the
+# energy comparison tests only the translation-symmetric product-state path.
+lo_coeff = klas_no_trans.localize_init_guess(
+    ['H 1s'], mo_coeff=mo_coeff,
+)
+energy_no_trans = klas_no_trans.kernel(
+    np.array(lo_coeff, copy=True),
+)[1]
+energy_trans = klas_trans.kernel(
+    np.array(lo_coeff, copy=True),
+)[1]
+
+print('k-LASCI energy without translation symmetry:', energy_no_trans)
+print('k-LASCI energy with translation symmetry:   ', energy_trans)
+print('Absolute energy difference:                 ',
+      abs(energy_trans - energy_no_trans))
