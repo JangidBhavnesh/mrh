@@ -86,6 +86,19 @@ def _interpret_fragment_orbitals(cell, frag_atoms, frags_by_AOs=False):
 _interpret_unit_cell_orbitals = _interpret_fragment_orbitals
 
 
+def _active_occupations(klas, mo_occ, nkpts, nmo, ncore, ncas):
+    kmf = klas._scf
+    if mo_occ is None: return [None] * nkpts
+    mo_occ = np.asarray(mo_occ)
+    if mo_occ.shape == (nmo,):
+        mo_occ = np.broadcast_to(mo_occ, (nkpts, nmo))
+    if mo_occ.shape != (nkpts, nmo):
+        msg = (f"mo_occ must have shape ({nmo},) or ({nkpts}, {nmo}); "
+               f"got {mo_occ.shape}")
+        raise ValueError(msg)
+    return list(mo_occ[:, ncore:ncore+ncas])
+
+
 def localize_init_guess(klas, frag_atoms=None, mo_coeff=None, spin=None, 
                         lo_coeff=None,fock=None, mo_occ=None, freeze_cas_spaces=True,
                         frags_by_AOs=False, smults_f=None, nelec_f=None, 
@@ -100,6 +113,9 @@ def localize_init_guess(klas, frag_atoms=None, mo_coeff=None, spin=None,
     analogue of molecular ``localize_init_guess``.  At every k-point, an overlap
     SVD selects the combinations of the complete active-band manifold with the largest
     projection onto the same unit-cell orbital space.
+    
+    Note: The core and virtual orbitals are not changed at all. Only the active orbitals 
+    are localized.
     
     args:
         klas: instance of mrh.my_pyscf.pbc.mcscf.klasci 
@@ -181,7 +197,8 @@ def localize_init_guess(klas, frag_atoms=None, mo_coeff=None, spin=None,
         msg = (f"lo_coeff must have shape (nkpts, nao, nlo); got {lo_coeff.shape}")
         raise ValueError(msg)
 
-    frag_orbs = _interpret_unit_cell_orbitals(cell, frag_atoms, frags_by_AOs=frags_by_AOs
+    frag_orbs = _interpret_unit_cell_orbitals(cell, frag_atoms, 
+                                              frags_by_AOs=frags_by_AOs
     )
     if frag_orbs is None:
         frag_orbs = np.arange(lo_coeff.shape[2])
@@ -198,7 +215,6 @@ def localize_init_guess(klas, frag_atoms=None, mo_coeff=None, spin=None,
     # Collect the active-band occupations for each k-point.  If not provided,
     # the default is to allow all active bands to mix.
     active_occ = _active_occupations(klas, mo_occ, nkpts, nmo, ncore, ncas)
-
 
     result_dtype = np.result_type(mo_coeff.dtype, lo_coeff.dtype)
     mo_out = np.array(mo_coeff, dtype=result_dtype, copy=True)
@@ -230,31 +246,37 @@ def localize_init_guess(klas, frag_atoms=None, mo_coeff=None, spin=None,
             _, svals, c_local, _ = klas._svd(
                 trial, c_act, s=ovlp[k], mo_occ=active_occ[k]
             )
+
         if len(svals) < ncas:
-            raise ValueError(
-                f"k-point {k}: only {len(svals)} trial directions are "
-                f"available for {ncas} active bands"
-            )
+            msg = "Note sufficient AOs were selected to localize the active space."
+            raise ValueError(msg)
+
+        # Sanity check, if the active space have very minimal overlap with the target
+        # fragment orbitals.
         svals = np.asarray(svals[:ncas])
         if np.min(svals) < sval_thresh:
-            raise ValueError(
-                f"k-point {k}: active/trial overlap is rank deficient; "
-                f"singular values = {svals}"
-            )
+            msg = (f"k-point {k}: fragment orbitals localization is poorer, "
+                   f"singular values = {svals}")
+            raise ValueError(msg)
+        
         c_local = np.asarray(c_local[:, :ncas])
         mo_out[k, :, ncore:nocc] = c_local
 
         umat[k] = np.eye(nmo, dtype=mo_out.dtype)
-        umat[k, ncore:nocc, ncore:nocc] = (
-            c_act.conj().T @ ovlp[k] @ c_local
-        )
+        umat[k, ncore:nocc, ncore:nocc] = (c_act.conj().T @ ovlp[k] @ c_local)
         svals_out.append(svals)
 
+    # Check orthogonality of the output orbitals
     orthogonality_check(mo_out, ovlp)
     svals_out = np.asarray(svals_out)
+
     result = [mo_out]
     if return_umat:
         result.append(umat)
     if return_svals:
         result.append(svals_out)
-    return result[0] if len(result) == 1 else tuple(result)
+
+    if len(result) == 1:
+        return result[0]
+    else:
+        return tuple(result)
