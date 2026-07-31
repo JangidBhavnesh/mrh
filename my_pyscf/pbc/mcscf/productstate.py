@@ -362,6 +362,10 @@ class PBCTransSymmImpureProductStateFCISolver(ImpureProductStateFCISolver):
     '''
     Translation-symmetry adapted product-state solver.
 
+    This class has currently been tested with one root per unit cell.  The
+    implementation retains the generalized multi-root and state-averaged
+    code paths.
+
     For now this class retains the parent algorithm and solves every fragment.
     ref_cell records the representative cell that will be used by a future
     packed, single-fragment implementation.
@@ -441,6 +445,52 @@ class PBCTransSymmImpureProductStateFCISolver(ImpureProductStateFCISolver):
             dm1s=dm1s, dm2=dm2, **kwargs,
         )
         return h1eff[self.ref_cell], h0eff[self.ref_cell]
+
+    def _get_ref_grad(self, h1eff_ref, h2, ci_ref, norb_f, nelec_f,
+                      orbsym=None, **kwargs):
+        r'''
+        Calculate the CI gradient for only the reference fragment.
+        TODO: Add the equation to make it more clear.
+        '''
+        ref = self.ref_cell
+        i = sum(norb_f[:ref])
+        j = i + norb_f[ref]
+        norb = norb_f[ref]
+        solver = self.fcisolvers[ref]
+        nelec = self._get_nelec(solver, nelec_f[ref])
+        nroots = solver.nroots
+
+        ndeta = cistring.num_strings(norb, nelec[0])
+        ndetb = cistring.num_strings(norb, nelec[1])
+        ci_ref = np.asarray(ci_ref).reshape(nroots, ndeta, ndetb)
+        h2_ref = h2[i:j, i:j, i:j, i:j]
+        h2eff_ref = solver.absorb_h1e(
+            h1eff_ref, h2_ref, norb, nelec, 0.5,)
+        hc = np.asarray([solver.contract_2e(h2eff_ref, root, norb, nelec) 
+                         for root in ci_ref])
+        chc = np.dot(ci_ref.reshape(nroots, -1).conj(), 
+                     hc.reshape(nroots, -1).T)
+        hc = hc - np.tensordot(chc, ci_ref, axes=1)
+
+        if isinstance(solver, CSFFCISolver):
+            hc_real = solver.transformer.vec_det2csf(
+                hc.real, order='C', normalize=False,
+            )
+            hc_imag = solver.transformer.vec_det2csf(
+                hc.imag, order='C', normalize=False,
+            )
+            hc_csf = hc_real.astype(h1eff_ref.dtype)
+            hc_csf.real = hc_real
+            hc_csf.imag = hc_imag
+            hc = hc_csf
+
+        assert hc.size == nroots * solver.transformer.ncsf
+        grad = [hc.ravel()]
+        if nroots > 1 and getattr(solver, 'weights', None) is not None:
+            chc *= np.asarray(solver.weights)[:, None]
+            chc -= chc.T
+            grad.append(chc[np.tril_indices(nroots, k=-1)])
+        return np.concatenate(grad)
 
     def _get_ref_init_guess(self, ci_ref, norb_f, nelec_f, h1, h2,
                             nroots=None):
