@@ -41,6 +41,8 @@ from mrh.my_pyscf.pbc.util.transym import TranslationSymm
 #         reference-fragment density matrices.
 # Test-8: Packed one- and two-electron Hamiltonians should reproduce every
 #         translated block of the full Hamiltonians.
+# Test-9: The packed reference-cell energy should reproduce the dense total
+#         product-state energy after multiplication by the number of cells.
 
 
 
@@ -115,6 +117,8 @@ class KnownValues(unittest.TestCase):
                 - phase_per_frag
             )), 1e-12,
         )
+        self.assertTrue(callable(trans_solver.call_args.kwargs["pack_h1"]))
+        self.assertTrue(callable(trans_solver.call_args.kwargs["pack_h2"]))
 
         ncas_sub = trans_klas.ncas_sub.copy()
         try:
@@ -516,6 +520,60 @@ class KnownValues(unittest.TestCase):
                                 ] - h2_packed[idS, idU, idV]
                             )), 1e-10,
                         )
+
+    def test_packed_reference_energy(self):
+        trans_klas = kLASCI(
+            kmf, 2, (1, 1), kmesh=kmesh,
+            trans_sym=True, ref_cell=1,
+        )
+        mo_loc = trans_klas.localize_init_guess(
+            ["H 1s"], mo_coeff=mo_coeff,
+        )
+        trans_klas.kernel(mo_loc)
+        h1e = trans_klas.h1e_for_cas(
+            mo_coeff=mo_loc, ncas=trans_klas.ncas,
+            ncore=trans_klas.ncore,
+        )[0]
+        h2e = trans_klas.get_h2cas(mo_loc)
+
+        fcisolvers = [box.fcisolvers[0] for box in trans_klas.fciboxes]
+        solver = PBCTransSymmImpureProductStateFCISolver(
+            fcisolvers,
+            lweights=[[1.0], [1.0]],
+            ref_cell=1,
+            phase_per_frag=trans_klas.get_phase_per_frag(mo_loc),
+            pack_h1=trans_klas.pack_h1,
+            pack_h2=trans_klas.pack_h2,
+        )
+        ci_ref = np.asarray(trans_klas.ci[1])[0]
+        ci = solver._unpack_cif(ci_ref)
+        h1_packed = trans_klas.pack_h1(h1e)
+        h2_packed = trans_klas.pack_h2(h2e)
+        ecore = 0.37
+
+        energy_ref = solver.energy_ref(
+            h1_packed, h2_packed, ci_ref,
+            trans_klas.ncas_sub, trans_klas.nelecas_sub,
+            ecore=ecore,
+        )
+        energy = solver.energy_elec(
+            h1e, h2e, ci,
+            trans_klas.ncas_sub, trans_klas.nelecas_sub,
+            ecore=ecore,
+        )
+        energy_dense = super(
+            PBCTransSymmImpureProductStateFCISolver, solver
+        ).energy_elec(
+            h1e, h2e, ci,
+            trans_klas.ncas_sub, trans_klas.nelecas_sub,
+            ecore=ecore,
+        )
+
+        self.assertAlmostEqual(
+            energy, len(fcisolvers) * energy_ref, places=10,
+        )
+        self.assertAlmostEqual(energy.real, energy_dense.real, places=10)
+        self.assertAlmostEqual(energy.imag, energy_dense.imag, places=10)
 
 
 if __name__ == "__main__":
