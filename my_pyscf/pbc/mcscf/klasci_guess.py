@@ -116,7 +116,7 @@ def localize_init_guess(klas, frag_atoms=None, mo_coeff=None, spin=None,
     
     Note: The core and virtual orbitals are not changed at all. Only the active orbitals 
     are localized.
-    
+
     args:
         klas: instance of mrh.my_pyscf.pbc.mcscf.klasci 
               periodic LASCI object
@@ -278,3 +278,4 @@ def localize_init_guess(klas, frag_atoms=None, mo_coeff=None, spin=None,
         return result[0]
     else:
         return tuple(result)
+
