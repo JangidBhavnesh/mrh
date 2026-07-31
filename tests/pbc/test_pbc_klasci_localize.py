@@ -9,6 +9,7 @@ from mrh.my_pyscf.pbc.mcscf import avas
 from mrh.my_pyscf.pbc.mcscf.klasci import kLASCI
 from mrh.my_pyscf.pbc.util.orth import meta_lowdin_orbitals
 
+# Author: Bhavnesh Jangid
 
 # Test-0: The molecular-style periodic localizer should preserve the complete
 #         active-band space, MO orthonormality, and the core/external orbitals.
