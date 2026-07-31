@@ -86,8 +86,8 @@ def make_hdiag_det (fci, h1e, eri, norb, nelec):
     args:
         fci: FCISolver object?
             I don't know why it's needed but keeping it consistent with actual csfsolver function.
-        h1e: np.ndarray of shape (norb, norb)
-            one-electron integrals
+        h1e: np.ndarray of shape (norb, norb) or (2, norb, norb)
+            spin-independent or spin-separated one-electron integrals
         eri: np.ndarray of shape (norb, norb, norb, norb)
             two-electron integrals in chemist's notation
         norb: int
@@ -120,7 +120,7 @@ def make_hdiag_det (fci, h1e, eri, norb, nelec):
             lib.logger.warning("The imaginary part of the Hamiltonian diagonal in the determinant basis "
                                "is not negligible: max imaginary part = %s", np.max(np.abs(hdiag_imag)))
             
-    hdiag.imag = IMAG_NOISE
+    hdiag.imag = 0
 
     hdiag_real = hdiag_imag = h1ea = h1eb =None
     
@@ -131,8 +131,8 @@ def make_hdiag_csf (h1e, eri, norb, nelec, transformer, hdiag_det=None, max_memo
     Make the diagonal of the Hamiltonian in the CSF basis. Basically, we have the Hamiltonian
     diagonal in the determinant basis (hdiag_det). We will transform it to the CSF basis.
     args:
-        h1e: np.ndarray of shape (norb, norb)
-            one-electron integrals
+        h1e: np.ndarray of shape (norb, norb) or (2, norb, norb)
+            spin-independent or spin-separated one-electron integrals
         eri: np.ndarray of shape (norb, norb, norb, norb)
             two-electron integrals in chemist's notation
         norb: int
@@ -199,8 +199,8 @@ def pspace(fci, h1e, eri, norb, nelec, transformer,
     args:
         fci: FCISolver object
             the FCI solver object, needed for logging and some other utilities.
-        h1e: np.ndarray of shape (norb, norb)
-            one-electron integrals
+        h1e: np.ndarray of shape (norb, norb) or (2, norb, norb)
+            spin-independent or spin-separated one-electron integrals
         eri: np.ndarray of shape (norb, norb, norb, norb)
             two-electron integrals in chemist's notation
         norb: int
@@ -232,8 +232,8 @@ def pspace(fci, h1e, eri, norb, nelec, transformer,
     # so I always keep the eri in the 4D format. 
     assert (h1e.dtype == eri.dtype), \
         "h1e and eri must have the same dtype"
-    assert h1e.shape == (norb, norb), \
-        "h1e must be a square matrix of shape (norb, norb)"
+    assert h1e.shape in ((norb, norb), (2, norb, norb)), \
+        "h1e must have shape (norb, norb) or (2, norb, norb)"
     assert eri.shape == (norb, norb, norb, norb), \
         "eri must be a 4D array of shape (norb, norb, norb, norb)"
 
