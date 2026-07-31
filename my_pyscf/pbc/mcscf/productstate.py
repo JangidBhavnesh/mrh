@@ -424,6 +424,24 @@ class PBCTransSymmImpureProductStateFCISolver(ImpureProductStateFCISolver):
                   for ifrag in range(nfrag)]
         return ci_tot
 
+    def _project_ref_hfrag(self, h1, h2, ci_ref, norb_f, nelec_f,
+                           ecore=0, phases=None, dm1s=None, dm2=None,
+                           **kwargs):
+        '''
+        Project the Hamiltonian for the reference fragment.
+
+        This initial implementation expands ``ci_ref`` to all translated
+        fragments and reuses the parent dense projection.  A later packed
+        implementation can replace this step without changing the reference-
+        fragment interface.
+        '''
+        ci = self._unpack_cif(ci_ref, phases=phases)
+        h1eff, h0eff, _ = super().project_hfrag(
+            h1, h2, ci, norb_f, nelec_f, ecore=ecore,
+            dm1s=dm1s, dm2=dm2, **kwargs,
+        )
+        return h1eff[self.ref_cell], h0eff[self.ref_cell]
+
     def _get_ref_init_guess(self, ci_ref, norb_f, nelec_f, h1, h2,
                             nroots=None):
         '''
