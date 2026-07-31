@@ -67,13 +67,28 @@ def gen_random_hermi_ham(norb):
     h2 = h2 + h2.conj().transpose(2,3,0,1)
     return h1, h2
 
-def gen_random_complex_hermi_h1(norb):
+def gen_random_complex_hermi_ham(norb):
     rng = np.random.default_rng(34)
-    h1 = (
+    h1_ao = rng.standard_normal((norb, norb))
+    h1_ao = h1_ao + h1_ao.T
+
+    chol = rng.standard_normal((2 * norb, norb, norb))
+    chol = chol + chol.transpose(0, 2, 1)
+    eri_ao = np.einsum('Lpq,Lrs->pqrs', chol, chol)
+
+    mo = (
         rng.standard_normal((norb, norb))
         + 1j * rng.standard_normal((norb, norb))
     )
-    return h1 + h1.conj().T
+    mo = np.linalg.qr(mo)[0]
+
+    h1 = np.einsum('pi,pq,qj->ij', mo.conj(), h1_ao, mo)
+    eri = np.einsum(
+        'pi,qj,rk,sl,pqrs->ijkl',
+        mo.conj(), mo, mo.conj(), mo, eri_ao,
+        optimize=True,
+    )
+    return h1, eri
 
 def contract_1e_reference(h1e, fcivec, link_index):
     link_indexa, link_indexb = link_index
@@ -240,8 +255,9 @@ class KnownValues(unittest.TestCase):
     def test_multiroot_davidson_cplx(self):
         norb = 4
         nelec = (2, 2)
-        h1e = gen_random_complex_hermi_h1(norb)
-        eri = np.zeros((norb,) * 4, dtype=np.complex128)
+        h1e, eri = gen_random_complex_hermi_ham(norb)
+        self.assertGreater(np.max(np.abs(h1e.imag)), 1e-6)
+        self.assertGreater(np.max(np.abs(eri.imag)), 1e-6)
 
         exact_solver = csf_solver_cplx(mol, smult=1)
         exact_solver.nroots = 2

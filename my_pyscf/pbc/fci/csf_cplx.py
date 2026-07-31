@@ -465,7 +465,10 @@ def kernel(fci, h1e, eri, norb, nelec, smult=None, idx_sym=None, ci0=None,
             civec = cplx_csf_helper.vec_csf2det_cplx(
                 transformer, pv[:,0].reshape(1, 1), normalize=True
             )
-            return pw[0]+ecore, civec
+            # Parent real CSF solver does not reshape the output CI.
+            # I think that might be a bug, but I will keep it consistent with 
+            # the parent solver.
+            return pw[0]+ecore, civec #.reshape(na, nb)
         elif nroots > 1:
             civecout = []
             for i in range(nroots):
