@@ -18,6 +18,17 @@ from mrh.my_pyscf.pbc.mcscf.productstate import (
     PBCTransSymmImpureProductStateFCISolver,
 )
 
+# Author: Bhavnesh Jangid
+
+# Test-0: trans_sym=True should select PBCLASCITransSymm, validate the
+#          Wannier orbitals and Hamiltonians, and use the translation-symmetric
+#         product-state solver with the requested reference cell.
+# Test-1: PBCLASCITransSymm and PBCLASCINoSymm should produce the same energy
+#         when they use the same localized active orbitals.
+# Test-2: The product-state CI helpers should select the reference-cell CI
+#         vector and reconstruct independent fragment vectors with optional
+#         translation phases.
+
 
 cell = kmf = mo_coeff = None
 kmesh = [2, 1, 1]
