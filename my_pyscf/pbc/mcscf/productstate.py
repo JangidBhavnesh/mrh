@@ -367,8 +367,7 @@ class PBCTransSymmImpureProductStateFCISolver(ImpureProductStateFCISolver):
     code paths.
 
     The full-fragment interface is assembled from a reference-cell value and
-    its translation phases.  The one-shot update still uses the parent
-    implementation and solves every fragment for now.
+    its translation phases.  Only the reference fragment is optimized.
 
     #TODOs:
     '''
@@ -376,7 +375,8 @@ class PBCTransSymmImpureProductStateFCISolver(ImpureProductStateFCISolver):
     trans_sym = True
 
     def __init__(self, fcisolvers, stdout=None, verbose=0, lroots=None,
-                 lweights=None, ref_cell=0, phase_per_frag=None, **kwargs):
+                 lweights=None, ref_cell=0, phase_per_frag=None,
+                 pack_h1=None, pack_h2=None, **kwargs):
         super().__init__(fcisolvers, stdout=stdout, verbose=verbose, lroots=lroots,
                          lweights=lweights, **kwargs)
         # Checks:
@@ -388,6 +388,14 @@ class PBCTransSymmImpureProductStateFCISolver(ImpureProductStateFCISolver):
             raise ValueError(msg)
         self.ref_cell = int(ref_cell)
         self.phase_per_frag = self._normalize_phase_per_frag(phase_per_frag)
+        if (pack_h1 is None) != (pack_h2 is None):
+            raise ValueError("pack_h1 and pack_h2 must be provided together")
+        if pack_h1 is not None and not callable(pack_h1):
+            raise TypeError("pack_h1 must be callable")
+        if pack_h2 is not None and not callable(pack_h2):
+            raise TypeError("pack_h2 must be callable")
+        self.pack_h1 = pack_h1
+        self.pack_h2 = pack_h2
 
     def _normalize_phase_per_frag(self, phase_per_frag):
         '''Validate fragment phases and fix the reference-cell phase to one.'''
@@ -475,6 +483,19 @@ class PBCTransSymmImpureProductStateFCISolver(ImpureProductStateFCISolver):
         )
         return np.asarray(dm1a_ref), np.asarray(dm1b_ref)
 
+    def _make_ref_rdm2(self, ci_ref, norb_f, nelec_f):
+        '''Calculate the two-body RDM for the reference cell.'''
+        ref = self.ref_cell
+        norb_ref = norb_f[ref]
+        solver_ref = self.fcisolvers[ref]
+        nelec_ref = self._get_nelec(solver_ref, nelec_f[ref])
+        ci_solver = ci_ref
+        if getattr(ci_solver, 'ndim', 3) == 3:
+            ci_solver = list(ci_solver)
+        return np.asarray(
+            solver_ref.make_rdm2(ci_solver, norb_ref, nelec_ref)
+        )
+
     def _unpack_rdm1s(self, dm1a_ref, dm1b_ref, norb_f, nelec_f):
         '''Assemble full one-body RDMs from the reference-cell blocks.'''
         ref = self.ref_cell
@@ -524,16 +545,8 @@ class PBCTransSymmImpureProductStateFCISolver(ImpureProductStateFCISolver):
         '''
 
         ci_ref = self._pack_ci(ci)
-        ref = self.ref_cell
-        norb_ref = norb_f[ref]
-        solver_ref = self.fcisolvers[ref]
-        nelec_ref = self._get_nelec(solver_ref, nelec_f[ref])
-        ci_solver = ci_ref
-        if getattr(ci_solver, 'ndim', 3) == 3:
-            ci_solver = list(ci_solver)
-
-        dm2_ref = np.asarray(
-            solver_ref.make_rdm2(ci_solver, norb_ref, nelec_ref)
+        dm2_ref = self._make_ref_rdm2(
+            ci_ref, norb_f, nelec_f,
         )
         dm1a_ref, dm1b_ref = self._make_ref_rdm1s(
             ci_ref, norb_f, nelec_f,
@@ -569,6 +582,81 @@ class PBCTransSymmImpureProductStateFCISolver(ImpureProductStateFCISolver):
             dm2[i:j, k:l, k:l, i:j] = -d2.transpose(0, 2, 3, 1)
             dm2[k:l, i:j, i:j, k:l] = -d2.transpose(2, 0, 1, 3)
         return dm2
+
+    def energy_ref(self, h1_packed, h2_packed, ci_ref,
+                   norb_f, nelec_f, ecore=0, **kwargs):
+        '''Calculate the energy contribution associated with one cell.
+
+        ``ecore`` is the total system core energy.  An equal ``1/ncell``
+        share is included in the returned reference-cell energy.
+        '''
+        ncell = len(self.fcisolvers)
+        norb_ref = norb_f[self.ref_cell]
+        h1_packed = np.asarray(h1_packed)
+        h2_packed = np.asarray(h2_packed)
+
+        if h1_packed.shape == (ncell, norb_ref, norb_ref):
+            h1_packed = np.stack([h1_packed, h1_packed], axis=0)
+        expected_h1 = (2, ncell, norb_ref, norb_ref)
+        expected_h2 = (
+            ncell, ncell, ncell,
+            norb_ref, norb_ref, norb_ref, norb_ref,
+        )
+        if h1_packed.shape != expected_h1:
+            raise ValueError(
+                f"packed h1 must have shape {expected_h1}; "
+                f"got {h1_packed.shape}"
+            )
+        if h2_packed.shape != expected_h2:
+            raise ValueError(
+                f"packed h2 must have shape {expected_h2}; "
+                f"got {h2_packed.shape}"
+            )
+
+        dm1a_ref, dm1b_ref = self._make_ref_rdm1s(
+            ci_ref, norb_f, nelec_f,
+        )
+        dm1s_ref = np.stack([dm1a_ref, dm1b_ref], axis=0)
+        dm1_ref = dm1a_ref + dm1b_ref
+        dm2_ref = self._make_ref_rdm2(ci_ref, norb_f, nelec_f)
+
+        energy_one = np.einsum(
+            'spq,spq->', h1_packed[:, 0], dm1s_ref,
+        )
+        energy_two = np.einsum(
+            'pqrs,pqrs->', h2_packed[0, 0, 0], dm2_ref,
+        )
+        for delta in range(1, ncell):
+            energy_two += np.einsum(
+                'pqrs,pq,rs->',
+                h2_packed[0, delta, delta], dm1_ref, dm1_ref,
+            )
+            for spin in range(2):
+                energy_two -= np.einsum(
+                    'pqrs,ps,qr->',
+                    h2_packed[delta, delta, 0],
+                    dm1s_ref[spin], dm1s_ref[spin],
+                )
+
+        return ecore / ncell + energy_one + 0.5 * energy_two
+
+    def energy_elec(self, h1, h2, ci, norb_f, nelec_f,
+                    ecore=0, **kwargs):
+        '''Calculate the total energy from the packed reference-cell energy.'''
+        if self.pack_h1 is None:
+            return super().energy_elec(
+                h1, h2, ci, norb_f, nelec_f,
+                ecore=ecore, **kwargs,
+            )
+
+        h1_packed = self.pack_h1(h1)
+        h2_packed = self.pack_h2(h2)
+        ci_ref = self._pack_ci(ci)
+        energy_ref = self.energy_ref(
+            h1_packed, h2_packed, ci_ref, norb_f, nelec_f,
+            ecore=ecore, **kwargs,
+        )
+        return len(self.fcisolvers) * energy_ref
 
     def _unpack_grad(self, grad_ref):
         '''Assemble the packed full-fragment gradient from the reference.'''
