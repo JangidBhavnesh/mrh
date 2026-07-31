@@ -501,11 +501,6 @@ def kernel(fci, h1e, eri, norb, nelec, smult=None, idx_sym=None, ci0=None,
         x_det = cplx_csf_helper.vec_csf2det_cplx(
             transformer, x, normalize=False
         )
-        if nroots > 1:
-            for i in range(nroots):
-                x_det[i] /= np.linalg.norm(x_det[i])
-        elif nroots == 1:
-            x_det /= np.linalg.norm(x_det)
         hx = fci.contract_2e(h2e, x_det, norb, nelec, (link_indexa, link_indexb))
         hx_out = cplx_csf_helper.vec_det2csf_cplx(
             transformer, hx, normalize=False
