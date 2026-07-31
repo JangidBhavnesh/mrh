@@ -267,6 +267,20 @@ class KnownValues(unittest.TestCase):
         self.assertAlmostEqual(energy_plain.real, energy_trans.real, places=10)
         self.assertAlmostEqual(energy_plain.imag, energy_trans.imag, places=10)
 
+    def test_trans_sym_productstate_pack_ci(self):
+        solver = PBCTransSymmImpureProductStateFCISolver(
+            [object(), object()],
+            lweights=[[1.0], [1.0]],
+            ref_cell=1,
+        )
+        ci = [np.array([1.0, 2.0]), np.array([3.0, 4.0])]
+
+        ci_ref = solver._pack_ci(ci)
+
+        self.assertEqual(ci_ref.tolist(), [3.0, 4.0])
+        self.assertIsNot(ci_ref, ci[1])
+        self.assertIsNone(solver._pack_ci(None))
+
     def test_api_for_localization_init_guess(self):
         with self.assertRaisesRegex(
                 ValueError, "Cannot localize 2 active bands using only 1"):
