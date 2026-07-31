@@ -128,7 +128,7 @@ def localize_init_guess(klas, frag_atoms=None, mo_coeff=None, spin=None,
             molecular orbitals for each k-point. If not provided, the orbitals 
             from klas._scf.mo_coeff are used.
         lo_coeff: np.ndarray or the list of np.arrays, Shape: (nkpts, nao, nmo)
-                  orthonormal trial orbitals.  meta-Lowdin AOs are used by default.
+                  orthonormal local orbitals.  meta-Lowdin AOs are used by default.
         mo_occ: np.array or the list of np.arrays, Shape: (nkpts, nmo)
             optional occupation labels.  When supplied, only active
             orbitals with the same occupation are mixed, as in the molecular
@@ -203,12 +203,12 @@ def localize_init_guess(klas, frag_atoms=None, mo_coeff=None, spin=None,
     if frag_orbs is None:
         frag_orbs = np.arange(lo_coeff.shape[2])
     if np.any(frag_orbs >= lo_coeff.shape[2]):
-        msg = ("Fragment AO index is outside the localized trial-orbital space")
+        msg = ("Fragment AO index is outside the local-orbital space")
         raise IndexError(msg)
     
     if frag_orbs.size < ncas:
         msg = (f"Cannot localize {ncas} active bands using only "
-               f"{frag_orbs.size} trial orbitals")
+               f"{frag_orbs.size} local orbitals")
         raise ValueError(msg)
 
     # If we want to preserve the active space determinant.
@@ -223,28 +223,26 @@ def localize_init_guess(klas, frag_atoms=None, mo_coeff=None, spin=None,
 
     for k in range(nkpts):
         c_act = mo_coeff[k, :, ncore:nocc]
-        trial = lo_coeff[k][:, frag_orbs]
+        ortho_lo = lo_coeff[k][:, frag_orbs]
         if active_occ[k] is None:
-            # The right singular vectors alone choose principal directions in
-            # the active space, but rotate the trial orbitals at the same
-            # time.  For one complete active space per unit cell, use the
-            # polar factor instead so each active band is aligned with the
-            # requested trial orbital and obtains a reproducible k-point
-            # gauge.  This is also invariant to the input active-band gauge.
-            overlap = c_act.conj().T @ ovlp[k] @ trial
-            left, svals, right_h = np.linalg.svd(
+            # ortho_lo is the selected orthonormal local-orbital basis.  For
+            # one complete active space per unit cell, the polar factor aligns
+            # each active band with this basis and gives a reproducible k-point
+            # gauge that is invariant to the input active-band gauge.
+            overlap = c_act.conj().T @ ovlp[k] @ ortho_lo
+            u, svals, vh = np.linalg.svd(
                 overlap, full_matrices=False
             )
-            if trial.shape[1] == ncas:
-                c_local = c_act @ left @ right_h
+            if ortho_lo.shape[1] == ncas:
+                c_local = c_act @ u @ vh
             else:
-                # With an overcomplete trial space there is no one-to-one
+                # With an overcomplete local-orbital space there is no one-to-one
                 # orbital labelling.  Retain its best ncas principal
                 # directions, consistent with the molecular SVD framework.
-                c_local = c_act @ left
+                c_local = c_act @ u
         else:
             _, svals, c_local, _ = klas._svd(
-                trial, c_act, s=ovlp[k], mo_occ=active_occ[k]
+                ortho_lo, c_act, s=ovlp[k], mo_occ=active_occ[k]
             )
 
         if len(svals) < ncas:
