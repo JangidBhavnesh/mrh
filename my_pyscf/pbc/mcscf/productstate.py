@@ -383,5 +383,11 @@ class PBCTransSymmImpureProductStateFCISolver(ImpureProductStateFCISolver):
             msg = f"ref_cell must be in [0, {len(self.fcisolvers)}); got {ref_cell}"
             raise ValueError(msg)
         self.ref_cell = int(ref_cell)
-        
 
+    def _pack_ci(self, ci):
+        '''
+        Select and copy the CI vector belonging to the reference cell.
+        '''
+        if ci is None:
+            return None
+        return np.array(ci[self.ref_cell], copy=True)
