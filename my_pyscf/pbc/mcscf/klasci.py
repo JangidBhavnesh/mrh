@@ -797,6 +797,63 @@ class PBCLASCITransSymm(PBCLASCINoSymm):
         self._keys.add("ref_cell")
         return self
 
+    def get_phase_per_frag(self, lo_coeff, tol=TRNS_SYMM_TOL):
+        '''Get translated fragment-CI phases from the localized orbitals.
+
+        The phase for each fragment is obtained by translating the reference
+        Wannier orbitals into that fragment and comparing the two orbital
+        coefficient tensors.  This returns a scalar CI phase only when all
+        active orbitals share one common translation phase.  A general orbital
+        rotation must instead be lifted to the determinant basis.
+
+        The returned phase accounts for the fixed number of active electrons
+        in each fragment and can be passed to ``_unpack_cif``.
+        '''
+        lo_coeff = np.asarray(lo_coeff)
+        self._sanity_check_active_space_consistency(lo_coeff)
+
+        active = slice(self.ncore, self.ncore + self.ncas)
+        wannier_orb, R_indices = get_wannier_orbs(
+            self._scf, self.kmesh, lo_coeff[:, :, active],
+        )[:2]
+        ts = TranslationSymm(
+            self.cell, self.kmesh, kpts=self.kpts,
+        )
+        R_to_i = ts.index_map(R_indices)
+        ref_R = R_indices[self.ref_cell]
+        ref_orb = wannier_orb[:, :, self.ref_cell, :]
+
+        phases = np.empty(ts.ncell, dtype=np.complex128)
+        for ifrag, frag_R in enumerate(R_indices):
+            translation = frag_R - ref_R
+            source_cells = [
+                R_to_i[ts.mod_index(R - translation)]
+                for R in R_indices
+            ]
+            translated_ref = ref_orb[source_cells]
+            target = wannier_orb[:, :, ifrag, :]
+
+            overlap = np.vdot(translated_ref, target)
+            if abs(overlap) == 0:
+                raise RuntimeError(
+                    f"zero translated-orbital overlap for fragment {ifrag}"
+                )
+            orbital_phase = overlap / abs(overlap)
+            error = np.linalg.norm(
+                target - orbital_phase * translated_ref
+            ) / max(np.linalg.norm(target), 1e-14)
+            if error >= tol:
+                msg = "translated active orbitals for fragment "
+                msg += f"{ifrag} require a non-scalar transformation "
+                msg += f"(relative error {error:.3e})"
+                raise RuntimeError(msg)
+
+            nelec = int(np.sum(self.nelecas_sub[ifrag]))
+            phases[ifrag] = orbital_phase.conjugate() ** nelec
+
+        phases[self.ref_cell] = 1.0
+        return phases
+
     def pack_h1(self, h1e):
         '''
         Future hook for packing h1e relative to ``ref_cell``.
