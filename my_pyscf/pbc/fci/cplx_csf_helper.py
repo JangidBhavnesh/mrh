@@ -33,6 +33,69 @@ def sanity_check_link_index_without_trilidx(link_index, norb):
 
     return np.ascontiguousarray(link_index, dtype=np.int32)
 
+def _transform_complex_ci(transformer, civec, transform, ncoeff,
+                          order='C', normalize=True, return_norm=False):
+    '''
+    Apply a real CSF transformation to a complex CI vector in one call.
+    The real and imaginary parts are stacked as independent real vectors.  The
+    underlying transformer therefore constructs and applies each real CSF
+    transformation matrix only once for both parts.
+    '''
+    is_list = isinstance(civec, list)
+    is_tuple = isinstance(civec, tuple)
+    civec = np.asarray(civec)
+    if civec.size % ncoeff:
+        msg = f"CI vector has {civec.size} elements; expected a multiple of {ncoeff}"
+        raise ValueError(msg)
+
+    nvec = civec.size // ncoeff
+    is_flat = civec.ndim == 1 and not (is_list or is_tuple)
+    if order.upper() == 'F':
+        civec = civec.reshape(ncoeff, nvec).T
+    else:
+        civec = civec.reshape(nvec, ncoeff)
+
+    civec_ri = np.ascontiguousarray(np.concatenate((civec.real, civec.imag), 
+                                                   axis=0))
+    transformed_ri = transform(civec_ri, order='C', normalize=False)
+    transformed_ri = np.asarray(transformed_ri).reshape(2*nvec, -1)
+    transformed = (transformed_ri[:nvec].astype(np.complex128)
+        + 1j * transformed_ri[nvec:])
+
+    norms = np.linalg.norm(transformed, axis=1)
+    if normalize:
+        nonzero = ~np.isclose(norms, 0)
+        # Avoid division by zero for zero-norm vectors
+        transformed[nonzero] /= norms[nonzero, np.newaxis]
+
+    if order.upper() == 'F': transformed = transformed.T
+    if is_flat: transformed = transformed.ravel()
+    elif is_list: transformed = list(transformed)
+    elif is_tuple: transformed = tuple(transformed)
+
+    if norms.size == 1: norms = norms[0]
+    if return_norm: return transformed, norms
+    return transformed
+
+def vec_det2csf_cplx(transformer, civec, order='C',
+                     normalize=True, return_norm=False):
+    '''
+    Transform complex determinant coefficients to CSFs in one call.
+    '''
+    return _transform_complex_ci(
+        transformer, civec, transformer.vec_det2csf, transformer.ndet,
+        order=order, normalize=normalize, return_norm=return_norm,)
+
+def vec_csf2det_cplx(transformer, civec, order='C',
+                     normalize=True, return_norm=False):
+    '''
+    Transform complex CSF coefficients to determinants in one call.
+    '''
+    return _transform_complex_ci(
+        transformer, civec, transformer.vec_csf2det, transformer.ncsf,
+        order=order, normalize=normalize, return_norm=return_norm,
+    )
+
 def contract_1e(h1e, fcivec, norb, nelec, link_index=None):
     '''
     Contract a complex spin-separated one-electron Hamiltonian.
