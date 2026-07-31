@@ -1,11 +1,13 @@
 #!/usr/bin/env python
 
 import unittest
+from unittest import mock
 import numpy as np
 
 from pyscf.pbc import gto, scf
 
 from mrh.my_pyscf.pbc.mcscf import avas
+from mrh.my_pyscf.pbc.mcscf import klasci as klasci_module
 from mrh.my_pyscf.pbc.mcscf.klasci import kLASCI
 from mrh.my_pyscf.pbc.util.orth import meta_lowdin_orbitals
 
@@ -19,6 +21,8 @@ from mrh.my_pyscf.pbc.util.orth import meta_lowdin_orbitals
 #         than the active-band space with a clear error.
 # Test-3: For a simple periodic Be atom, the localized active orbital should
 #         align with the orthonormal Be 2s orbital at every k-point.
+# Test-4: trans_sym=True should check both Wannier-basis Hamiltonians before
+#         the product-state solver runs.
 
 cell = kmf = mo_coeff = klas = None
 kmesh = [2, 1, 1]
@@ -172,6 +176,30 @@ class KnownValues(unittest.TestCase):
             np.testing.assert_allclose(
                 mo_loc[k, :, nocc:], be_mo[k, :, nocc:], atol=1e-12,
             )
+
+    def test_trans_sym_checks_wannier_hamiltonians(self):
+        self.assertFalse(klas.trans_sym)
+        trans_klas = kLASCI(
+            kmf, 2, (1, 1), kmesh=kmesh, trans_sym=True,
+        )
+        mo_loc = trans_klas.localize_init_guess(
+            ["H 1s"], mo_coeff=mo_coeff,
+        )
+
+        with mock.patch.object(
+                klasci_module, "check_h1e_translation",
+                wraps=klasci_module.check_h1e_translation) as check_h1e, \
+             mock.patch.object(
+                klasci_module, "check_h2e_translation",
+                wraps=klasci_module.check_h2e_translation) as check_h2e:
+            trans_klas.kernel(mo_loc)
+
+        self.assertTrue(trans_klas.trans_sym)
+        check_h1e.assert_called_once()
+        check_h2e.assert_called_once()
+
+        with self.assertRaisesRegex(TypeError, "trans_sym must be a boolean"):
+            kLASCI(kmf, 2, (1, 1), kmesh=kmesh, trans_sym="yes")
 
     def test_api_for_localization_init_guess(self):
         with self.assertRaisesRegex(
