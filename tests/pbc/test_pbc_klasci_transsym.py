@@ -17,6 +17,7 @@ from mrh.my_pyscf.pbc.mcscf.klasci import (
 from mrh.my_pyscf.pbc.mcscf.productstate import (
     PBCTransSymmImpureProductStateFCISolver,
 )
+from mrh.my_pyscf.pbc.util.transym import TranslationSymm
 
 # Author: Bhavnesh Jangid
 
@@ -38,6 +39,8 @@ from mrh.my_pyscf.pbc.mcscf.productstate import (
 #         the reference fragment and assemble all returned CI vectors.
 # Test-7: Full one- and two-body density matrices should be assembled from the
 #         reference-fragment density matrices.
+# Test-8: Packed one- and two-electron Hamiltonians should reproduce every
+#         translated block of the full Hamiltonians.
 
 
 
@@ -112,11 +115,6 @@ class KnownValues(unittest.TestCase):
                 - phase_per_frag
             )), 1e-12,
         )
-
-        with self.assertRaises(NotImplementedError):
-            trans_klas.pack_h1(np.empty((0, 0)))
-        with self.assertRaises(NotImplementedError):
-            trans_klas.pack_h2(np.empty((0, 0, 0, 0)))
 
         ncas_sub = trans_klas.ncas_sub.copy()
         try:
@@ -471,6 +469,53 @@ class KnownValues(unittest.TestCase):
         self.assertLess(np.max(np.abs(dm1s[1] - dm1s_ref[1])), 1e-12)
         self.assertLess(np.max(np.abs(dm1 - dm1_ref)), 1e-12)
         self.assertLess(np.max(np.abs(dm2 - dm2_ref)), 1e-12)
+
+    def test_pack_translation_symmetric_hamiltonians(self):
+        trans_klas = kLASCI(
+            kmf, 2, (1, 1), kmesh=kmesh,
+            trans_sym=True, ref_cell=1,
+        )
+        mo_loc = trans_klas.localize_init_guess(
+            ["H 1s"], mo_coeff=mo_coeff,
+        )
+        h1e = trans_klas.h1e_for_cas(
+            mo_coeff=mo_loc, ncas=trans_klas.ncas,
+            ncore=trans_klas.ncore,
+        )[0]
+        h2e = trans_klas.get_h2cas(mo_loc)
+        h1_packed = trans_klas.pack_h1(h1e)
+        h2_packed = trans_klas.pack_h2(h2e)
+
+        ncell = np.prod(kmesh)
+        ncas = trans_klas.ncas
+        self.assertEqual(h1_packed.shape, (ncell, ncas, ncas))
+        self.assertEqual(
+            h2_packed.shape,
+            (ncell, ncell, ncell, ncas, ncas, ncas, ncas),
+        )
+
+        ts = TranslationSymm(cell, kmesh, kpts=kmf.kpts)
+        h1_blocks = h1e.reshape(ncell, ncas, ncell, ncas)
+        h2_blocks = h2e.reshape((ncell, ncas) * 4)
+        for iR, R in enumerate(ts.R_indices):
+            for idS, dS in enumerate(ts.R_indices):
+                iS = ts.R_to_i[ts.mod_index(R + dS)]
+                self.assertLess(
+                    np.max(np.abs(
+                        h1_blocks[iR, :, iS, :] - h1_packed[idS]
+                    )), 1e-10,
+                )
+                for idU, dU in enumerate(ts.R_indices):
+                    iU = ts.R_to_i[ts.mod_index(R + dU)]
+                    for idV, dV in enumerate(ts.R_indices):
+                        iV = ts.R_to_i[ts.mod_index(R + dV)]
+                        self.assertLess(
+                            np.max(np.abs(
+                                h2_blocks[
+                                    iR, :, iS, :, iU, :, iV, :
+                                ] - h2_packed[idS, idU, idV]
+                            )), 1e-10,
+                        )
 
 
 if __name__ == "__main__":
