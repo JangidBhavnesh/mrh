@@ -859,15 +859,85 @@ class PBCLASCITransSymm(PBCLASCINoSymm):
 
     def pack_h1(self, h1e):
         '''
-        Future hook for packing h1e relative to ``ref_cell``.
+        Pack a translation-symmetric one-electron Hamiltonian.
+
+        The final two axes of ``h1e`` are interpreted as composite
+        ``(cell, orbital)`` indices.  The packed result has shape
+        ``(..., ncell, ncas, ncas)`` and stores
+
+            h1_packed[dS, p, q] = h1[ref, p, ref + dS, q].
+
+        Any leading axes, such as a spin axis, are retained.
         '''
-        raise NotImplementedError
+        h1e = np.asarray(h1e)
+        ncell = int(np.prod(self.kmesh))
+        ncas = self.ncas
+        ncas_tot = ncell * ncas
+        if h1e.ndim < 2 or h1e.shape[-2:] != (ncas_tot, ncas_tot):
+            msg = "h1e must end in shape "
+            msg += f"({ncas_tot}, {ncas_tot}); got {h1e.shape}"
+            raise ValueError(msg)
+
+        ts = TranslationSymm(self.cell, self.kmesh, kpts=self.kpts)
+        h1_blocks = h1e.reshape(
+            h1e.shape[:-2] + (ncell, ncas, ncell, ncas)
+        )
+        h1_packed = np.empty(
+            h1e.shape[:-2] + (ncell, ncas, ncas), dtype=h1e.dtype,
+        )
+        ref_R = ts.R_indices[self.ref_cell]
+        for idelta, delta in enumerate(ts.R_indices):
+            iS = ts.R_to_i[ts.mod_index(ref_R + delta)]
+            h1_packed[..., idelta, :, :] = h1_blocks[
+                ..., self.ref_cell, :, iS, :
+            ]
+        return h1_packed
 
     def pack_h2(self, h2e):
         '''
-        Future hook for packing h2e relative to ``ref_cell``.
+        Pack a translation-symmetric two-electron Hamiltonian.
+
+        The final four axes of ``h2e`` are composite ``(cell, orbital)``
+        indices.  The packed result has shape
+        ``(..., ncell, ncell, ncell, ncas, ncas, ncas, ncas)`` and stores
+
+            h2_packed[dS,dU,dV,p,q,r,s]
+                = h2[ref,p,ref+dS,q,ref+dU,r,ref+dV,s].
+
+        Any leading axes are retained.
         '''
-        raise NotImplementedError
+        h2e = np.asarray(h2e)
+        ncell = int(np.prod(self.kmesh))
+        ncas = self.ncas
+        ncas_tot = ncell * ncas
+        expected = (ncas_tot,) * 4
+        if h2e.ndim < 4 or h2e.shape[-4:] != expected:
+            msg = f"h2e must end in shape {expected}; got {h2e.shape}"
+            raise ValueError(msg)
+
+        ts = TranslationSymm(self.cell, self.kmesh, kpts=self.kpts)
+        h2_blocks = h2e.reshape(
+            h2e.shape[:-4] + (ncell, ncas) * 4
+        )
+        h2_packed = np.empty(
+            h2e.shape[:-4]
+            + (ncell, ncell, ncell, ncas, ncas, ncas, ncas),
+            dtype=h2e.dtype,
+        )
+        ref_R = ts.R_indices[self.ref_cell]
+        translated_cells = [
+            ts.R_to_i[ts.mod_index(ref_R + delta)]
+            for delta in ts.R_indices
+        ]
+        for idS, iS in enumerate(translated_cells):
+            for idU, iU in enumerate(translated_cells):
+                for idV, iV in enumerate(translated_cells):
+                    h2_packed[..., idS, idU, idV, :, :, :, :] = (
+                        h2_blocks[
+                            ..., self.ref_cell, :, iS, :, iU, :, iV, :
+                        ]
+                    )
+        return h2_packed
     
     def _sanity_check_active_space_consistency(self, mo_coeff):
         '''
