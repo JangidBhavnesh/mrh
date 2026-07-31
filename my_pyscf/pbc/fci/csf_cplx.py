@@ -372,18 +372,7 @@ def pspace(fci, h1e, eri, norb, nelec, transformer,
         raise (e) from None
 
     # It's time to transform determinant basis h0 to CSF basis
-    h0csf_real, csf_addr = transformer.mat_det2csf_confspace(h0.real, econf_addr)
-    h0csf_imag, csf_addr_temp = transformer.mat_det2csf_confspace(h0.imag, econf_addr)
-    h0 = None
-    h0 = h0csf_real.astype(h1e.dtype)
-    h0.real = h0csf_real
-    h0.imag = h0csf_imag
-
-    # Sanity Check
-    assert np.array_equal(csf_addr, csf_addr_temp), \
-        "Real and Imaginary part transformation resulted in different CSF "\
-        "addresses; There might be some problem"
-    csf_addr_temp = h0csf_real = h0csf_imag = None
+    h0, csf_addr = transformer.mat_det2csf_confspace(h0, econf_addr)
 
     t0 = lib.logger.timer_debug1(fci, "csf.pspace: transform pspace Hamiltonian into CSF basis", *t0)
 
@@ -473,34 +462,25 @@ def kernel(fci, h1e, eri, norb, nelec, smult=None, idx_sym=None, ci0=None,
     dtype = h1e.dtype
     if pspace_size >= ncsf_sym and not davidson_only:
         if ncsf_sym == 1:
-            civecreal = transformer.vec_csf2det (pv[:,0].real.reshape (1,1), normalize=False)
-            civec = civecreal.astype(dtype)
-            civec.real = civecreal
-            civec.imag = transformer.vec_csf2det (pv[:,0].imag.reshape (1,1), normalize=False)
-            civecreal = None
-            civec /= np.linalg.norm(civec)
+            civec = cplx_csf_helper.vec_csf2det_cplx(
+                transformer, pv[:,0].reshape(1, 1), normalize=True
+            )
             return pw[0]+ecore, civec
         elif nroots > 1:
             civecout = []
             for i in range(nroots):
                 civeccsf = pv[:,i].T # Should I take the conj here?: I think no.
-                civecreal = transformer.vec_csf2det (civeccsf.real, normalize=False)
-                civec = civecreal.astype(dtype)
-                civec.real = civecreal
-                civec.imag = transformer.vec_csf2det (civeccsf.imag, normalize=False)
-                civec /= np.linalg.norm(civec)
+                civec = cplx_csf_helper.vec_csf2det_cplx(
+                    transformer, civeccsf, normalize=True
+                )
                 civecout.append(civec.reshape(na,nb))
-            civecreal = None
             return pw[:nroots]+ecore, civecout
         elif abs(pw[0]-pw[1]) > 1e-12:
             civeccsf = np.empty((ncsf_sym), dtype=dtype)
             civeccsf[:] = pv[:,0]
-            civecreal = transformer.vec_csf2det (civeccsf.real, normalize=False)
-            civec = civecreal.astype(dtype)
-            civec.real = civecreal
-            civec.imag = transformer.vec_csf2det (civeccsf.imag, normalize=False)
-            civecreal = None
-            civec /= np.linalg.norm(civec)
+            civec = cplx_csf_helper.vec_csf2det_cplx(
+                transformer, civeccsf, normalize=True
+            )
             return pw[0]+ecore, civec.reshape(na,nb)
         return None
 
@@ -518,16 +498,18 @@ def kernel(fci, h1e, eri, norb, nelec, smult=None, idx_sym=None, ci0=None,
 
 
     def hop(x):
-        x_det = (transformer.vec_csf2det(x.real, normalize=False)
-                + 1j * transformer.vec_csf2det(x.imag, normalize=False))
+        x_det = cplx_csf_helper.vec_csf2det_cplx(
+            transformer, x, normalize=False
+        )
         if nroots > 1:
             for i in range(nroots):
                 x_det[i] /= np.linalg.norm(x_det[i])
         elif nroots == 1:
             x_det /= np.linalg.norm(x_det)
         hx = fci.contract_2e(h2e, x_det, norb, nelec, (link_indexa, link_indexb))
-        hx_out = (transformer.vec_det2csf(hx.real, normalize=False).ravel()
-                + 1j * transformer.vec_det2csf(hx.imag, normalize=False).ravel())
+        hx_out = cplx_csf_helper.vec_det2csf_cplx(
+            transformer, hx, normalize=False
+        )
         return hx_out.ravel()
 
     t0 = lib.logger.timer_debug1 (fci, "csf.kernel: make hop", *t0)
@@ -556,35 +538,17 @@ def kernel(fci, h1e, eri, norb, nelec, smult=None, idx_sym=None, ci0=None,
                 return x0
     else:
         if isinstance(ci0, np.ndarray) and ci0.size == na*nb:
-            ci0real = transformer.vec_det2csf (ci0.real.ravel (), normalize=False)
-            ci0imag = transformer.vec_det2csf (ci0.imag.ravel (), normalize=False)
-            ci0_out = np.asarray(ci0real, dtype=ci0.dtype)
-            ci0_out.real = ci0real
-            ci0_out.imag = ci0imag
-            ci0_out /= np.linalg.norm(ci0_out)
-            ci0real = ci0imag = None
+            ci0_out = cplx_csf_helper.vec_det2csf_cplx(
+                transformer, ci0.ravel(), normalize=True
+            )
             ci0 = [ci0_out]
         else:
             nrow = len (ci0)
-            def to_csf_vec (ci0):
-                ci0 = np.asarray (ci0).reshape (nrow, -1, order='C')
-                ci0 = np.ascontiguousarray (ci0)
-                if nrow==1: ci0 = ci0[0]
-                ci0 = transformer.vec_det2csf (ci0, normalize=False)
-                ci0 = np.asarray(ci0).reshape(nrow, -1)
-                return [c for c in ci0]
-            
-            ci0real = to_csf_vec (ci0.real)
-            ci0imag = to_csf_vec (ci0.imag)
-            ci0_out = []
-            for r, im in zip(ci0real, ci0imag):
-                c = np.asarray(r, dtype=np.complex128)
-                c.real = r
-                c.imag = im
-                c /= np.linalg.norm(c)
-                ci0_out.append(c)
-
-            ci0 = ci0_out
+            ci0 = np.asarray(ci0).reshape(nrow, -1, order='C')
+            ci0 = cplx_csf_helper.vec_det2csf_cplx(
+                transformer, ci0, normalize=True
+            )
+            ci0 = [c for c in np.asarray(ci0).reshape(nrow, -1)]
     
     t0 = lib.logger.timer_debug1 (fci, "csf.kernel: ci0 handling", *t0)
 
@@ -605,22 +569,14 @@ def kernel(fci, h1e, eri, norb, nelec, smult=None, idx_sym=None, ci0=None,
     if nroots > 1:
         cout = []
         for ciroot in c:
-            creal = transformer.vec_csf2det (ciroot.real, order='C', normalize=False)
-            cimag = transformer.vec_csf2det (ciroot.imag, order='C', normalize=False)
-            croot = creal.astype(dtype)
-            croot.real = creal
-            croot.imag = cimag
-            croot /= np.linalg.norm(croot)
+            croot = cplx_csf_helper.vec_csf2det_cplx(
+                transformer, ciroot, order='C', normalize=True
+            )
             cout.append(croot)
-        creal = cimag = None
     else:
-        creal = transformer.vec_csf2det (c.real, order='C', normalize=False)
-        cimag = transformer.vec_csf2det (c.imag, order='C', normalize=False)
-        cout = creal.astype(dtype)
-        cout.real = creal
-        cout.imag = cimag
-        cout /= np.linalg.norm(cout)
-        creal = cimag = None
+        cout = cplx_csf_helper.vec_csf2det_cplx(
+            transformer, c, order='C', normalize=True
+        )
         
     t0 = lib.logger.timer_debug1 (fci, "csf.kernel: transforming final ci vector", *t0)
     if nroots > 1:
