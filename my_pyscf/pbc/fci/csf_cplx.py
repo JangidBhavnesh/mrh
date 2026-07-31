@@ -482,7 +482,8 @@ def kernel(fci, h1e, eri, norb, nelec, smult=None, idx_sym=None, ci0=None,
                 transformer, civeccsf, normalize=True
             )
             return pw[0]+ecore, civec.reshape(na,nb)
-        return None
+        # For the degenerate single-root case, don't return from here. Same as
+        # the real CSF solver, let it continue to the Davidson solver.
 
     t0 = lib.logger.timer_debug1 (fci, "csf.kernel: throat-clearing", *t0)
     if idx_sym is None:
