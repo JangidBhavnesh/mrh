@@ -102,6 +102,12 @@ class KnownValues(unittest.TestCase):
         check_h2e.assert_called_once()
         trans_solver.assert_called_once()
         self.assertEqual(trans_solver.call_args.kwargs["ref_cell"], 1)
+        self.assertLess(
+            np.max(np.abs(
+                trans_solver.call_args.kwargs["phase_per_frag"]
+                - phase_per_frag
+            )), 1e-12,
+        )
 
         with self.assertRaises(NotImplementedError):
             trans_klas.pack_h1(np.empty((0, 0)))
@@ -160,30 +166,32 @@ class KnownValues(unittest.TestCase):
         trans_klas.kernel(mo_loc)
 
         fcisolvers = [box.fcisolvers[0] for box in trans_klas.fciboxes]
+        input_phases = np.exp(1j * np.array([0.3, -0.2]))
         solver = PBCTransSymmImpureProductStateFCISolver(
             fcisolvers,
             lweights=[[1.0], [1.0]],
             ref_cell=1,
+            phase_per_frag=input_phases,
         )
         ci = [np.asarray(ci_frag) 
               for ci_frag in trans_klas.ci]
 
         ci_ref = solver._pack_ci(ci)
-        phases = []
-        for ci_frag in ci:
-            overlap = np.vdot(ci_ref, ci_frag)
-            phases.append(overlap / abs(overlap))
-
-        ci_fragments = solver._unpack_cif(ci_ref, phases=phases)
+        ci_fragments = solver._unpack_cif(ci_ref)
 
         self.assertEqual(ci_ref.shape, (1, 2, 2))
         self.assertAlmostEqual(np.linalg.norm(ci_ref), 1.0, places=10)
         self.assertLess(np.max(np.abs(ci_ref - ci[1])), 1e-12)
         self.assertIsNot(ci_ref, ci[1])
+        self.assertAlmostEqual(solver.phase_per_frag[1].real, 1.0)
+        self.assertAlmostEqual(solver.phase_per_frag[1].imag, 0.0)
 
-        for ci_unpacked, ci_actual in zip(ci_fragments, ci):
+        for ifrag, ci_unpacked in enumerate(ci_fragments):
             self.assertLess(
-                np.max(np.abs(ci_unpacked - ci_actual)), 1e-10,
+                np.max(np.abs(
+                    ci_unpacked
+                    - solver.phase_per_frag[ifrag] * ci_ref
+                )), 1e-12,
             )
             self.assertFalse(np.shares_memory(ci_unpacked, ci_ref))
             
@@ -209,6 +217,7 @@ class KnownValues(unittest.TestCase):
             fcisolvers,
             lweights=[[1.0], [1.0]],
             ref_cell=1,
+            phase_per_frag=np.exp(1j * np.array([0.3, -0.2])),
         )
         ci_ref = solver._get_ref_init_guess(
             None, trans_klas.ncas_sub, trans_klas.nelecas_sub, h1e, h2e,
@@ -224,6 +233,18 @@ class KnownValues(unittest.TestCase):
         )
         self.assertLess(np.max(np.abs(ci_preserved - ci_supplied)), 1e-12)
         self.assertIsNot(ci_preserved, ci_supplied)
+
+        ci_tot = solver.get_init_guess(
+            solver._unpack_cif(ci_supplied),
+            trans_klas.ncas_sub, trans_klas.nelecas_sub, h1e, h2e,
+        )
+        for ifrag, ci_frag in enumerate(ci_tot):
+            self.assertLess(
+                np.max(np.abs(
+                    ci_frag
+                    - solver.phase_per_frag[ifrag] * ci_supplied
+                )), 1e-12,
+            )
 
     def test_productstate_project_ref_hfrag(self):
         trans_klas = kLASCI(
@@ -250,7 +271,9 @@ class KnownValues(unittest.TestCase):
         )
         ci = solver._unpack_cif(ci_ref)
 
-        h1eff, h0eff, _ = solver.project_hfrag(
+        h1eff, h0eff, _ = super(
+            PBCTransSymmImpureProductStateFCISolver, solver
+        ).project_hfrag(
             h1e, h2e, ci, trans_klas.ncas_sub, trans_klas.nelecas_sub,
         )
         h1eff_ref, h0eff_ref = solver._project_ref_hfrag(
@@ -262,6 +285,18 @@ class KnownValues(unittest.TestCase):
         self.assertLess(np.max(np.abs(h1eff_ref - h1eff[1])), 1e-12)
         self.assertAlmostEqual(h0eff_ref.real, h0eff[1].real, places=10)
         self.assertAlmostEqual(h0eff_ref.imag, h0eff[1].imag, places=10)
+
+        h1eff_tot, h0eff_tot, ci_tot = solver.project_hfrag(
+            h1e, h2e, ci, trans_klas.ncas_sub, trans_klas.nelecas_sub,
+        )
+        for ifrag in range(len(fcisolvers)):
+            self.assertLess(
+                np.max(np.abs(h1eff_tot[ifrag] - h1eff_ref)), 1e-12,
+            )
+            self.assertAlmostEqual(h0eff_tot[ifrag], h0eff_ref, places=10)
+            self.assertLess(
+                np.max(np.abs(ci_tot[ifrag] - ci_ref)), 1e-12,
+            )
 
     def test_productstate_get_ref_grad(self):
         trans_klas = kLASCI(
@@ -293,11 +328,15 @@ class KnownValues(unittest.TestCase):
             )
             fcisolver.check_transformer_cache()
         ci = solver._unpack_cif(ci_ref[0])
-        h1eff, _, _ = solver.project_hfrag(
+        h1eff, _, _ = super(
+            PBCTransSymmImpureProductStateFCISolver, solver
+        ).project_hfrag(
             h1e, h2e, ci, trans_klas.ncas_sub, trans_klas.nelecas_sub,
         )
 
-        grad = solver._get_grad(
+        grad = super(
+            PBCTransSymmImpureProductStateFCISolver, solver
+        )._get_grad(
             h1eff, h2e, ci,
             trans_klas.ncas_sub, trans_klas.nelecas_sub,
         )
@@ -315,6 +354,14 @@ class KnownValues(unittest.TestCase):
             np.max(np.abs(
                 grad_ref - grad[ref_offset:ref_offset + grad_ref.size]
             )), 1e-12,
+        )
+        grad_tot = solver._get_grad(
+            h1eff, h2e, ci,
+            trans_klas.ncas_sub, trans_klas.nelecas_sub,
+        )
+        self.assertLess(
+            np.max(np.abs(grad_tot - solver._unpack_grad(grad_ref))),
+            1e-12,
         )
 
 
