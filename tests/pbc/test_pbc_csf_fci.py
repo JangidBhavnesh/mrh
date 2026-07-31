@@ -30,6 +30,8 @@ mol = mf = h0 = h1 = h2 = h0cplx = h1cplx = h2cplx = None
 #         against separate real and imaginary transformations.
 # Test-7: Compare the batched complex CSF-to-determinant transformation
 #         against separate real and imaginary transformations.
+# Test-8: Compare multi-root Davidson against full CSF p-space
+#         diagonalization for a genuinely complex Hermitian Hamiltonian.
 
 def gen_hermi_ham(h0, h1, h2):
     np.random.seed(12)
@@ -64,6 +66,14 @@ def gen_random_hermi_ham(norb):
     h2 = h2 + h2.conj().transpose(0,1,3,2)
     h2 = h2 + h2.conj().transpose(2,3,0,1)
     return h1, h2
+
+def gen_random_complex_hermi_h1(norb):
+    rng = np.random.default_rng(34)
+    h1 = (
+        rng.standard_normal((norb, norb))
+        + 1j * rng.standard_normal((norb, norb))
+    )
+    return h1 + h1.conj().T
 
 def contract_1e_reference(h1e, fcivec, link_index):
     link_indexa, link_indexb = link_index
@@ -226,6 +236,26 @@ class KnownValues(unittest.TestCase):
         )
         self.assertLess(np.max(np.abs(norms - np.linalg.norm(reference, axis=1))), 1e-12)
         self.assertLess(np.max(np.abs(np.linalg.norm(result, axis=1) - 1)), 1e-12)
+
+    def test_multiroot_davidson_cplx(self):
+        norb = 4
+        nelec = (2, 2)
+        h1e = gen_random_complex_hermi_h1(norb)
+        eri = np.zeros((norb,) * 4, dtype=np.complex128)
+
+        exact_solver = csf_solver_cplx(mol, smult=1)
+        exact_solver.nroots = 2
+        exact_solver.davidson_only = False
+        exact_solver.pspace_size = 200
+        e_exact = exact_solver.kernel(h1e, eri, norb, nelec)[0]
+
+        davidson_solver = csf_solver_cplx(mol, smult=1)
+        davidson_solver.nroots = 2
+        davidson_solver.davidson_only = True
+        davidson_solver.pspace_size = 0
+        e_davidson = davidson_solver.kernel(h1e, eri, norb, nelec)[0]
+
+        self.assertLess(np.max(np.abs(e_davidson - e_exact)), 1e-9)
 
     def test_vanilla_csf_solver_cplx(self):
         nelec = (5, 5)
