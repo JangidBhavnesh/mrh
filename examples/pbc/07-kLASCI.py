@@ -45,6 +45,8 @@ mo_coeff = avas.kernel(kmf, ['H 1s'], minao=cell.basis)[2]
 # Currently, we are using nkpts=10, so in total
 # the active space of 20e, 20o
 
-klas = mcscf.KLASCI(kmf, 2, (1, 1), kmesh=kmesh)
+klas = mcscf.KLASCI(
+    kmf, 2, (1, 1), kmesh=kmesh, trans_sym=True,
+)
 lo_coeff = klas.localize_init_guess(['H 1s'], mo_coeff=mo_coeff)
 klas.kernel(lo_coeff)
