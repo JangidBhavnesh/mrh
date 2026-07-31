@@ -163,6 +163,18 @@ class KnownValues(unittest.TestCase):
         reference = contract_1e_reference(h1e, fcivec, link_index)
         self.assertLess(np.max(np.abs(result - reference)), 1e-11)
 
+        hdiag_det = solver.make_hdiag(h1e, eri, norb, nelec)
+        self.assertEqual(np.max(np.abs(hdiag_det.imag)), 0)
+        hdiag_csf = solver.make_hdiag_csf(
+            h1e, eri, norb, nelec, hdiag_det=hdiag_det
+        )
+        _, h0 = solver.pspace(
+            h1e, eri, norb, nelec,
+            hdiag_det=hdiag_det, hdiag_csf=hdiag_csf, npsp=3,
+        )
+        self.assertLess(np.max(np.abs(h0 - h0.conj().T)), 1e-12)
+        self.assertEqual(np.max(np.abs(np.diag(h0).imag)), 0)
+
     def test_vec_det2csf_cplx(self):
         transformer = self.get_transformer()
         rng = np.random.default_rng(32)
