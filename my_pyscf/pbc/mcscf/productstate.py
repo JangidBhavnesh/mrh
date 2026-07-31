@@ -423,3 +423,40 @@ class PBCTransSymmImpureProductStateFCISolver(ImpureProductStateFCISolver):
         ci_tot = [np.array(phases[ifrag] * ci_ref, copy=True) 
                   for ifrag in range(nfrag)]
         return ci_tot
+
+    def _get_ref_init_guess(self, ci_ref, norb_f, nelec_f, h1, h2,
+                            nroots=None):
+        '''
+        Get an initial CI vector for the reference fragment.
+
+        A supplied reference CI vector is preserved. Otherwise, the initial
+        guess is generated from the diagonal Hamiltonian of ``ref_cell``.
+        Note: the ci_ref is just for the given reference cell, not for all the
+        fragments.
+        '''
+        if ci_ref is not None:
+            return np.array(ci_ref, copy=True)
+
+        ref = self.ref_cell
+        i = sum(norb_f[:ref])
+        j = i + norb_f[ref]
+        norb = norb_f[ref]
+        solver = self.fcisolvers[ref]
+        nelec = self._get_nelec(solver, nelec_f[ref])
+        solver.norb = norb
+        solver.nelec = nelec
+
+        if h1.ndim < 3:
+            h1 = np.stack([h1, h1], axis=0)
+        h1_ref = h1[:, i:j, i:j]
+        h2_ref = h2[i:j, i:j, i:j, i:j]
+
+        solver.check_transformer_cache()
+        if nroots is None:
+            nroots = solver.nroots
+        nroots = min(nroots, solver.transformer.ncsf)
+        hdiag = solver.make_hdiag_csf(h1_ref, h2_ref, norb, nelec)
+        ci_ref = solver.get_init_guess(norb, nelec, nroots, hdiag)
+        ndeta = cistring.num_strings(norb, nelec[0])
+        ndetb = cistring.num_strings(norb, nelec[1])
+        return np.array(ci_ref, copy=True).reshape(nroots, ndeta, ndetb)
