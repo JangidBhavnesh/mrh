@@ -1,6 +1,7 @@
-from pyscf import gto, scf, mcscf
+from pyscf import gto, scf, mcscf, mcpdft
 from mrh.my_pyscf.tools.molcas2pyscf import get_mol_from_h5
 from mrh.my_pyscf.tools.molcas2pyscf import get_mo_from_h5
+from mrh.my_pyscf.tools.molcas2pyscf import set_openmolcas_grid
 # get_mol_from_h5 and get_mo_from_h5 must be used together, because
 # OpenMolcas and PySCF put the same GTO basis functions in different internal orders
 
@@ -14,4 +15,17 @@ mc = mcscf.CASSCF (scf.RHF (mol).run (), 6, 6).run (mo_coeff, natorb=True)
 print ("CASSCF(6,6)/cc-pVDZ energy of water from OpenMolcas orbital guess:", mc.e_tot)
 
 
+# ALong with the above, if one wants to use the OpenMolcas grid then
+# they would require the corresponding `GridFile` from OpenMolcas.
+# In OpenMolcas, one can generate the grid file using the following input:
+'''
+&SEWARD
+  Grid Input
+    WriteGrid
+  End of Grid Input
+'''
 
+mf = scf.RHF (mol).run ()
+mc = mcpdft.CASCI(mf, 'tPBE', 6, 6)
+mc = set_openmolcas_grid(mc, 'h2o.GridFile')
+mc.kernel(mo_coeff=mo_coeff,)
