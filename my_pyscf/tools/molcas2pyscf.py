@@ -246,5 +246,20 @@ def pin_openmolcas_grid(mc, coords, weights):
     mc.otfnal.reset = reset_with_openmolcas_grid
 
     reset_with_openmolcas_grid(mc.mol)
+    return mc
 
+def set_openmolcas_grid(mc, gridfile):
+    '''
+    Set the OpenMolcas grid for an MC-PDFT calculation.
+    This function reads the OpenMolcas GRIDFILE and pins it to the MC-PDFT object.
+
+    args:
+        mc : instance of mcscf.CASSCF or mcscf.CASCI
+            The MC-PDFT object to set the grid for
+        gridfile : str
+            Path to an OpenMolcas GRIDFILE containing x, y, z, and weight columns
+    '''
+    coords, weights = read_openmolcas_grid(gridfile)
+    mc = pin_openmolcas_grid(mc, coords, weights)
+    return mc
 
