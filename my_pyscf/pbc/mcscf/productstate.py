@@ -453,6 +453,7 @@ class PBCTransSymmImpureProductStateFCISolver(ImpureProductStateFCISolver):
 
     def _pack_ci(self, ci):
         '''
+        In short: CI_tot -> CI_ref
         Select the reference CI and remove its stored translation phase.
         By reference CI, I mean the CI vector corresponding to the reference
         fragment, which is the only one that is optimized.  The other fragments
@@ -467,6 +468,8 @@ class PBCTransSymmImpureProductStateFCISolver(ImpureProductStateFCISolver):
 
     def _unpack_cif(self, ci_ref, phases=None):
         '''
+        In short: CI_ref -> CI_tot
+
         Expand a reference cell CI vector into one independent vector per fragment.
         Optional phase factors allow translated fragment CI vectors to use
         different global phases.
@@ -481,6 +484,10 @@ class PBCTransSymmImpureProductStateFCISolver(ImpureProductStateFCISolver):
                 List of CI vectors for each fragment, with the reference cell
                 vector copied and optionally phase-shifted.
         '''
+
+        # TODO: use the phase_per_frag attribute not phases.
+        # TODO: add a check if the ci_ref is more than one root.
+
         nfrag = len(self.fcisolvers)
 
         if ci_ref is None:
@@ -496,14 +503,25 @@ class PBCTransSymmImpureProductStateFCISolver(ImpureProductStateFCISolver):
         return ci_tot
 
     def _unpack_hfrag(self, h1eff_ref, h0eff_ref):
-        '''Assemble full-fragment effective Hamiltonians from the reference.'''
+        '''
+        In short: h1eff_ref, h0eff_ref -> h1eff, h0eff
+        Assemble full-fragment effective Hamiltonians from the reference
+        cell effective Hamiltonians
+        '''
+        # TODO: I forgot to add the phases here.
+        
         nfrag = len(self.fcisolvers)
-        h1eff = [np.array(h1eff_ref, copy=True) for _ in range(nfrag)]
-        h0eff = [np.array(h0eff_ref, copy=True) for _ in range(nfrag)]
+        h1eff = [np.array(h1eff_ref, copy=True) 
+                 for _ in range(nfrag)]
+        h0eff = [np.array(h0eff_ref, copy=True) 
+                 for _ in range(nfrag)]
         return h1eff, h0eff
 
     def _make_ref_rdm1s(self, ci_ref, norb_f, nelec_f):
-        '''Calculate spin-separated one-body RDMs for the reference cell.'''
+        '''
+        Calculate spin-separated one-body RDMs for the reference cell.
+        '''
+        # TODO: add 
         ref = self.ref_cell
         norb_ref = norb_f[ref]
         solver_ref = self.fcisolvers[ref]
