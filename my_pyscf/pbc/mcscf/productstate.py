@@ -18,7 +18,7 @@ from mrh.my_pyscf.mcscf.productstate import ProductStateFCISolver as molProductS
 # TODO-1: add multiple root testing for the PBCTransSymmImpureProductStateFCISolver class.
 # The current implementation does support multiple roots, but it has not been tested with
 # more than one root per fragment.
-
+# TODO-2: Double-check the complex-valued 2-RDM assembly.
 
 '''
 
@@ -668,7 +668,7 @@ class PBCTransSymmImpureProductStateFCISolver(ImpureProductStateFCISolver):
         '''
         Build the full product-state 2-RDM from the translated CI list.
         '''
-        # TODO: Double-check the complex-valued 2-RDM assembly.
+        
         ci_ref = self._pack_ci(ci)
         dm2_ref = self._make_ref_rdm2(ci_ref, norb_f, nelec_f,)
         dm1a_ref, dm1b_ref = self._make_ref_rdm1s(ci_ref, norb_f, nelec_f,)
@@ -825,8 +825,7 @@ class PBCTransSymmImpureProductStateFCISolver(ImpureProductStateFCISolver):
         h1eff, h0eff = self._unpack_hfrag(h1eff_ref, h0eff_ref)
         return h1eff, h0eff, ci
 
-    def _get_grad(self, h1eff, h2, ci, norb_f, nelec_f, orbsym=None,
-                  **kwargs):
+    def _get_grad(self, h1eff, h2, ci, norb_f, nelec_f,**kwargs):
         '''
         Assemble the full CI gradient from its reference-cell block.
         '''
@@ -834,14 +833,16 @@ class PBCTransSymmImpureProductStateFCISolver(ImpureProductStateFCISolver):
         j = i + norb_f[self.ref_cell]
         h2_ref = h2[i:j, i:j, i:j, i:j]
         ci_ref = self._pack_ci(ci)
-        grad_ref = self._get_ref_grad(
-            h1eff[self.ref_cell], h2_ref, ci_ref, norb_f, nelec_f,
-            orbsym=orbsym, **kwargs,)
+        h1eff_ref = h1eff[self.ref_cell]
+        grad_ref = self._get_ref_grad(h1eff_ref, h2_ref, ci_ref, norb_f, nelec_f,
+                                      **kwargs,)
         return self._unpack_grad(grad_ref)
 
     def _1shot_ref(self, h0eff_ref, h1eff_ref, h2, ci_ref,
                    norb_f, nelec_f, **kwargs):
-        '''Optimize the reference-fragment CI vector once.'''
+        '''
+        Optimize the reference-fragment CI vector once.
+        '''
         ref = self.ref_cell
         i = sum(norb_f[:ref])
         j = i + norb_f[ref]
@@ -851,13 +852,12 @@ class PBCTransSymmImpureProductStateFCISolver(ImpureProductStateFCISolver):
         h2_ref = h2[i:j, i:j, i:j, i:j]
 
         energy_ref, ci_ref = solver.kernel(h1eff_ref, h2_ref, norb, nelec, 
-                                           ci0=ci_ref, ecore=h0eff_ref, 
-                                            **kwargs,)
+                                           ci0=ci_ref, ecore=h0eff_ref, **kwargs,)
         return energy_ref, np.array(ci_ref, copy=True)
 
     def kernel(self, h1, h2, norb_f, nelec_f, ecore=0, ci0=None,
                orbsym=None, conv_tol_grad=1e-4, conv_tol_self=1e-10,
-               max_cycle_macro=50, serialfrag=False, **kwargs):
+               max_cycle_macro=50, **kwargs):
         '''
         Optimize the reference cell while retaining the full CI list.
         '''
@@ -874,20 +874,21 @@ class PBCTransSymmImpureProductStateFCISolver(ImpureProductStateFCISolver):
         log.info('Entering translation-symmetric reference-cell CI iteration')
         
         for it in range(max_cycle_macro):
+            # Full CI as the initial guess.
             ci = self.get_init_guess(ci, norb_f, nelec_f, h1, h2, **kwargs)
             h1eff_ref, h0eff_ref = self._project_ref_hfrag(h1, h2, ci, norb_f, nelec_f,
                                                            ecore=ecore, **kwargs,)
+            # Curve out the reference cell CI vector.
             ci_ref = self._pack_ci(ci)
             grad_ref = self._get_ref_grad(h1eff_ref, h2_ref, ci_ref, norb_f, nelec_f, **kwargs,)
 
             grad_max = np.amax(np.abs(grad_ref))
 
-            solver_converged = np.all(
-                np.asarray(getattr(solver_ref, 'converged', False)))
+            solver_converged = np.all(np.asarray(getattr(solver_ref, 'converged', False)))
 
-            log.info('Cycle %d: max ref grad = %e ; sigma = %e ; '
-                'reference solver converged = %s',
-                it, grad_max, energy_sigma, solver_converged,)
+            log.info('Cycle %d: max ref grad = %e ; sigma = %e ; ' 
+                     'reference solver converged = %s', it, grad_max, energy_sigma, 
+                     solver_converged,)
             
             if (grad_max < conv_tol_grad
                     and energy_sigma < conv_tol_self
@@ -895,9 +896,8 @@ class PBCTransSymmImpureProductStateFCISolver(ImpureProductStateFCISolver):
                 converged = True
                 break
 
-            energy_ref, ci_ref = self._1shot_ref(
-                h0eff_ref, h1eff_ref, h2, ci_ref,
-                norb_f, nelec_f, orbsym=orbsym, **kwargs,)
+            energy_ref, ci_ref = self._1shot_ref(h0eff_ref, h1eff_ref, h2, ci_ref,
+                                                 norb_f, nelec_f, orbsym=orbsym, **kwargs,)
 
             ci = self._unpack_cif(ci_ref)
 
