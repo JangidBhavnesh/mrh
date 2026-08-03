@@ -537,11 +537,15 @@ class PBCTransSymmImpureProductStateFCISolver(ImpureProductStateFCISolver):
         dm1b_ref = np.asarray(dm1b_ref, dtype=dtype)
 
         # Sanity check:
-        assert dm1a_ref == dm1a_ref.conj().T, "dm1a_ref is not Hermitian"
-        assert dm1b_ref == dm1b_ref.conj().T, "dm1b_ref is not Hermitian"
+        assert np.allclose(dm1a_ref, dm1a_ref.conj().T,
+                           atol=1e-8, rtol=0.0), \
+            "dm1a_ref is not Hermitian"
+        assert np.allclose(dm1b_ref, dm1b_ref.conj().T,
+                           atol=1e-8, rtol=0.0), \
+            "dm1b_ref is not Hermitian"
         nelec_ref = sum(nelec_ref)
         nelec_check = np.trace(dm1a_ref) + np.trace(dm1b_ref)
-        assert nelec_ref - nelec_check < 1e-8, \
+        assert np.isclose(nelec_check, nelec_ref, atol=1e-8, rtol=0.0), \
             f"nelec_ref ({nelec_ref}) does not match trace(dm1a_ref + dm1b_ref) ({nelec_check})"
 
         return dm1a_ref, dm1b_ref
