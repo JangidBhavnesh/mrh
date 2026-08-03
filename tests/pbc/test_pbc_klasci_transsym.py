@@ -203,6 +203,8 @@ class KnownValues(unittest.TestCase):
             
         self.assertIsNone(solver._pack_ci(None))
         self.assertEqual(solver._unpack_cif(None), [None, None])
+        with self.assertRaisesRegex(ValueError, "contains 2 roots"):
+            solver._unpack_cif(np.concatenate([ci_ref, ci_ref], axis=0))
 
     def test_productstate_ref_init_guess(self):
         trans_klas = kLASCI(
@@ -271,6 +273,7 @@ class KnownValues(unittest.TestCase):
             fcisolvers,
             lweights=[[1.0], [1.0]],
             ref_cell=1,
+            phase_per_frag=np.exp(1j * np.array([0.3, -0.2])),
         )
         ci_ref = solver._get_ref_init_guess(
             None, trans_klas.ncas_sub, trans_klas.nelecas_sub, h1e, h2e,
@@ -297,11 +300,18 @@ class KnownValues(unittest.TestCase):
         )
         for ifrag in range(len(fcisolvers)):
             self.assertLess(
+                np.max(np.abs(h1eff[ifrag] - h1eff_ref)), 1e-12,
+            )
+            self.assertAlmostEqual(h0eff[ifrag], h0eff_ref, places=10)
+            self.assertLess(
                 np.max(np.abs(h1eff_tot[ifrag] - h1eff_ref)), 1e-12,
             )
             self.assertAlmostEqual(h0eff_tot[ifrag], h0eff_ref, places=10)
             self.assertLess(
-                np.max(np.abs(ci_tot[ifrag] - ci_ref)), 1e-12,
+                np.max(np.abs(
+                    ci_tot[ifrag]
+                    - solver.phase_per_frag[ifrag] * ci_ref
+                )), 1e-12,
             )
 
     def test_productstate_get_ref_grad(self):

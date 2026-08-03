@@ -103,7 +103,8 @@ copy_error = max(
 # orbitals.  No CI-vector overlaps enter this construction.
 phases = pbclasci.get_phase_per_frag(lo_coeff)
 
-ci_phased = product_solver._unpack_cif(ci_ref_trial, phases=phases)
+product_solver.phase_per_frag = product_solver._normalize_phase_per_frag(phases)
+ci_phased = product_solver._unpack_cif(ci_ref_trial)
 grad_phased = get_ci_gradients(ci_phased)
 phase_ref = phases[pbclasci.ref_cell]
 phase_error = max(
