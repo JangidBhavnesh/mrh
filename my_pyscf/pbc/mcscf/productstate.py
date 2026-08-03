@@ -18,8 +18,6 @@ from mrh.my_pyscf.mcscf.productstate import ProductStateFCISolver as molProductS
 # TODO-1: add multiple root testing for the PBCTransSymmImpureProductStateFCISolver class.
 # The current implementation does support multiple roots, but it has not been tested with
 # more than one root per fragment.
-# TODO-2: Double-check the complex-valued 2-RDM assembly.
-
 '''
 
 class PBCProductStateFCISolver (molProductStateFCISolver):
