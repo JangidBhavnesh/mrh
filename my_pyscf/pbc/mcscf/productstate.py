@@ -333,8 +333,12 @@ class PBCProductStateFCISolver (molProductStateFCISolver):
             dm2[i:j,i:j,i:j,i:j] = s.make_rdm2 (c, no, nelec)
         dm1 = dm1a + dm1b
         for (i,j), (k,l) in combinations (zip (ni, nj), 2):
-            d1_ij, d1a_ij, d1b_ij = dm1[i:j,i:j], dm1a[i:j,i:j], dm1b[i:j,i:j]
-            d1_kl, d1a_kl, d1b_kl = dm1[k:l,k:l], dm1a[k:l,k:l], dm1b[k:l,k:l]
+            d1_ij = dm1[i:j,i:j]
+            d1a_ij = dm1a[i:j,i:j].T
+            d1b_ij = dm1b[i:j,i:j].T
+            d1_kl = dm1[k:l,k:l]
+            d1a_kl = dm1a[k:l,k:l].T
+            d1b_kl = dm1b[k:l,k:l].T
             d2 = np.multiply.outer (d1_ij, d1_kl)
             dm2[i:j,i:j,k:l,k:l] = d2
             dm2[k:l,k:l,i:j,i:j] = d2.transpose (2,3,0,1)
@@ -686,11 +690,11 @@ class PBCTransSymmImpureProductStateFCISolver(ImpureProductStateFCISolver):
 
         for (i, j), (k, l) in combinations(zip(ni, nj), 2):
             d1_ij = dm1[i:j, i:j]
-            d1a_ij = dm1a[i:j, i:j]
-            d1b_ij = dm1b[i:j, i:j]
+            d1a_ij = dm1a[i:j, i:j].T
+            d1b_ij = dm1b[i:j, i:j].T
             d1_kl = dm1[k:l, k:l]
-            d1a_kl = dm1a[k:l, k:l]
-            d1b_kl = dm1b[k:l, k:l]
+            d1a_kl = dm1a[k:l, k:l].T
+            d1b_kl = dm1b[k:l, k:l].T
 
             d2 = np.multiply.outer(d1_ij, d1_kl)
             dm2[i:j, i:j, k:l, k:l] = d2
