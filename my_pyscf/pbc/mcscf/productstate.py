@@ -371,16 +371,46 @@ class ImpureProductStateFCISolver (PBCProductStateFCISolver):
 
 
 class PBCTransSymmImpureProductStateFCISolver(ImpureProductStateFCISolver):
-    '''
+    r'''
     Translation-symmetry adapted product-state solver.
 
     This class has currently been tested with one root per unit cell.  The
     implementation retains the generalized multi-root and state-averaged
     code paths.
 
-    The full-fragment interface is assembled from a reference-cell value and
-    its translation phases.  Only the reference fragment is optimized.
+    In this class, only the reference fragment is optimized. Any function
+    (method) or local variable which ends in ``_ref`` represents a reference-cell
+    quantity.  For the total wave function quantities, the reference value can be
+    assembled into one value per translated fragment.  For example, ``ci_ref`` is
+    expanded into the list of fragment CI vectors, whereas ``h1eff_ref`` and
+    ``h0eff_ref`` are copied into lists of effective fragment Hamiltonians.
 
+    The translation phase is a scalar CI gauge.  If fragment ``f`` has
+    ``phase_per_frag[f] = phi_f``, the translated CI vector and its CI
+    residual or gradient transform as
+        The CI vector:
+            C_f = phi_f C_ref
+        The CI residual or gradient:
+            g_f = phi_f g_ref
+
+    These quantities require phase multiplication when assembled from the
+    reference cell.  Ordinary one- and two-body density matrices do not:
+    their phase cancels between the bra and ket.  The projected effective
+    Hamiltonians also do not require phase multiplication.  Under the scalar-
+    phase translation assumed here,
+        The one-body density matrix:
+            D_f = D_ref
+        The Hamiltonian matrix elements:
+            H_eff,f = H_eff,ref
+
+    Applying the copied Hamiltonian to a phased CI vector therefore produces
+    the correctly phased result automatically.  This convention assumes that
+    translated active orbitals differ only by a common scalar phase.  Note that a
+    general orbital rotation would instead require the corresponding basis
+    transformation of operators and density matrices.
+
+    TODO: Read the Mcweeny's paper on RDM assembly to make sure not making any mistake
+    in the RDM assembly for the complex case.
     '''
 
     trans_sym = True
