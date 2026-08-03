@@ -71,11 +71,11 @@ class PBCProductStateFCISolver (molProductStateFCISolver):
         '''Generate CI guess vectors for all fragments.
 
         Args:
-            ci0: list of length nfrag or None
+            ci0: list of length ncells or None
                 Contains either None or ndarrays of guess CI vectors. Any new guess CI vectors
                 constructed by this function are constrained to be orthogonal to those already
                 provided here, if any.
-            norb_f: list of length nfrag of integers
+            norb_f: list of length ncells of integers
                 Number of orbitals in each fragment
             nelec_f: list of length nfrag of integers
                 Number of electrons (in reference state) in each fragment
@@ -539,16 +539,21 @@ class PBCTransSymmImpureProductStateFCISolver(ImpureProductStateFCISolver):
     def _unpack_hfrag(self, h1eff_ref, h0eff_ref):
         '''
         In short: h1eff_ref, h0eff_ref -> h1eff, h0eff
+
         Assemble full-fragment effective Hamiltonians from the reference
-        cell effective Hamiltonians
+        cell effective Hamiltonians.
+
+        The effective Hamiltonians are invariant under the scalar CI gauge
+        stored in ``phase_per_frag``.  They are therefore independently
+        copied to every translated cell without phase multiplication.  A
+        phased CI vector acquires the corresponding phase when the copied
+        Hamiltonian acts on it.
         '''
-        # TODO: I forgot to add the phases here.
-        
-        nfrag = len(self.fcisolvers)
-        h1eff = [np.array(h1eff_ref, copy=True) 
-                 for _ in range(nfrag)]
+        ncells = len(self.fcisolvers)
+        h1eff = [np.array(h1eff_ref, copy=True)
+                 for _ in range(ncells)]
         h0eff = [np.array(h0eff_ref, copy=True)
-                 for _ in range(nfrag)]
+                 for _ in range(ncells)]
         return h1eff, h0eff
 
     def _make_ref_rdm1s(self, ci_ref, norb_f, nelec_f):
