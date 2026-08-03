@@ -5,14 +5,11 @@ from itertools import combinations
 from pyscf import lib
 from pyscf.scf.addons import canonical_orth_
 from pyscf.fci import cistring
-from pyscf.mcscf.addons import state_average as state_average_mcscf
 
 from mrh.my_pyscf.pbc.fci.csf_cplx import cplxCSFFCISolver as CSFFCISolver
 from mrh.my_pyscf.mcscf.productstate import ProductStateFCISolver as molProductStateFCISolver, state_average_fcisolver
 
-
 # Author: Bhavnesh Jangid
-
 
 '''
 # TODO-1: add multiple root testing for the PBCTransSymmImpureProductStateFCISolver class.
