@@ -317,7 +317,7 @@ def make_rdm12(fcivec, norb, nelec, link_index=None, reorder=True):
     return rdm1.conj().T, rdm2
 
 def make_rdm2(fcivec, norb, nelec, link_index=None, reorder=True):
-    make_rdm2.__doc__ = direct_spin1.make_rdm2.__doc__ + '''
+    '''
     Compute the spin-summed 2-RDM for a complex FCI vector using 
     the backend C function.
     '''
