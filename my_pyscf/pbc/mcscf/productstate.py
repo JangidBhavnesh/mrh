@@ -496,39 +496,43 @@ class PBCTransSymmImpureProductStateFCISolver(ImpureProductStateFCISolver):
         ci_ref /= self.phase_per_frag[self.ref_cell]
         return np.array(ci_ref, copy=True)
 
-    def _unpack_cif(self, ci_ref, phases=None):
+    def _unpack_cif(self, ci_ref):
         '''
         In short: CI_ref -> CI_tot
 
         Expand a reference cell CI vector into one independent vector per fragment.
-        Optional phase factors allow translated fragment CI vectors to use
-        different global phases.
         args:
             ci_ref: np.ndarray
-                Reference cell CI vector to be expanded.
-            phases: array_like of shape (nfrag,) or None
-                Optional phase factors for each fragment. If None, the stored
-                ``phase_per_frag`` values are used.
+                Reference-cell CI vector with shape ``(ndeta, ndetb)`` for
+                one root or ``(nroots, ndeta, ndetb)`` for multiple roots.
         returns:
             ci_tot: list of np.ndarray
                 List of CI vectors for each fragment, with the reference cell
-                vector copied and optionally phase-shifted.
+                vector independently copied and multiplied by the stored
+                fragment phase.
         '''
-
-        # TODO: use the phase_per_frag attribute not phases.
-        # TODO: add a check if the ci_ref is more than one root.
-
         nfrag = len(self.fcisolvers)
 
         if ci_ref is None:
             return [None for _ in range(nfrag)]
 
-        if phases is None:
-            phases = self.phase_per_frag
+        ci_ref = np.asarray(ci_ref)
+        if ci_ref.ndim == 2:
+            nroots = 1
+        elif ci_ref.ndim == 3:
+            nroots = ci_ref.shape[0]
         else:
-            phases = self._normalize_phase_per_frag(phases)
+            msg = ("ci_ref must have shape (ndeta, ndetb) or "
+                   f"(nroots, ndeta, ndetb); got {ci_ref.shape}")
+            raise ValueError(msg)
 
-        ci_tot = [np.array(phases[ifrag] * ci_ref, copy=True) 
+        exptd_nroots = self.fcisolvers[self.ref_cell].nroots
+        if nroots != exptd_nroots:
+            msg = (f"ci_ref contains {nroots} roots, but the reference "
+                   f"solver requires {exptd_nroots}")
+            raise ValueError(msg)
+
+        ci_tot = [np.array(self.phase_per_frag[ifrag] * ci_ref, copy=True)
                   for ifrag in range(nfrag)]
         return ci_tot
 
@@ -543,7 +547,7 @@ class PBCTransSymmImpureProductStateFCISolver(ImpureProductStateFCISolver):
         nfrag = len(self.fcisolvers)
         h1eff = [np.array(h1eff_ref, copy=True) 
                  for _ in range(nfrag)]
-        h0eff = [np.array(h0eff_ref, copy=True) 
+        h0eff = [np.array(h0eff_ref, copy=True)
                  for _ in range(nfrag)]
         return h1eff, h0eff
 
@@ -905,7 +909,7 @@ class PBCTransSymmImpureProductStateFCISolver(ImpureProductStateFCISolver):
         return converged, energy_elec, ci
 
     def _project_ref_hfrag(self, h1, h2, ci_ref, norb_f, nelec_f,
-                           ecore=0, phases=None, dm1s=None, dm2=None,
+                           ecore=0, dm1s=None, dm2=None,
                            **kwargs):
         '''
         Project the Hamiltonian for the reference fragment.
@@ -915,7 +919,7 @@ class PBCTransSymmImpureProductStateFCISolver(ImpureProductStateFCISolver):
         implementation can replace this step without changing the reference-
         fragment interface.
         '''
-        ci = self._unpack_cif(ci_ref, phases=phases)
+        ci = self._unpack_cif(ci_ref)
         h1eff, h0eff, _ = super().project_hfrag(
             h1, h2, ci, norb_f, nelec_f, ecore=ecore,
             dm1s=dm1s, dm2=dm2, **kwargs,
