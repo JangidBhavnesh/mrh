@@ -15,6 +15,7 @@ from mrh.my_pyscf.pbc.mcscf.klasci import (
     kLASCI,
 )
 from mrh.my_pyscf.pbc.mcscf.productstate import (
+    PBCProductStateFCISolver,
     PBCTransSymmImpureProductStateFCISolver,
 )
 from mrh.my_pyscf.pbc.util.transym import TranslationSymm
@@ -242,15 +243,15 @@ class KnownValues(unittest.TestCase):
         self.assertLess(np.max(np.abs(ci_preserved - ci_supplied)), 1e-12)
         self.assertIsNot(ci_preserved, ci_supplied)
 
-        ci_tot = solver.get_init_guess(
-            solver._unpack_cif(ci_supplied),
+        ci = solver._unpack_cif(ci_supplied)
+        ci_preserved = solver.get_init_guess(
+            ci,
             trans_klas.ncas_sub, trans_klas.nelecas_sub, h1e, h2e,
         )
-        for ifrag, ci_frag in enumerate(ci_tot):
+        for ifrag, ci_frag in enumerate(ci_preserved):
             self.assertLess(
                 np.max(np.abs(
-                    ci_frag
-                    - solver.phase_per_frag[ifrag] * ci_supplied
+                    ci_frag - solver.phase_per_frag[ifrag] * ci_supplied
                 )), 1e-12,
             )
 
@@ -279,14 +280,13 @@ class KnownValues(unittest.TestCase):
             None, trans_klas.ncas_sub, trans_klas.nelecas_sub, h1e, h2e,
         )
         ci = solver._unpack_cif(ci_ref)
+        plain_solver = PBCProductStateFCISolver(fcisolvers)
 
-        h1eff, h0eff, _ = super(
-            PBCTransSymmImpureProductStateFCISolver, solver
-        ).project_hfrag(
+        h1eff, h0eff, _ = plain_solver.project_hfrag(
             h1e, h2e, ci, trans_klas.ncas_sub, trans_klas.nelecas_sub,
         )
         h1eff_ref, h0eff_ref = solver._project_ref_hfrag(
-            h1e, h2e, ci_ref,
+            h1e, h2e, ci,
             trans_klas.ncas_sub, trans_klas.nelecas_sub,
         )
 
@@ -295,24 +295,14 @@ class KnownValues(unittest.TestCase):
         self.assertAlmostEqual(h0eff_ref.real, h0eff[1].real, places=10)
         self.assertAlmostEqual(h0eff_ref.imag, h0eff[1].imag, places=10)
 
-        h1eff_tot, h0eff_tot, ci_tot = solver.project_hfrag(
+        h1eff_out, h0eff_out, ci_out = solver.project_hfrag(
             h1e, h2e, ci, trans_klas.ncas_sub, trans_klas.nelecas_sub,
         )
-        for ifrag in range(len(fcisolvers)):
-            self.assertLess(
-                np.max(np.abs(h1eff[ifrag] - h1eff_ref)), 1e-12,
-            )
-            self.assertAlmostEqual(h0eff[ifrag], h0eff_ref, places=10)
-            self.assertLess(
-                np.max(np.abs(h1eff_tot[ifrag] - h1eff_ref)), 1e-12,
-            )
-            self.assertAlmostEqual(h0eff_tot[ifrag], h0eff_ref, places=10)
-            self.assertLess(
-                np.max(np.abs(
-                    ci_tot[ifrag]
-                    - solver.phase_per_frag[ifrag] * ci_ref
-                )), 1e-12,
-            )
+        for h1eff_frag, h0eff_frag, ci_out_frag, ci_frag in zip(
+                h1eff_out, h0eff_out, ci_out, ci):
+            self.assertLess(np.max(np.abs(h1eff_frag - h1eff_ref)), 1e-12)
+            self.assertAlmostEqual(h0eff_frag, h0eff_ref, places=10)
+            self.assertLess(np.max(np.abs(ci_out_frag - ci_frag)), 1e-12)
 
     def test_productstate_get_ref_grad(self):
         trans_klas = kLASCI(
@@ -344,20 +334,20 @@ class KnownValues(unittest.TestCase):
             )
             fcisolver.check_transformer_cache()
         ci = solver._unpack_cif(ci_ref[0])
-        h1eff, _, _ = super(
-            PBCTransSymmImpureProductStateFCISolver, solver
-        ).project_hfrag(
+        plain_solver = PBCProductStateFCISolver(fcisolvers)
+        h1eff, _, _ = plain_solver.project_hfrag(
             h1e, h2e, ci, trans_klas.ncas_sub, trans_klas.nelecas_sub,
         )
 
-        grad = super(
-            PBCTransSymmImpureProductStateFCISolver, solver
-        )._get_grad(
+        grad = plain_solver._get_grad(
             h1eff, h2e, ci,
             trans_klas.ncas_sub, trans_klas.nelecas_sub,
         )
+        i = sum(trans_klas.ncas_sub[:solver.ref_cell])
+        j = i + trans_klas.ncas_sub[solver.ref_cell]
+        h2e_ref = h2e[i:j, i:j, i:j, i:j]
         grad_ref = solver._get_ref_grad(
-            h1eff[1], h2e, ci_ref,
+            h1eff[1], h2e_ref, ci_ref,
             trans_klas.ncas_sub, trans_klas.nelecas_sub,
         )
         ref_offset = (
@@ -371,16 +361,16 @@ class KnownValues(unittest.TestCase):
                 grad_ref - grad[ref_offset:ref_offset + grad_ref.size]
             )), 1e-12,
         )
-        grad_tot = solver._get_grad(
+        grad_out = solver._get_grad(
             h1eff, h2e, ci,
             trans_klas.ncas_sub, trans_klas.nelecas_sub,
         )
         self.assertLess(
-            np.max(np.abs(grad_tot - solver._unpack_grad(grad_ref))),
+            np.max(np.abs(grad_out - solver._unpack_grad(grad_ref))),
             1e-12,
         )
 
-    def test_productstate_reference_only_kernel(self):
+    def test_productstate_reference_optimized_kernel(self):
         trans_klas = kLASCI(
             kmf, 2, (1, 1), kmesh=kmesh,
             trans_sym=True, ref_cell=1,
@@ -424,6 +414,7 @@ class KnownValues(unittest.TestCase):
         self.assertGreater(ref_kernel.call_count, 0)
         self.assertEqual(len(ci), len(fcisolvers))
         ci_ref = solver._pack_ci(ci)
+        self.assertAlmostEqual(np.linalg.norm(ci_ref), 1.0, places=10)
         for ifrag, ci_frag in enumerate(ci):
             self.assertLess(
                 np.max(np.abs(
@@ -450,20 +441,15 @@ class KnownValues(unittest.TestCase):
         )
         ci_ref = np.asarray(trans_klas.ci[1])[0]
         ci = solver._unpack_cif(ci_ref)
+        plain_solver = PBCProductStateFCISolver(fcisolvers)
 
-        dm1s_ref = super(
-            PBCTransSymmImpureProductStateFCISolver, solver
-        ).make_rdm1s(
+        dm1s_ref = plain_solver.make_rdm1s(
             ci, trans_klas.ncas_sub, trans_klas.nelecas_sub,
         )
-        dm1_ref = super(
-            PBCTransSymmImpureProductStateFCISolver, solver
-        ).make_rdm1(
+        dm1_ref = plain_solver.make_rdm1(
             ci, trans_klas.ncas_sub, trans_klas.nelecas_sub,
         )
-        dm2_ref = super(
-            PBCTransSymmImpureProductStateFCISolver, solver
-        ).make_rdm2(
+        dm2_ref = plain_solver.make_rdm2(
             ci, trans_klas.ncas_sub, trans_klas.nelecas_sub,
         )
 
@@ -571,9 +557,8 @@ class KnownValues(unittest.TestCase):
             trans_klas.ncas_sub, trans_klas.nelecas_sub,
             ecore=ecore,
         )
-        energy_dense = super(
-            PBCTransSymmImpureProductStateFCISolver, solver
-        ).energy_elec(
+        plain_solver = PBCProductStateFCISolver(fcisolvers)
+        energy_dense = plain_solver.energy_elec(
             h1e, h2e, ci,
             trans_klas.ncas_sub, trans_klas.nelecas_sub,
             ecore=ecore,
