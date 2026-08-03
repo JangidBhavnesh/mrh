@@ -380,9 +380,9 @@ class PBCTransSymmImpureProductStateFCISolver(ImpureProductStateFCISolver):
 
     In this class, only the reference fragment is optimized. Any function
     (method) or local variable which ends in ``_ref`` represents a reference-cell
-    quantity. The solver's canonical CI representation is ``ci_ref``. It is
-    expanded into one value per translated fragment only at interfaces that
-    require the conventional product-state representation.
+    quantity. The solver retains the conventional full fragment CI list;
+    reference-only helpers extract ``ci_ref`` when performing the optimized
+    reference-cell calculation.
 
     In this implementation, the
     translation phase is a scalar CI gauge.  If fragment ``f`` has
@@ -646,29 +646,30 @@ class PBCTransSymmImpureProductStateFCISolver(ImpureProductStateFCISolver):
             dm1b[i:j, i:j] = dm1b_ref
         return dm1a, dm1b
 
-    def make_rdm1s(self, ci_ref, norb_f, nelec_f, **kwargs):
+    def make_rdm1s(self, ci, norb_f, nelec_f, **kwargs):
         '''
-        Assemble full spin-separated one-body RDMs from the reference.
+        Build the full spin-resolved 1-RDMs from the translated CI list.
         '''
+        ci_ref = self._pack_ci(ci)
         dm1a_ref, dm1b_ref = self._make_ref_rdm1s(ci_ref, norb_f, nelec_f)
         rdm1a, rdm1b = self._unpack_rdm1s(dm1a_ref, dm1b_ref, norb_f, nelec_f)
         return rdm1a, rdm1b
 
-    def make_rdm1(self, ci_ref, norb_f, nelec_f, **kwargs):
+    def make_rdm1(self, ci, norb_f, nelec_f, **kwargs):
         '''
-        Assemble the full spin-summed one-body RDM from the reference.
+        Build the full spin-summed 1-RDM from the translated CI list.
         '''
-        dm1a, dm1b = self.make_rdm1s(ci_ref, norb_f, nelec_f, **kwargs)
+        dm1a, dm1b = self.make_rdm1s(ci, norb_f, nelec_f, **kwargs)
         dm1 = dm1a + dm1b
         dm1 = 0.5 * (dm1 + dm1.conj().T)  # Ensure Hermiticity
         return dm1
 
-    def make_rdm2(self, ci_ref, norb_f, nelec_f, **kwargs):
+    def make_rdm2(self, ci, norb_f, nelec_f, **kwargs):
         '''
-        Assemble the full product-state two-body RDM from the reference.
-        # TODO: Need to double check the two body RDM assembly for the complex case.
+        Build the full product-state 2-RDM from the translated CI list.
         '''
-
+        # TODO: Double-check the complex-valued 2-RDM assembly.
+        ci_ref = self._pack_ci(ci)
         dm2_ref = self._make_ref_rdm2(ci_ref, norb_f, nelec_f,)
         dm1a_ref, dm1b_ref = self._make_ref_rdm1s(ci_ref, norb_f, nelec_f,)
         dm1a, dm1b = self._unpack_rdm1s(dm1a_ref, dm1b_ref, norb_f, nelec_f,)
@@ -720,16 +721,16 @@ class PBCTransSymmImpureProductStateFCISolver(ImpureProductStateFCISolver):
         if h1_packed.shape == (ncell, norb_ref, norb_ref):
             h1_packed = np.stack([h1_packed, h1_packed], axis=0)
 
-        expected_h1 = (2, ncell, norb_ref, norb_ref)
-        expected_h2 = (ncell, ncell, ncell, norb_ref, norb_ref, norb_ref, norb_ref,)
+        h1_shape = (2, ncell, norb_ref, norb_ref)
+        h2_shape = (ncell, ncell, ncell, norb_ref, norb_ref, norb_ref, norb_ref,)
 
-        if h1_packed.shape != expected_h1:
-            msg = (f"packed h1 must have shape {expected_h1}; "
+        if h1_packed.shape != h1_shape:
+            msg = (f"packed h1 must have shape {h1_shape}; "
                    f"got {h1_packed.shape}")
             raise ValueError(msg)
         
-        if h2_packed.shape != expected_h2:
-            msg = (f"packed h2 must have shape {expected_h2}; "
+        if h2_packed.shape != h2_shape:
+            msg = (f"packed h2 must have shape {h2_shape}; "
                    f"got {h2_packed.shape}")
             raise ValueError(msg)
 
@@ -750,23 +751,18 @@ class PBCTransSymmImpureProductStateFCISolver(ImpureProductStateFCISolver):
 
         return ecore / ncell + e1 + 0.5 * e2
 
-    def energy_elec(self, h1, h2, ci_ref, norb_f, nelec_f,
+    def energy_elec(self, h1, h2, ci, norb_f, nelec_f,
                     ecore=0, **kwargs):
         '''
-        Calculate the total energy from the packed reference-cell energy.
+        Evaluate the total energy from the translated CI list.
         '''
         if self.pack_h1 is None:
-            # First get the total RDMs from the reference cell CI vector only.
-            dm1a, dm1b = self.make_rdm1s(ci_ref, norb_f, nelec_f)
-            dm1s = np.stack([dm1a, dm1b], axis=0,)
-            if h1.ndim < 3:
-                h1 = np.stack([h1, h1], axis=0)
-            dm2 = self.make_rdm2(ci_ref, norb_f, nelec_f)
-            return (ecore + np.tensordot(h1, dm1s, axes=3)
-                    + 0.5 * np.tensordot(h2, dm2, axes=4))
+            return super().energy_elec(
+                h1, h2, ci, norb_f, nelec_f, ecore=ecore, **kwargs,)
 
         h1_packed = self.pack_h1(h1)
         h2_packed = self.pack_h2(h2)
+        ci_ref = self._pack_ci(ci)
         energy_ref = self.energy_ref(h1_packed, h2_packed, ci_ref, norb_f, nelec_f,
                                      ecore=ecore, **kwargs,)
         ncells = len(self.fcisolvers)
@@ -809,38 +805,43 @@ class PBCTransSymmImpureProductStateFCISolver(ImpureProductStateFCISolver):
                 grad.append(np.array(grad_ref[external_size:], copy=True))
         return np.concatenate(grad)
 
-    def get_init_guess(self, ci_ref, norb_f, nelec_f, h1, h2, nroots=None):
+    def get_init_guess(self, ci, norb_f, nelec_f, h1, h2, nroots=None):
         '''
-        Generate or preserve the reference-cell initial guess.
+        Generate a reference guess and expand it into the full CI list.
         '''
+        ci_ref = self._pack_ci(ci)
         ci_ref = self._get_ref_init_guess(ci_ref, norb_f, nelec_f, 
                                           h1, h2, nroots=nroots,)
-        return ci_ref
+        return self._unpack_cif(ci_ref)
 
-    def project_hfrag(self, h1, h2, ci_ref, norb_f, nelec_f,
+    def project_hfrag(self, h1, h2, ci, norb_f, nelec_f,
                       ecore=0, dm1s=None, dm2=None, **kwargs):
         '''
-        Project the effective Hamiltonian for the reference cell.
+        Assemble full effective Hamiltonians from the reference projection.
         '''
         h1eff_ref, h0eff_ref = self._project_ref_hfrag(
-            h1, h2, ci_ref, norb_f, nelec_f, ecore=ecore,
+            h1, h2, ci, norb_f, nelec_f, ecore=ecore,
             dm1s=dm1s, dm2=dm2, **kwargs,)
-        return h1eff_ref, h0eff_ref, ci_ref
+        h1eff, h0eff = self._unpack_hfrag(h1eff_ref, h0eff_ref)
+        return h1eff, h0eff, ci
 
-    def _get_grad(self, h1eff_ref, h2, ci_ref, norb_f, nelec_f, orbsym=None,
+    def _get_grad(self, h1eff, h2, ci, norb_f, nelec_f, orbsym=None,
                   **kwargs):
         '''
-        Calculate the reference-cell CI gradient.
+        Assemble the full CI gradient from its reference-cell block.
         '''
-        return self._get_ref_grad(
-            h1eff_ref, h2, ci_ref, norb_f, nelec_f,
+        i = sum(norb_f[:self.ref_cell])
+        j = i + norb_f[self.ref_cell]
+        h2_ref = h2[i:j, i:j, i:j, i:j]
+        ci_ref = self._pack_ci(ci)
+        grad_ref = self._get_ref_grad(
+            h1eff[self.ref_cell], h2_ref, ci_ref, norb_f, nelec_f,
             orbsym=orbsym, **kwargs,)
+        return self._unpack_grad(grad_ref)
 
     def _1shot_ref(self, h0eff_ref, h1eff_ref, h2, ci_ref,
-                   norb_f, nelec_f, orbsym=None, **kwargs):
-        '''
-        Optimize only the reference-fragment CI vector once.
-        '''
+                   norb_f, nelec_f, **kwargs):
+        '''Optimize the reference-fragment CI vector once.'''
         ref = self.ref_cell
         i = sum(norb_f[:ref])
         j = i + norb_f[ref]
@@ -849,43 +850,35 @@ class PBCTransSymmImpureProductStateFCISolver(ImpureProductStateFCISolver):
         nelec = self._get_nelec(solver, nelec_f[ref])
         h2_ref = h2[i:j, i:j, i:j, i:j]
 
-        orbsym_ref = getattr(solver, 'orbsym', None)
-        if orbsym is not None:
-            orbsym_ref = orbsym[i:j]
-
         energy_ref, ci_ref = solver.kernel(h1eff_ref, h2_ref, norb, nelec, 
                                            ci0=ci_ref, ecore=h0eff_ref, 
-                                           orbsym=orbsym_ref, **kwargs,)
+                                            **kwargs,)
         return energy_ref, np.array(ci_ref, copy=True)
 
     def kernel(self, h1, h2, norb_f, nelec_f, ecore=0, ci0=None,
                orbsym=None, conv_tol_grad=1e-4, conv_tol_self=1e-10,
                max_cycle_macro=50, serialfrag=False, **kwargs):
         '''
-        Optimize and return the reference-cell CI vector.
+        Optimize the reference cell while retaining the full CI list.
         '''
         log = self.log
         converged = False
         energy_ref = 0.0
         energy_sigma = 0.0
-        ci_ref = ci0
+        ci = ci0
         solver_ref = self.fcisolvers[self.ref_cell]
-        if max_cycle_macro < 1:
-            raise ValueError("max_cycle_macro must be positive")
+        i = sum(norb_f[:self.ref_cell])
+        j = i + norb_f[self.ref_cell]
+        h2_ref = h2[i:j, i:j, i:j, i:j]
 
         log.info('Entering translation-symmetric reference-cell CI iteration')
         
         for it in range(max_cycle_macro):
-
-            ci_ref = self._get_ref_init_guess(
-                ci_ref, norb_f, nelec_f, h1, h2, **kwargs)
-
-            h1eff_ref, h0eff_ref = self._project_ref_hfrag(
-                h1, h2, ci_ref, norb_f, nelec_f,
-                ecore=ecore, **kwargs,)
-
-            grad_ref = self._get_ref_grad(h1eff_ref, h2, ci_ref, norb_f, nelec_f,
-                orbsym=orbsym, **kwargs,)
+            ci = self.get_init_guess(ci, norb_f, nelec_f, h1, h2, **kwargs)
+            h1eff_ref, h0eff_ref = self._project_ref_hfrag(h1, h2, ci, norb_f, nelec_f,
+                                                           ecore=ecore, **kwargs,)
+            ci_ref = self._pack_ci(ci)
+            grad_ref = self._get_ref_grad(h1eff_ref, h2_ref, ci_ref, norb_f, nelec_f, **kwargs,)
 
             grad_max = np.amax(np.abs(grad_ref))
 
@@ -895,6 +888,7 @@ class PBCTransSymmImpureProductStateFCISolver(ImpureProductStateFCISolver):
             log.info('Cycle %d: max ref grad = %e ; sigma = %e ; '
                 'reference solver converged = %s',
                 it, grad_max, energy_sigma, solver_converged,)
+            
             if (grad_max < conv_tol_grad
                     and energy_sigma < conv_tol_self
                     and solver_converged and it > 0):
@@ -903,57 +897,50 @@ class PBCTransSymmImpureProductStateFCISolver(ImpureProductStateFCISolver):
 
             energy_ref, ci_ref = self._1shot_ref(
                 h0eff_ref, h1eff_ref, h2, ci_ref,
-                norb_f, nelec_f, orbsym=orbsym, **kwargs,
-            )
+                norb_f, nelec_f, orbsym=orbsym, **kwargs,)
+
+            ci = self._unpack_cif(ci_ref)
+
             # All translated fragment energies are identical, so their spread
             # is zero by construction.
             energy_sigma = 0.0
 
         conv_str = ['NOT converged', 'converged'][int(converged)]
-        log.info(
-            'Translation-symmetric reference-cell CI iteration %s after %d '
-            'cycles', conv_str, it + 1,
-        )
+        log.info('Translation-symmetric reference-cell CI iteration %s after %d '
+                 'cycles', conv_str, it + 1,)
 
-        energy_elec = self.energy_elec(
-            h1, h2, ci_ref, norb_f, nelec_f,
-            ecore=ecore, efinal=energy_ref, **kwargs,
-        )
-        return converged, energy_elec, ci_ref
+        energy_elec = self.energy_elec(h1, h2, ci, norb_f, nelec_f, 
+                                       ecore=ecore, efinal=energy_ref, **kwargs,)
+        
+        return converged, energy_elec, ci
 
-    def _project_ref_hfrag(self, h1, h2, ci_ref, norb_f, nelec_f,
+    def _project_ref_hfrag(self, h1, h2, ci, norb_f, nelec_f,
                            ecore=0, dm1s=None, dm2=None,
                            **kwargs):
         '''
-        Project the Hamiltonian for the reference fragment.
-
-        This initial implementation expands ``ci_ref`` to all translated
-        fragments and reuses the parent dense projection.  A later packed
-        implementation can replace this step without changing the reference-
-        fragment interface.
+        Project the full state and return the reference effective Hamiltonian.
         '''
+
         if dm1s is None:
-            dm1s = np.stack(
-                self.make_rdm1s(ci_ref, norb_f, nelec_f), axis=0,
-            )
+            dm1s = np.stack(self.make_rdm1s(ci, norb_f, nelec_f), axis=0,)
+
         if dm2 is None:
-            dm2 = self.make_rdm2(ci_ref, norb_f, nelec_f)
-        ci = self._unpack_cif(ci_ref)
+            dm2 = self.make_rdm2(ci, norb_f, nelec_f)
+
         h1eff, h0eff, _ = super().project_hfrag(
             h1, h2, ci, norb_f, nelec_f, ecore=ecore,
-            dm1s=dm1s, dm2=dm2, **kwargs,
-        )
+            dm1s=dm1s, dm2=dm2, **kwargs,)
+
         return h1eff[self.ref_cell], h0eff[self.ref_cell]
 
-    def _get_ref_grad(self, h1eff_ref, h2, ci_ref, norb_f, nelec_f,
-                      orbsym=None, **kwargs):
-        r'''
-        Calculate the CI gradient for only the reference fragment.
-        TODO: Add the equation to make it more clear.
+    def _get_ref_grad(self, h1eff_ref, h2_ref, ci_ref, norb_f, nelec_f,
+                      **kwargs):
         '''
+        Calculate the reference-cell CI gradient from reference integrals.
+        # TODO: Document the reference-gradient equation.
+        '''
+
         ref = self.ref_cell
-        i = sum(norb_f[:ref])
-        j = i + norb_f[ref]
         norb = norb_f[ref]
         solver = self.fcisolvers[ref]
         nelec = self._get_nelec(solver, nelec_f[ref])
@@ -961,10 +948,11 @@ class PBCTransSymmImpureProductStateFCISolver(ImpureProductStateFCISolver):
 
         ndeta = cistring.num_strings(norb, nelec[0])
         ndetb = cistring.num_strings(norb, nelec[1])
+
         ci_ref = np.asarray(ci_ref).reshape(nroots, ndeta, ndetb)
-        h2_ref = h2[i:j, i:j, i:j, i:j]
-        h2eff_ref = solver.absorb_h1e(
-            h1eff_ref, h2_ref, norb, nelec, 0.5,)
+
+        h2eff_ref = solver.absorb_h1e(h1eff_ref, h2_ref, norb, nelec, 0.5,)
+
         hc = np.asarray([solver.contract_2e(h2eff_ref, root, norb, nelec) 
                          for root in ci_ref])
         chc = np.dot(ci_ref.reshape(nroots, -1).conj(), 
@@ -972,35 +960,31 @@ class PBCTransSymmImpureProductStateFCISolver(ImpureProductStateFCISolver):
         hc = hc - np.tensordot(chc, ci_ref, axes=1)
 
         if isinstance(solver, CSFFCISolver):
-            hc_real = solver.transformer.vec_det2csf(
-                hc.real, order='C', normalize=False,
-            )
-            hc_imag = solver.transformer.vec_det2csf(
-                hc.imag, order='C', normalize=False,
-            )
+            # Transform the CI coefficients to the CSF basis
+            hc_real = solver.transformer.vec_det2csf(hc.real, order='C', normalize=False,)
+            hc_imag = solver.transformer.vec_det2csf(hc.imag, order='C', normalize=False,)
             hc_csf = hc_real.astype(h1eff_ref.dtype)
             hc_csf.real = hc_real
             hc_csf.imag = hc_imag
             hc = hc_csf
 
         assert hc.size == nroots * solver.transformer.ncsf
+
         grad = [hc.ravel()]
+
         if nroots > 1 and getattr(solver, 'weights', None) is not None:
             chc *= np.asarray(solver.weights)[:, None]
             chc -= chc.T
             grad.append(chc[np.tril_indices(nroots, k=-1)])
+
         return np.concatenate(grad)
 
     def _get_ref_init_guess(self, ci_ref, norb_f, nelec_f, h1, h2,
                             nroots=None):
         '''
-        Get an initial CI vector for the reference fragment.
-
-        A supplied reference CI vector is preserved. Otherwise, the initial
-        guess is generated from the diagonal Hamiltonian of ``ref_cell``.
-        Note: the ci_ref is just for the given reference cell, not for all the
-        fragments.
+        Preserve or generate the reference-cell CI initial guess.
         '''
+
         if ci_ref is not None:
             return np.array(ci_ref, copy=True)
 
@@ -1019,8 +1003,10 @@ class PBCTransSymmImpureProductStateFCISolver(ImpureProductStateFCISolver):
         h2_ref = h2[i:j, i:j, i:j, i:j]
 
         solver.check_transformer_cache()
+
         if nroots is None:
             nroots = solver.nroots
+
         nroots = min(nroots, solver.transformer.ncsf)
         hdiag = solver.make_hdiag_csf(h1_ref, h2_ref, norb, nelec)
         ci_ref = solver.get_init_guess(norb, nelec, nroots, hdiag)
