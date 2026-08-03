@@ -560,7 +560,6 @@ class PBCTransSymmImpureProductStateFCISolver(ImpureProductStateFCISolver):
         '''
         Calculate spin-separated one-body RDMs for the reference cell.
         '''
-        # TODO: add the phases here.
         dtype = np.result_type(ci_ref)
         ref = self.ref_cell
         norb_ref = norb_f[ref]
@@ -575,13 +574,14 @@ class PBCTransSymmImpureProductStateFCISolver(ImpureProductStateFCISolver):
         dm1a_ref = np.asarray(dm1a_ref, dtype=dtype)
         dm1b_ref = np.asarray(dm1b_ref, dtype=dtype)
 
-        # Sanity check:
-        assert np.allclose(dm1a_ref, dm1a_ref.conj().T,
-                           atol=1e-8, rtol=0.0), \
-            "dm1a_ref is not Hermitian"
-        assert np.allclose(dm1b_ref, dm1b_ref.conj().T,
-                           atol=1e-8, rtol=0.0), \
-            "dm1b_ref is not Hermitian"
+        if self.verbose >= lib.logger.DEBUG:
+            assert np.allclose(dm1a_ref, dm1a_ref.conj().T,
+                               atol=1e-8, rtol=0.0), \
+                "dm1a_ref is not Hermitian"
+            assert np.allclose(dm1b_ref, dm1b_ref.conj().T,
+                               atol=1e-8, rtol=0.0), \
+                "dm1b_ref is not Hermitian"
+
         nelec_ref = sum(nelec_ref)
         nelec_check = np.trace(dm1a_ref) + np.trace(dm1b_ref)
         assert np.isclose(nelec_check, nelec_ref, atol=1e-8, rtol=0.0), \
