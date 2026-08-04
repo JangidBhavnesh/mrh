@@ -198,17 +198,17 @@ def check_wannier_orbital_translation(ts, W, R_indices=None,
             max_ref = max(max_ref, local_ref)
 
     rel_err = max_abs / max(max_ref, 1e-14)
-    log.info("Wannier translation covariance check")
-    log.info("------------------------------------")
-    log.info(f"T_index     = {tuple(T_index)}")
-    log.info(f"max abs err = {max_abs:.3e}")
-    log.info(f"max rel err = {rel_err:.3e}")
-    log.info(f"worst block = {worst}")
+    log.debug("Wannier translation covariance check")
+    log.debug("------------------------------------")
+    log.debug(f"T_index     = {tuple(T_index)}")
+    log.debug(f"max abs err = {max_abs:.3e}")
+    log.debug(f"max rel err = {rel_err:.3e}")
+    log.debug(f"worst block = {worst}")
 
     if rel_err < tol:
-        log.info("Wannier translation covariance OK.")
+        log.debug("Wannier translation covariance OK.")
     else:
-        log.info("Wannier translation covariance FAILED.")
+        log.debug("Wannier translation covariance FAILED.")
 
     return max_abs, rel_err, worst
 
@@ -287,12 +287,12 @@ def check_h1e_translation(ts, h1e, T_index=(1, 0, 0), tol=1e-8):
         }
 
     log = lib.logger.Logger(ts.cell.stdout, ts.cell.verbose)
-    log.info("One-electron Hamiltonian translation check")
-    log.info(f"T_index     = {tuple(T_index)}")
-    log.info(f"max abs err = {max_abs:.3e}")
-    log.info(f"max rel err = {rel_err:.3e}")
-    log.info(f"worst block = {worst}")
-    log.info("One-electron translation %s.",
+    log.debug("One-electron Hamiltonian translation check")
+    log.debug(f"T_index     = {tuple(T_index)}")
+    log.debug(f"max abs err = {max_abs:.3e}")
+    log.debug(f"max rel err = {rel_err:.3e}")
+    log.debug(f"worst block = {worst}")
+    log.debug("One-electron translation %s.",
              "OK" if rel_err < tol else "FAILED")
     return max_abs, rel_err, worst
 
@@ -342,12 +342,12 @@ def check_h2e_translation(ts, h2e, T_index=(1, 0, 0), tol=1e-8):
             )
 
     log = lib.logger.Logger(ts.cell.stdout, ts.cell.verbose)
-    log.info("Two-electron Hamiltonian translation check")
-    log.info(f"T_index     = {tuple(T_index)}")
-    log.info(f"max abs err = {max_abs:.3e}")
-    log.info(f"max rel err = {rel_err:.3e}")
-    log.info(f"worst block = {worst}")
-    log.info("Two-electron translation %s.",
+    log.debug("Two-electron Hamiltonian translation check")
+    log.debug(f"T_index     = {tuple(T_index)}")
+    log.debug(f"max abs err = {max_abs:.3e}")
+    log.debug(f"max rel err = {rel_err:.3e}")
+    log.debug(f"worst block = {worst}")
+    log.debug("Two-electron translation %s.",
              "OK" if rel_err < tol else "FAILED")
     return max_abs, rel_err, worst
 
@@ -398,12 +398,12 @@ def check_wannier_against_ref_cell(ts, W, R_indices, ref_cell=0, tol=1e-8):
             max_ref = max(max_ref, local_ref)
 
     rel_err = max_abs / max(max_ref, 1e-14)
-    log.info("Wannier reference-cell translation check")
-    log.info("----------------------------------------")
-    log.info(f"ref_cell    = {ref_cell}, S_ref = {tuple(S_ref)}")
-    log.info(f"max abs err = {max_abs:.3e}")
-    log.info(f"max rel err = {rel_err:.3e}")
-    log.info(f"worst block = {worst}")
+    log.debug("Wannier reference-cell translation check")
+    log.debug("----------------------------------------")
+    log.debug(f"ref_cell    = {ref_cell}, S_ref = {tuple(S_ref)}")
+    log.debug(f"max abs err = {max_abs:.3e}")
+    log.debug(f"max rel err = {rel_err:.3e}")
+    log.debug(f"worst block = {worst}")
 
     if rel_err < tol:
         log.info("All Wannier centers are translated copies of " \
