@@ -138,6 +138,24 @@ class KnownValues(unittest.TestCase):
                 trans_sym=True, ref_cell=np.prod(kmesh),
             )
 
+    def test_kpts_must_match_mean_field(self):
+        supplied_kpts = np.array(kmf.kpts, copy=True)
+        klas = kLASCI(
+            kmf, 2, (1, 1), kmesh=kmesh, kpts=supplied_kpts,
+        )
+        np.testing.assert_allclose(klas.kpts, kmf.kpts, atol=0.0, rtol=0.0)
+
+        returned_kpts = klas.kpts
+        returned_kpts[0, 0] += 1.0
+        np.testing.assert_allclose(klas.kpts, kmf.kpts, atol=0.0, rtol=0.0)
+
+        mismatched_kpts = np.array(kmf.kpts, copy=True)
+        mismatched_kpts[0, 0] += 1e-4
+        with self.assertRaisesRegex(ValueError, "kpts must match kmf.kpts"):
+            kLASCI(
+                kmf, 2, (1, 1), kmesh=kmesh, kpts=mismatched_kpts,
+            )
+
     def test_trans_sym_class_api_and_energy(self):
         plain_klas = kLASCI(kmf, 2, (1, 1), kmesh=kmesh)
         trans_klas = kLASCI(
