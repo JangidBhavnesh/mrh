@@ -178,6 +178,11 @@ class KnownValues(unittest.TestCase):
 
         self.assertAlmostEqual(energy_plain.real, energy_trans.real, places=10)
         self.assertAlmostEqual(energy_plain.imag, energy_trans.imag, places=10)
+        dm1s = plain_klas.make_rdm1s_sub(
+            mo_coeff=mo_loc, include_core=True,
+        )
+        expected_shape = (2, len(kmf.kpts), cell.nao_nr(), cell.nao_nr())
+        self.assertEqual(dm1s.shape, expected_shape)
 
     def test_productstate_pack_and_unpack_ci(self):
 
