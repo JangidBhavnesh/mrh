@@ -539,6 +539,21 @@ class PBCLASCINoSymm(casci.PBCCASCI, LASCINoSymm):
     # real csf_solver. so I decided to adopt the __init__ function of the LASCINoSymm class and 
     # then register the functions that I need from PBCCASCIForLAS to this class. 
     # This is not a clean way to do it but it is the fastest way to get it working. I will refactor this later.
+
+    @property
+    def kpts(self):
+        '''K-points used by both the mean-field and k-LASCI calculations.'''
+        return np.array(self._scf.kpts, copy=True)
+
+    @kpts.setter
+    def kpts(self, value):
+        value = np.asarray(value)
+        kmf_kpts = np.asarray(self._scf.kpts)
+        if (value.shape != kmf_kpts.shape
+                or not np.allclose(value, kmf_kpts, atol=1e-10, rtol=0.0)):
+            msg = "kpts must match kmf.kpts in shape, ordering, and values; "
+            msg += f"got shapes {value.shape} and {kmf_kpts.shape}"
+            raise ValueError(msg)
     
     def __init__(self, kmf, ncas, nelecas, ncore=None, spin_mult=None,
                  kmesh=None, kpts=None, frozen=None, frozen_ci=None, **kwargs):
