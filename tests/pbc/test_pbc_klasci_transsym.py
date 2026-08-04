@@ -178,6 +178,14 @@ class KnownValues(unittest.TestCase):
 
         self.assertAlmostEqual(energy_plain.real, energy_trans.real, places=10)
         self.assertAlmostEqual(energy_plain.imag, energy_trans.imag, places=10)
+        self.assertAlmostEqual(
+            plain_klas.e_tot,
+            np.dot(plain_klas.weights, plain_klas.e_states), places=12,
+        )
+        self.assertAlmostEqual(
+            trans_klas.e_tot,
+            np.dot(trans_klas.weights, trans_klas.e_states), places=12,
+        )
         dm1s = plain_klas.make_rdm1s_sub(
             mo_coeff=mo_loc, include_core=True,
         )
