@@ -739,8 +739,7 @@ class PBCLASCINoSymm(casci.PBCCASCI, LASCINoSymm):
         assert rdm1s_ao_k.shape == (2, nkpts, nao, nao), \
             f"Shape mismatch: {rdm1s_ao_k.shape} != (2, {nkpts}, {nao}, {nao})"
 
-        if not include_core:
-            coreelec = self.ncore * 2
+        coreelec = 0 if include_core else self.ncore * 2
         ovlp = self._scf.get_ovlp(kpts=self.kpts)
         rdm1 = rdm1s_ao_k.sum (0)
         nelecref = self._scf.cell.nelectron
