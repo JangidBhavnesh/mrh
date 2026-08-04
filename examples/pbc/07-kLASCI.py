@@ -32,7 +32,6 @@ kpts = cell.make_kpts(kmesh, wrap_around=True)
 
 # Mean-field calculation.
 kmf = scf.KRHF(cell, kpts=kpts).density_fit(auxbasis='def2-svp-jkfit')
-kmf.with_df._cderi = 'cderi.h5'
 kmf.max_cycle= 200
 kmf.exxdiv = None
 kmf.conv_tol = 1e-10
