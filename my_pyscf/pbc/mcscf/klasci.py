@@ -1018,23 +1018,35 @@ class PBCLASCITransSymm(PBCLASCINoSymm):
         # Get the Wannier orbitals.
         wannier_orb, R_indices = get_wannier_orbs(self._scf, self.kmesh, mo_active,)[:2]
 
-        # Check translation symmetry of Wannier orbitals, h1e, and h2e.
-        errors = {}
-        errors['Wannier orbitals'] = check_wannier_orbital_translation(
-            ts, wannier_orb, R_indices=R_indices, tol=tol,
-        )
-        errors['h1e'] = check_h1e_translation(ts, h1e, tol=tol)
-        errors['h2e'] = check_h2e_translation(ts, h2e, tol=tol)
+        # Check every nontrivial primitive translation of the BvK mesh.  For a
+        # one-cell mesh, retain an identity check to validate tensor shapes.
+        translations = [tuple(int(i == axis) for i in range(3))
+                        for axis, size in enumerate(self.kmesh) if size > 1]
+        if not translations:
+            translations = [(1, 0, 0)]
 
-        # If any of the translation symmetry checks failed, raise a RuntimeError.
-        failed = [f"{name} (relative error {error[1]:.3e})" 
-                  for name, error in errors.items() if error[1] >= tol]
-        
+        errors = {'Wannier orbitals': None, 'h1e': None, 'h2e': None}
+        failed = []
+        for translation in translations:
+            errors_T = {
+                'Wannier orbitals': check_wannier_orbital_translation(
+                    ts, wannier_orb, R_indices=R_indices,T_index=translation, tol=tol,),
+                'h1e': check_h1e_translation(ts, h1e, T_index=translation, tol=tol,),
+                'h2e': check_h2e_translation(ts, h2e, T_index=translation, tol=tol,),
+            }
+
+            for name, error in errors_T.items():
+                if errors[name] is None or error[1] > errors[name][1]:
+                    errors[name] = error
+                if error[1] >= tol:
+                    msg = f"{name} under T_index={translation} (relative error {error[1]:.3e})"
+                    failed.append(msg)
+                        
         if failed:
             msg = "Wannier-basis translation symmetry check failed for "
             msg += " and ".join(failed)
             raise RuntimeError(msg)
 
         # Clean up large temporary variables while retaining the diagnostics.
-        del failed, wannier_orb, R_indices, mo_active, ts
+        del failed, wannier_orb, R_indices, mo_active, ts, translations
         return errors
