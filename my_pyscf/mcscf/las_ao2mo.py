@@ -38,7 +38,8 @@ def get_h2eff_df (las, mo_coeff):
     mem_per_aux *= safety_factor * 8 / 1e6
     mem_per_aux = max (1, mem_per_aux)
     blksize = max (1, min (naux, int (mem_av / mem_per_aux)))
-    assert (blksize>1)
+    if blksize==1:
+        log.warn (f'Low memory? blksize = 1 in las_ao2mo. Available memory: {mem_av}')
     log.debug2 ("LAS DF ERI blksize = %d, mem_av = %d MB, mem_per_aux = %d MB", blksize, mem_av, mem_per_aux)
     log.debug2 ("LAS DF ERI naux = %d, nao = %d, nmo = %d", naux, nao, nmo)
     eri = 0
