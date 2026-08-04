@@ -443,6 +443,11 @@ def kernel (las, mo_coeff=None, ci0=None, lroots=None, lweights=None, verbose=0,
         converged.append (conv)
         t = log.timer ('State {} LASCI'.format (state), *t)
 
+    if not _dry_run:
+        e_states /= nkpts
+        e_cas /= nkpts
+        e_lexc = [[np.asarray(e) / nkpts for e in frag]
+                  for frag in e_lexc]
     e_tot = np.dot (las.weights, e_states)
     return converged, e_tot, e_states, e_cas, e_lexc, ci1
 
@@ -644,14 +649,14 @@ class PBCLASCINoSymm(casci.PBCCASCI, LASCINoSymm):
         if _dry_run: return
         self.converged, self.ci = converged, ci
         self.e_tot, self.e_states, self.e_cas, self.e_lexc = e_tot, e_states, e_cas, e_lexc
-        self.e_tot /= nkpts
         if mo_coeff is self.mo_coeff:
             pass
             # self.dump_chk ()
         elif getattr (self, 'chkfile', None) is not None:
             lib.logger.warn (self, 'orbitals changed; chkfile not dumped!')
         self._finalize (method='LASCI')
-        return self.converged, self.e_tot, self.e_states, self.e_cas, e_lexc, self.ci
+        return (self.converged, self.e_tot, self.e_states, self.e_cas,
+                self.e_lexc, self.ci)
 
     def _finalize(self, method='LASCI'):
         log = lib.logger.new_logger (self, self.verbose)
