@@ -291,12 +291,10 @@ class PBCProductStateFCISolver (molProductStateFCISolver):
         return h1eff, h0eff, ci
 
     def make_rdm1s (self, ci, norb_f, nelec_f, **kwargs):
-        dtype = np.array(ci).dtype
         norb = sum (norb_f)
-        dm1a = np.zeros ((norb, norb), dtype=dtype)
-        dm1b = np.zeros ((norb, norb), dtype=dtype)
         nj = np.cumsum (norb_f)
         ni = nj - norb_f
+        dm1s_f = []
         for ix, (i, j, c, no, ne, s) in enumerate (zip (ni, nj, ci, norb_f, nelec_f, self.fcisolvers)):
             nelec = self._get_nelec (s, ne)
             if getattr (c, 'ndim', 3) == 3: c = list (c)
@@ -310,6 +308,12 @@ class PBCProductStateFCISolver (molProductStateFCISolver):
                 if isinstance (s, CSFFCISolver):
                     print ("smult=",s.smult,"ncsf=",s.transformer.ncsf)
                 raise (e)
+            dm1s_f.append ((i, j, np.asarray(a), np.asarray(b)))
+        dtype = np.result_type (float,
+            *[dm for _, _, a, b in dm1s_f for dm in (a, b)])
+        dm1a = np.zeros ((norb, norb), dtype=dtype)
+        dm1b = np.zeros ((norb, norb), dtype=dtype)
+        for i, j, a, b in dm1s_f:
             dm1a[i:j,i:j] = a[:,:]
             dm1b[i:j,i:j] = b[:,:]
         return dm1a, dm1b
@@ -319,15 +323,20 @@ class PBCProductStateFCISolver (molProductStateFCISolver):
         return dm1a + dm1b
 
     def make_rdm2 (self, ci, norb_f, nelec_f, **kwargs):
-        dtype = np.array(ci).dtype
         norb = sum (norb_f)
-        dm2 = np.zeros ([norb,]*4, dtype=dtype)
         nj = np.cumsum (norb_f)
         ni = nj - norb_f
         dm1a, dm1b = self.make_rdm1s (ci, norb_f, nelec_f, **kwargs)
+        dm2_f = []
         for i, j, c, no, ne, s in zip (ni, nj, ci, norb_f, nelec_f, self.fcisolvers):
             nelec = self._get_nelec (s, ne)
-            dm2[i:j,i:j,i:j,i:j] = s.make_rdm2 (c, no, nelec)
+            dm = np.asarray(s.make_rdm2 (c, no, nelec))
+            dm2_f.append ((i, j, dm))
+        dtype = np.result_type (float, dm1a, dm1b,
+                                *[dm for _, _, dm in dm2_f])
+        dm2 = np.zeros ([norb,]*4, dtype=dtype)
+        for i, j, dm in dm2_f:
+            dm2[i:j,i:j,i:j,i:j] = dm
         dm1 = dm1a + dm1b
         for (i,j), (k,l) in combinations (zip (ni, nj), 2):
             d1_ij = dm1[i:j,i:j]
@@ -444,6 +453,12 @@ class PBCTransSymmImpureProductStateFCISolver(ImpureProductStateFCISolver):
             msg = f"ref_cell must be in [0, {len(self.fcisolvers)}); got {ref_cell}"
             raise ValueError(msg)
         self.ref_cell = int(ref_cell)
+        nroots_per_frag = [solver.nroots for solver in self.fcisolvers]
+        if any(nroots != nroots_per_frag[self.ref_cell]
+               for nroots in nroots_per_frag):
+            msg = "translation-symmetric fragments must have identical "
+            msg += f"local root counts; got {nroots_per_frag}"
+            raise ValueError(msg)
         self.phase_per_frag = self._normalize_phase_per_frag(phase_per_frag)
         if (pack_h1 is None) != (pack_h2 is None):
             raise ValueError("pack_h1 and pack_h2 must be provided together")
