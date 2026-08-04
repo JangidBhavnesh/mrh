@@ -774,16 +774,17 @@ class PBCLASCINoSymm(casci.PBCCASCI, LASCINoSymm):
         return dm1s
     
     def states_make_casdm1s_sub (self, ci=None, ncas_sub=None, nelecas_sub=None, **kwargs):
-        dtype = np.result_type(np.array(ci)[0].dtype, np.complex128)
         if ci is None: ci = self.ci
         if ncas_sub is None: ncas_sub = self.ncas_sub
         if nelecas_sub is None: nelecas_sub = self.nelecas_sub
+        dtype = np.complex128
         if ci is None:
             return [np.zeros ((self.nroots,2,ncas,ncas), dtype=dtype) for ncas in ncas_sub] 
         casdm1s = []
         for fcibox, ci_i, ncas, nelecas in zip (self.fciboxes, ci, ncas_sub, nelecas_sub):
             if ci_i is None:
-                dm1a = dm1b = np.zeros ((ncas, ncas), dtype=dtype)
+                shape = (self.nroots, ncas, ncas)
+                dm1a = dm1b = np.zeros (shape, dtype=dtype)
             else:
                 dm1a, dm1b = fcibox.states_make_rdm1s (ci_i, ncas, nelecas)
             casdm1s.append (np.stack ([dm1a, dm1b], axis=1))
