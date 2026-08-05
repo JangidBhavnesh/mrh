@@ -14,6 +14,7 @@ from pyscf.csf_fci.csfstring import count_all_csfs
 from mrh.my_pyscf.pbc.fci import direct_spin1_cplx
 from mrh.my_pyscf.pbc.fci import direct_spin1_cplx_opt
 from mrh.my_pyscf.pbc.fci import direct_spin0_cplx
+from mrh.my_pyscf.pbc.fci import cplx_csf_helper
 
 
 # Author: Bhavnesh Jangid
@@ -85,8 +86,8 @@ def make_hdiag_det (fci, h1e, eri, norb, nelec):
     args:
         fci: FCISolver object?
             I don't know why it's needed but keeping it consistent with actual csfsolver function.
-        h1e: np.ndarray of shape (norb, norb)
-            one-electron integrals
+        h1e: np.ndarray of shape (norb, norb) or (2, norb, norb)
+            spin-independent or spin-separated one-electron integrals
         eri: np.ndarray of shape (norb, norb, norb, norb)
             two-electron integrals in chemist's notation
         norb: int
@@ -119,7 +120,7 @@ def make_hdiag_det (fci, h1e, eri, norb, nelec):
             lib.logger.warning("The imaginary part of the Hamiltonian diagonal in the determinant basis "
                                "is not negligible: max imaginary part = %s", np.max(np.abs(hdiag_imag)))
             
-    hdiag.imag = IMAG_NOISE
+    hdiag.imag = 0
 
     hdiag_real = hdiag_imag = h1ea = h1eb =None
     
@@ -130,8 +131,8 @@ def make_hdiag_csf (h1e, eri, norb, nelec, transformer, hdiag_det=None, max_memo
     Make the diagonal of the Hamiltonian in the CSF basis. Basically, we have the Hamiltonian
     diagonal in the determinant basis (hdiag_det). We will transform it to the CSF basis.
     args:
-        h1e: np.ndarray of shape (norb, norb)
-            one-electron integrals
+        h1e: np.ndarray of shape (norb, norb) or (2, norb, norb)
+            spin-independent or spin-separated one-electron integrals
         eri: np.ndarray of shape (norb, norb, norb, norb)
             two-electron integrals in chemist's notation
         norb: int
@@ -198,8 +199,8 @@ def pspace(fci, h1e, eri, norb, nelec, transformer,
     args:
         fci: FCISolver object
             the FCI solver object, needed for logging and some other utilities.
-        h1e: np.ndarray of shape (norb, norb)
-            one-electron integrals
+        h1e: np.ndarray of shape (norb, norb) or (2, norb, norb)
+            spin-independent or spin-separated one-electron integrals
         eri: np.ndarray of shape (norb, norb, norb, norb)
             two-electron integrals in chemist's notation
         norb: int
@@ -231,8 +232,8 @@ def pspace(fci, h1e, eri, norb, nelec, transformer,
     # so I always keep the eri in the 4D format. 
     assert (h1e.dtype == eri.dtype), \
         "h1e and eri must have the same dtype"
-    assert h1e.shape == (norb, norb), \
-        "h1e must be a square matrix of shape (norb, norb)"
+    assert h1e.shape in ((norb, norb), (2, norb, norb)), \
+        "h1e must have shape (norb, norb) or (2, norb, norb)"
     assert eri.shape == (norb, norb, norb, norb), \
         "eri must be a 4D array of shape (norb, norb, norb, norb)"
 
@@ -371,18 +372,7 @@ def pspace(fci, h1e, eri, norb, nelec, transformer,
         raise (e) from None
 
     # It's time to transform determinant basis h0 to CSF basis
-    h0csf_real, csf_addr = transformer.mat_det2csf_confspace(h0.real, econf_addr)
-    h0csf_imag, csf_addr_temp = transformer.mat_det2csf_confspace(h0.imag, econf_addr)
-    h0 = None
-    h0 = h0csf_real.astype(h1e.dtype)
-    h0.real = h0csf_real
-    h0.imag = h0csf_imag
-
-    # Sanity Check
-    assert np.array_equal(csf_addr, csf_addr_temp), \
-        "Real and Imaginary part transformation resulted in different CSF "\
-        "addresses; There might be some problem"
-    csf_addr_temp = h0csf_real = h0csf_imag = None
+    h0, csf_addr = transformer.mat_det2csf_confspace(h0, econf_addr)
 
     t0 = lib.logger.timer_debug1(fci, "csf.pspace: transform pspace Hamiltonian into CSF basis", *t0)
 
@@ -472,36 +462,31 @@ def kernel(fci, h1e, eri, norb, nelec, smult=None, idx_sym=None, ci0=None,
     dtype = h1e.dtype
     if pspace_size >= ncsf_sym and not davidson_only:
         if ncsf_sym == 1:
-            civecreal = transformer.vec_csf2det (pv[:,0].real.reshape (1,1), normalize=False)
-            civec = civecreal.astype(dtype)
-            civec.real = civecreal
-            civec.imag = transformer.vec_csf2det (pv[:,0].imag.reshape (1,1), normalize=False)
-            civecreal = None
-            civec /= np.linalg.norm(civec)
-            return pw[0]+ecore, civec
+            civec = cplx_csf_helper.vec_csf2det_cplx(
+                transformer, pv[:,0].reshape(1, 1), normalize=True
+            )
+            # Parent real CSF solver does not reshape the output CI.
+            # I think that might be a bug, but I will keep it consistent with 
+            # the parent solver.
+            return pw[0]+ecore, civec #.reshape(na, nb)
         elif nroots > 1:
             civecout = []
             for i in range(nroots):
                 civeccsf = pv[:,i].T # Should I take the conj here?: I think no.
-                civecreal = transformer.vec_csf2det (civeccsf.real, normalize=False)
-                civec = civecreal.astype(dtype)
-                civec.real = civecreal
-                civec.imag = transformer.vec_csf2det (civeccsf.imag, normalize=False)
-                civec /= np.linalg.norm(civec)
+                civec = cplx_csf_helper.vec_csf2det_cplx(
+                    transformer, civeccsf, normalize=True
+                )
                 civecout.append(civec.reshape(na,nb))
-            civecreal = None
             return pw[:nroots]+ecore, civecout
         elif abs(pw[0]-pw[1]) > 1e-12:
             civeccsf = np.empty((ncsf_sym), dtype=dtype)
             civeccsf[:] = pv[:,0]
-            civecreal = transformer.vec_csf2det (civeccsf.real, normalize=False)
-            civec = civecreal.astype(dtype)
-            civec.real = civecreal
-            civec.imag = transformer.vec_csf2det (civeccsf.imag, normalize=False)
-            civecreal = None
-            civec /= np.linalg.norm(civec)
+            civec = cplx_csf_helper.vec_csf2det_cplx(
+                transformer, civeccsf, normalize=True
+            )
             return pw[0]+ecore, civec.reshape(na,nb)
-        return None
+        # For the degenerate single-root case, don't return from here. Same as
+        # the real CSF solver, let it continue to the Davidson solver.
 
     t0 = lib.logger.timer_debug1 (fci, "csf.kernel: throat-clearing", *t0)
     if idx_sym is None:
@@ -517,16 +502,13 @@ def kernel(fci, h1e, eri, norb, nelec, smult=None, idx_sym=None, ci0=None,
 
 
     def hop(x):
-        x_det = (transformer.vec_csf2det(x.real, normalize=False)
-                + 1j * transformer.vec_csf2det(x.imag, normalize=False))
-        if nroots > 1:
-            for i in range(nroots):
-                x_det[i] /= np.linalg.norm(x_det[i])
-        elif nroots == 1:
-            x_det /= np.linalg.norm(x_det)
+        x_det = cplx_csf_helper.vec_csf2det_cplx(
+            transformer, x, normalize=False
+        )
         hx = fci.contract_2e(h2e, x_det, norb, nelec, (link_indexa, link_indexb))
-        hx_out = (transformer.vec_det2csf(hx.real, normalize=False).ravel()
-                + 1j * transformer.vec_det2csf(hx.imag, normalize=False).ravel())
+        hx_out = cplx_csf_helper.vec_det2csf_cplx(
+            transformer, hx, normalize=False
+        )
         return hx_out.ravel()
 
     t0 = lib.logger.timer_debug1 (fci, "csf.kernel: make hop", *t0)
@@ -555,35 +537,17 @@ def kernel(fci, h1e, eri, norb, nelec, smult=None, idx_sym=None, ci0=None,
                 return x0
     else:
         if isinstance(ci0, np.ndarray) and ci0.size == na*nb:
-            ci0real = transformer.vec_det2csf (ci0.real.ravel (), normalize=False)
-            ci0imag = transformer.vec_det2csf (ci0.imag.ravel (), normalize=False)
-            ci0_out = np.asarray(ci0real, dtype=ci0.dtype)
-            ci0_out.real = ci0real
-            ci0_out.imag = ci0imag
-            ci0_out /= np.linalg.norm(ci0_out)
-            ci0real = ci0imag = None
+            ci0_out = cplx_csf_helper.vec_det2csf_cplx(
+                transformer, ci0.ravel(), normalize=True
+            )
             ci0 = [ci0_out]
         else:
             nrow = len (ci0)
-            def to_csf_vec (ci0):
-                ci0 = np.asarray (ci0).reshape (nrow, -1, order='C')
-                ci0 = np.ascontiguousarray (ci0)
-                if nrow==1: ci0 = ci0[0]
-                ci0 = transformer.vec_det2csf (ci0, normalize=False)
-                ci0 = np.asarray(ci0).reshape(nrow, -1)
-                return [c for c in ci0]
-            
-            ci0real = to_csf_vec (ci0.real)
-            ci0imag = to_csf_vec (ci0.imag)
-            ci0_out = []
-            for r, im in zip(ci0real, ci0imag):
-                c = np.asarray(r, dtype=np.complex128)
-                c.real = r
-                c.imag = im
-                c /= np.linalg.norm(c)
-                ci0_out.append(c)
-
-            ci0 = ci0_out
+            ci0 = np.asarray(ci0).reshape(nrow, -1, order='C')
+            ci0 = cplx_csf_helper.vec_det2csf_cplx(
+                transformer, ci0, normalize=True
+            )
+            ci0 = [c for c in np.asarray(ci0).reshape(nrow, -1)]
     
     t0 = lib.logger.timer_debug1 (fci, "csf.kernel: ci0 handling", *t0)
 
@@ -604,22 +568,14 @@ def kernel(fci, h1e, eri, norb, nelec, smult=None, idx_sym=None, ci0=None,
     if nroots > 1:
         cout = []
         for ciroot in c:
-            creal = transformer.vec_csf2det (ciroot.real, order='C', normalize=False)
-            cimag = transformer.vec_csf2det (ciroot.imag, order='C', normalize=False)
-            croot = creal.astype(dtype)
-            croot.real = creal
-            croot.imag = cimag
-            croot /= np.linalg.norm(croot)
+            croot = cplx_csf_helper.vec_csf2det_cplx(
+                transformer, ciroot, order='C', normalize=True
+            )
             cout.append(croot)
-        creal = cimag = None
     else:
-        creal = transformer.vec_csf2det (c.real, order='C', normalize=False)
-        cimag = transformer.vec_csf2det (c.imag, order='C', normalize=False)
-        cout = creal.astype(dtype)
-        cout.real = creal
-        cout.imag = cimag
-        cout /= np.linalg.norm(cout)
-        creal = cimag = None
+        cout = cplx_csf_helper.vec_csf2det_cplx(
+            transformer, c, order='C', normalize=True
+        )
         
     t0 = lib.logger.timer_debug1 (fci, "csf.kernel: transforming final ci vector", *t0)
     if nroots > 1:
@@ -668,16 +624,12 @@ class cplxCSFFCISolver:
     print_transformer_cache = realCSFFCISolver.print_transformer_cache
 
     def contract_2e(self, eris, fcivec, norb, nelec, link_index=None, **kwargs):
-        hc = super().contract_2e(eris, fcivec, norb, nelec, link_index=link_index, **kwargs)
+        hc = super().contract_2e(eris, fcivec, norb, nelec, 
+                                 link_index=link_index, **kwargs)
         if hasattr(eris, 'h1e_s'):
-            hc_real = direct_uhf.contract_1e ([eris.h1e_s.real, -eris.h1e_s.real], fcivec.real, norb, nelec, link_index)
-            hc_real -= direct_uhf.contract_1e ([eris.h1e_s.imag, -eris.h1e_s.imag], fcivec.imag, norb, nelec, link_index)
-            hc.real += hc_real.ravel() if hc.ndim == 1 else hc_real.reshape(hc.shape)
-            hc_real = None
-            hc_imag = direct_uhf.contract_1e ([eris.h1e_s.real, -eris.h1e_s.real], fcivec.imag, norb, nelec, link_index)
-            hc_imag += direct_uhf.contract_1e ([eris.h1e_s.imag, -eris.h1e_s.imag], fcivec.real, norb, nelec, link_index)
-            hc.imag += hc_imag.ravel() if hc.ndim == 1 else hc_imag.reshape(hc.shape)
-            hc_imag = None
+            hc_s = cplx_csf_helper.contract_1e([eris.h1e_s, -eris.h1e_s],
+                                               fcivec, norb, nelec, link_index,)
+            hc += hc_s.ravel() if hc.ndim == 1 else hc_s.reshape(hc.shape)
         return hc
     
     def pspace (self, h1e, eri, norb, nelec, hdiag_det=None, hdiag_csf=None, npsp=200, **kwargs):
