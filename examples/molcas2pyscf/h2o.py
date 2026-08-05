@@ -14,7 +14,6 @@ mo_coeff = get_mo_from_h5 (mol, 'h2o.rasscf.h5')
 mc = mcscf.CASSCF (scf.RHF (mol).run (), 6, 6).run (mo_coeff, natorb=True)
 print ("CASSCF(6,6)/cc-pVDZ energy of water from OpenMolcas orbital guess:", mc.e_tot)
 
-
 # ALong with the above, if one wants to use the OpenMolcas grid then
 # they would require the corresponding `GridFile` from OpenMolcas.
 # In OpenMolcas, one can generate the grid file using the following input:
@@ -26,6 +25,25 @@ print ("CASSCF(6,6)/cc-pVDZ energy of water from OpenMolcas orbital guess:", mc.
 '''
 
 mf = scf.RHF (mol).run ()
+
+mc = mcpdft.CASCI(mf, 'tPBE', 6, 6)
+mc.kernel(mo_coeff=mo_coeff)
+
+e_pdft = mc.e_tot
+e_cas = mc.e_mcscf
+
 mc = mcpdft.CASCI(mf, 'tPBE', 6, 6)
 mc = set_openmolcas_grid(mc, 'h2o.GridFile')
 mc.kernel(mo_coeff=mo_coeff,)
+
+e_pdft2 = mc.e_tot
+e_cas2 = mc.e_mcscf
+
+print("CAS energy of water from PySCF", e_cas)
+print("CAS energy of water from OpenMolcas", e_cas2)
+
+print("CAS-tPBE energy of water from PySCF grid:", e_pdft)
+print("CAS-tPBE energy of water from OpenMolcas grid:", e_pdft2)
+
+print("Difference in CAS energies:", e_cas - e_cas2)
+print("Difference in PDFT energies:", e_pdft - e_pdft2)
