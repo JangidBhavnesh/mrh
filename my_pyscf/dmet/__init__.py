@@ -18,17 +18,17 @@ def _energy_contribution(mydmet, dmet_mf, verbose=None):
     return None
 
 def get_fragment_mf(mf, lo_method='meta_lowdin', bath_tol=1e-6, density_fit=True,
-                    uhf=False, atmlst=None, atmlabel=None, verbose=None,**kwargs):
+                    atmlst=None, atmlabel=None, verbose=None,**kwargs):
     get_fragment_mf.__doc__ = _get_dmet_fragment.__doc__
     mydmet = _DMET(mf, lo_method=lo_method, bath_tol=bath_tol, density_fit=density_fit, 
-                   uhf=uhf, atmlst=atmlst, atmlabel=atmlabel, verbose=verbose, **kwargs)
+                   atmlst=atmlst, atmlabel=atmlabel, verbose=verbose, **kwargs)
     dmet_mf = mydmet.kernel()
     # Contributions.
     _energy_contribution(mydmet, dmet_mf, mf.verbose)
     return dmet_mf, mydmet
 
 def _get_dmet_fragment(mf, lo_method='meta_lowdin', bath_tol=1e-6, density_fit=True,
-                        uhf=False, atmlst=None, atmlabel=None, verbose=None,**kwargs):
+                        atmlst=None, atmlabel=None, verbose=None,**kwargs):
     '''
     Get the DMET Mean Field object
     Args:
@@ -40,8 +40,6 @@ def _get_dmet_fragment(mf, lo_method='meta_lowdin', bath_tol=1e-6, density_fit=T
             Bath tolerance
         density_fit : bool
             Whether to use density fitting or not
-        uhf : bool
-            Whether to return the UHF mean-field object.
         atmlst : list
             List of atom indices
         atmlabel : list
@@ -69,7 +67,7 @@ def _get_dmet_fragment(mf, lo_method='meta_lowdin', bath_tol=1e-6, density_fit=T
     elif hasattr(mf, 'kpts'):
         raise NotImplementedError("Use pDMET code")
 
-    return get_fragment_mf(mf, lo_method, bath_tol, density_fit, uhf, 
+    return get_fragment_mf(mf, lo_method, bath_tol, density_fit,
                            atmlst, atmlabel, verbose, **kwargs)
 
 runDMET = _get_dmet_fragment
