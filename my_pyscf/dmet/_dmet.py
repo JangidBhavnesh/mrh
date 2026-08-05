@@ -72,7 +72,7 @@ class _DMET:
     Density Matrix Embedding Theory
     '''
     def __init__(self, mf, lo_method='meta_lowdin', bath_tol=1e-6, atmlst=None, 
-                 density_fit=True, uhf=False, **kwargs):
+                 density_fit=True, **kwargs):
         _keys = ['loc_rdm1','mask_frag','mask_env','ao2lo','ao2eo',
                  'ao2co','lo2eo','lo2co','imp_nelec','core_nelec',]
         '''
@@ -122,7 +122,6 @@ class _DMET:
         self.atmlst = atmlst
         self.bath_tol = bath_tol
         self.density_fit = density_fit
-        self.uhf = uhf
        
     def do_localization_(self, **kwargs):
         '''
@@ -440,31 +439,6 @@ class _DMET:
 
         return emb_mf
 
-    def _get_dmet_umf(self):
-        '''
-        Extracting the unrestricted DMET mean-field object.
-        This is useful for the UHF calculations in the DMET environment.
-        Followed by that one can run the Unrestricted CCSD like methods.
-        '''
-        dmet_mf = self._get_dmet_mf()
-        dm0 = dmet_mf.make_rdm1()
-        if dm0.ndim == 2:
-            dm0 = np.asarray([0.5 * dm0, 0.5 * dm0])
-        elif dm0.ndim == 3:
-            pass
-        else:
-            raise ValueError("dm0 should be 2D or 3D array.")
-            
-        uhf_mf = scf.UHF(dmet_mf.mol).density_fit()
-        uhf_mf.get_hcore = lambda *args: dmet_mf.get_hcore(*args)
-        uhf_mf.get_ovlp  = lambda *args: dmet_mf.get_ovlp(*args)
-        uhf_mf.with_df._cderi = dmet_mf.with_df._cderi
-        uhf_mf.conv_tol = 1e-10
-        uhf_mf.max_cycle = 100
-        uhf_mf.energy_nuc = lambda *args: dmet_mf.energy_nuc(*args)
-        uhf_mf.kernel(dm0=dm0)
-        return uhf_mf
-    
     def runDMET(self):
         '''
         Kernel to run the DMET calculations
@@ -489,10 +463,8 @@ class _DMET:
         self.get_imp_nelecs()
         self.get_core_elecs()
         self.dump_flags()
-        if self.uhf:
-            dmet_mf = self._get_dmet_umf()
-        else:
-            dmet_mf = self._get_dmet_mf()
+        self.dump_flags()
+        dmet_mf = self._get_dmet_mf()
         return dmet_mf
     
     def _get_core_contribution(self, ao2eo=None, ao2co=None):
