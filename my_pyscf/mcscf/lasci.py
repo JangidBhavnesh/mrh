@@ -361,10 +361,10 @@ def get_init_guess_ci (las, mo_coeff=None, h2eff_sub=None, ci0=None, eri_cas=Non
 def get_init_guess_ci_aufbau0 (las, mo_coeff=None, ci0=None):
     if mo_coeff is None: mo_coeff = las.mo_coeff
     if ci0 is None: ci0 = [[None for i in range (las.nroots)] for j in range (las.nfrags)]
-    # nmo = mo_coeff.shape[-1]
+    nmo = mo_coeff.shape[-1]
     ncore, ncas = las.ncore, las.ncas
-    # nocc = ncore + ncas
-    # casdm1frs = []
+    nocc = ncore + ncas
+    casdm1frs = []
     for ix, (fcibox, norb, nelecas) in enumerate (zip (las.fciboxes,las.ncas_sub,las.nelecas_sub)):
         i = sum (las.ncas_sub[:ix])
         j = i + norb
