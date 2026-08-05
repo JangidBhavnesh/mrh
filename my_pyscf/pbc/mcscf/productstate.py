@@ -3,11 +3,13 @@ from scipy import linalg
 from itertools import combinations
 
 from pyscf import lib
-from pyscf.scf.addons import canonical_orth_
 from pyscf.fci import cistring
 
 from mrh.my_pyscf.pbc.fci.csf_cplx import cplxCSFFCISolver as CSFFCISolver
-from mrh.my_pyscf.mcscf.productstate import ProductStateFCISolver as molProductStateFCISolver, state_average_fcisolver
+from mrh.my_pyscf.mcscf.productstate import (
+    ProductStateFCISolver as molProductStateFCISolver,
+    ImpureProductStateFCISolver as molImpureProductStateFCISolver,
+)
 
 # Author: Bhavnesh Jangid
 
@@ -161,57 +163,6 @@ class PBCProductStateFCISolver (molProductStateFCISolver):
                 grad.append (chc[np.tril_indices (nroots,k=-1)])
         return np.concatenate (grad)
 
-    def energy_elec (self, h1, h2, ci, norb_f, nelec_f, ecore=0, **kwargs):
-        dm1s = np.stack (self.make_rdm1s (ci, norb_f, nelec_f), axis=0)
-        if h1.ndim < 3: h1 = np.stack ([h1, h1], axis=0)
-        dm2 = self.make_rdm2 (ci, norb_f, nelec_f)
-        energy_tot = (ecore + np.tensordot (h1, dm1s, axes=3)
-                        + 0.5*np.tensordot (h2, dm2, axes=4))
-        return energy_tot
-
-    def project_hfrag (self, h1, h2, ci, norb_f, nelec_f, 
-                       ecore=0, dm1s=None, dm2=None, **kwargs):
-        '''
-        Project the h1e and h2e on the fragment space.
-        '''
-        if dm1s is None:
-            dm1s = np.stack (self.make_rdm1s (ci, norb_f, nelec_f), axis=0)
-        if h1.ndim < 3:
-            h1 = np.stack ([h1,h1], axis=0)
-        if dm2 is None:
-            dm2 = self.make_rdm2 (ci, norb_f, nelec_f)
-        energy_tot = (ecore + np.tensordot (h1, dm1s, axes=3)
-                        + 0.5*np.tensordot (h2, dm2, axes=4))
-        v1  = np.tensordot (dm1s, h2, axes=2)
-        v1 += v1[::-1] # ja + jb
-        v1 -= np.tensordot (dm1s, h2, axes=((1,2),(2,1)))
-        f1 = h1 + v1
-        h1eff = []
-        h0eff = []
-        nj = np.cumsum (norb_f)
-        ni = nj - norb_f
-        for i, j in zip (ni, nj):
-            dm1s_i = dm1s[:,i:j,i:j]
-            dm2_i = dm2[i:j,i:j,i:j,i:j]
-            # v1 self-interaction
-            h2_i = h2[i:j,i:j,:,:]
-            v1_i = np.tensordot (dm1s_i, h2_i, axes=2)
-            v1_i += v1_i[::-1] # ja + jb
-            h2_i = h2[:,i:j,i:j,:]
-            v1_i -= np.tensordot (dm1s_i, h2_i, axes=((1,2),(2,1)))
-            # cancel off-diagonal energy double-counting
-            e_i = energy_tot - np.tensordot (dm1s, v1_i, axes=3) # overcorrects
-            # cancel h1eff double-counting
-            v1_i = v1_i[:,i:j,i:j] 
-            h1eff.append (f1[:,i:j,i:j]-v1_i)
-            # cancel diagonal energy double-counting
-            h1_i = h1[:,i:j,i:j] - v1_i # v1_i fixes overcorrect
-            h2_i = h2[i:j,i:j,i:j,i:j]
-            e_i -= (np.tensordot (h1_i, dm1s_i, axes=3)
-              + 0.5*np.tensordot (h2_i, dm2_i, axes=4))
-            h0eff.append (e_i)
-        return h1eff, h0eff, ci
-
     def make_rdm1s (self, ci, norb_f, nelec_f, **kwargs):
         norb = sum (norb_f)
         nj = np.cumsum (norb_f)
@@ -239,10 +190,6 @@ class PBCProductStateFCISolver (molProductStateFCISolver):
             dm1a[i:j,i:j] = a[:,:]
             dm1b[i:j,i:j] = b[:,:]
         return dm1a, dm1b
-
-    def make_rdm1 (self, ci, norb_f, nelec_f, **kwargs):
-        dm1a, dm1b = self.make_rdm1s (ci, norb_f, nelec_f, **kwargs)
-        return dm1a + dm1b
 
     def make_rdm2 (self, ci, norb_f, nelec_f, **kwargs):
         norb = sum (norb_f)
@@ -284,20 +231,7 @@ class ImpureProductStateFCISolver (PBCProductStateFCISolver):
 
     over orthonormal sets of CI vectors {nK} for fragment K.'''
 
-    def __init__(self, fcisolvers, stdout=None, verbose=0, lroots=None, lweights=None, **kwargs):
-        PBCProductStateFCISolver.__init__(self, fcisolvers, stdout=stdout, verbose=verbose, **kwargs)
-        if lweights is None:
-            if lroots is not None:
-                lweights = []
-                for lroot in lroots:
-                    l = np.zeros (lroot)
-                    l[0] = 1
-                    lweights.append (l)
-            else:
-                lweights = [[.5,.5],]*len(fcisolvers)
-        for ix, (fcisolver, weights) in enumerate (zip (self.fcisolvers, lweights)):
-            if len (weights) > 1:
-                self.fcisolvers[ix] = state_average_fcisolver (fcisolver, weights=weights)
+    __init__ = molImpureProductStateFCISolver.__init__
 
 
 class PBCTransSymmImpureProductStateFCISolver(ImpureProductStateFCISolver):
