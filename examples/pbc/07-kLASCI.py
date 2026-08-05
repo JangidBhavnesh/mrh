@@ -68,5 +68,5 @@ klas_trans = mcscf.KLASCI(kmf, 8, (8, 6), kmesh=kmesh1D, trans_sym=True,)
 e_klas_trans = klas_trans.kernel(np.array(lo_coeff, copy=True),)[1]
 
 print("k-RHF energy  : ", kmf.e_tot.real)
-print("k-LASCI energy: ", e_klas_no_trans.real)
-print("k-LASCI energy: ", e_klas_trans.real)
+print("k-LASCI energy (without translation symmetry): ", e_klas_no_trans.real)
+print("k-LASCI energy (with translation symmetry): ", e_klas_trans.real)
