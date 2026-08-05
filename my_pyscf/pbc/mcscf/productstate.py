@@ -62,63 +62,6 @@ class PBCProductStateFCISolver (molProductStateFCISolver):
             ecore=ecore, efinal=e, **kwargs)
         return converged, energy_elec, ci1
 
-    def get_init_guess (self, ci0, norb_f, nelec_f, h1, h2, nroots=None):
-        '''Generate CI guess vectors for all fragments.
-
-        Args:
-            ci0: list of length ncells or None
-                Contains either None or ndarrays of guess CI vectors. Any new guess CI vectors
-                constructed by this function are constrained to be orthogonal to those already
-                provided here, if any.
-            norb_f: list of length ncells of integers
-                Number of orbitals in each fragment
-            nelec_f: list of length ncells of integers
-                Number of electrons (in reference state) in each fragment
-            h1: ndarray of shape (ncas,ncas) or (2,ncas,ncas)
-                One-electron Hamiltonian amplitudes
-            h2: ndarray of shape (ncas,ncas,ncas,ncas)
-                Two-electron Hamiltonian amplitudes
-
-        Returns:
-            ci1: list of length ncells of ndarrays
-                Orthonormal guess CI vectors. Any vectors present in ci0 are preserved unaltered.
-        '''
-        if ci0 is None: ci0 = [None for i in range (len (norb_f))]
-        ci1 = [c for c in ci0] # reference safety
-        if h1.ndim < 3: h1 = np.stack ([h1, h1], axis=0)
-        for ix, (no, ne, solver) in enumerate (zip (norb_f, nelec_f, self.fcisolvers)):
-            solver.check_transformer_cache ()
-            snroots = solver.nroots if nroots is None else min (nroots, solver.transformer.ncsf)
-            nelec = self._get_nelec (solver, ne)
-            i = sum (norb_f[:ix])
-            j = i + norb_f[ix]
-            hdiag_csf = solver.make_hdiag_csf (h1[:,i:j,i:j], h2[i:j,i:j,i:j,i:j],
-                                               no, nelec)
-            ci1_guess = solver.get_init_guess (no, nelec, snroots, hdiag_csf)
-            na = cistring.num_strings (no, nelec[0])
-            nb = cistring.num_strings (no, nelec[1])
-            if ci1[ix] is None:
-                ci1[ix] = ci1_guess
-            elif np.asarray (ci1[ix]).reshape (-1,na*nb).shape[0] < snroots:
-                ci1_inp = np.asarray (ci1[ix]).reshape (-1,na*nb)
-                ci1_guess = np.asarray (ci1_guess).reshape (-1,na*nb)
-                x = np.append (ci1_inp, ci1_guess, axis=0)
-                x = canonical_orth_(x.conj () @ x.T).T @ x
-                # ^ an orthonormal basis
-                assert (x.shape[0] >= snroots)
-                x2inp = x.conj () @ ci1_inp.T
-                ninp = ci1_inp.shape[0]
-                u, svals, vh = linalg.svd (x2inp, full_matrices=True)
-                u[:,:ninp] = u[:,:ninp] @ vh
-                ci1_new = u.T @ x
-                nnew = ci1_new.shape[0]
-                ovlp = ci1_new.conj () @ ci1_inp.T
-                assert (np.all (np.abs (ovlp[:ninp,:ninp] - np.eye (ninp)) < 1e-3)), '{}'.format (ovlp)
-                ovlp = (ci1_new.conj () @ ci1_new.T)
-                assert (np.all (np.abs (ovlp - np.eye (nnew)) < 1e-3)), '{}'.format (ovlp)
-                ci1[ix] = ci1_new[:snroots].reshape (snroots, na, nb)
-        return self._check_init_guess (ci1, norb_f, nelec_f, nroots=nroots)
-
     def _check_init_guess (self, ci0, norb_f, nelec_f, nroots=None):
         ci1 = []
         if ci0 is None: ci0 = [None for i in range (len (norb_f))]
@@ -178,27 +121,6 @@ class PBCProductStateFCISolver (molProductStateFCISolver):
                 log.info ('Grad vector leading components (%d/%d):', i, nroots)
                 for l, c in zip (g_lbls[i], g_coeffs[i]):
                     log.info ('%s : %e', l, c)
-
-    def _1shot (self, it, h0eff, h1eff, h2, e0, ci0, norb_f, nelec_f, orbsym=None,
-                serialfrag=False, **kwargs):
-        ncells = len (norb_f)
-        nj = np.cumsum (norb_f)
-        ni = nj - norb_f
-        zipper = [h0eff, h1eff, ci0, norb_f, nelec_f, self.fcisolvers, ni, nj]
-        e1 = [e for e in e0]
-        ci1 = [c for c in ci0]
-
-        for ifrag, (h0e, h1e, c, no, ne, solver, i, j) in enumerate (zip (*zipper)):
-            if serialfrag and it % ncells != ifrag: continue
-            h2e = h2[i:j,i:j,i:j,i:j]
-            osym = getattr (solver, 'orbsym', None)
-            if orbsym is not None: osym=orbsym[i:j]
-            nelec = self._get_nelec (solver, ne)
-            e, c1 = solver.kernel (h1e, h2e, no, nelec, ci0=c, ecore=h0e,
-                orbsym=osym, **kwargs)
-            e1[ifrag] = e
-            ci1[ifrag] = c1
-        return e1, ci1
 
     def _get_grad (self, h1eff, h2, ci, norb_f, nelec_f, orbsym=None,
             **kwargs):
