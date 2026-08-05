@@ -270,6 +270,48 @@ def make_hdiag(h1e, eri, norb, nelec, compress=False):
     hdiag_real = None
     return hdiag
 
+
+def trans_rdm1s(cibra, ciket, norb, nelec, link_index=None):
+    r'''Spin-separated complex transition 1-RDMs.'''
+    link_index = _unpack(norb, nelec, link_index)
+    dm1a = rdm_helper.trans_rdm1_spin1(
+        'FCItrans_rdm1a_cplx', cibra, ciket, norb, nelec, link_index)
+    dm1b = rdm_helper.trans_rdm1_spin1(
+        'FCItrans_rdm1b_cplx', cibra, ciket, norb, nelec, link_index)
+    return dm1a, dm1b
+
+
+def trans_rdm1(cibra, ciket, norb, nelec, link_index=None):
+    r'''Spin-summed complex transition 1-RDM.'''
+    dm1a, dm1b = trans_rdm1s(cibra, ciket, norb, nelec, link_index)
+    return dm1a + dm1b
+
+
+def trans_rdm12s(cibra, ciket, norb, nelec, link_index=None, reorder=True):
+    r'''Spin-separated complex transition 1- and 2-RDMs.'''
+    link_index = _unpack(norb, nelec, link_index)
+    dm1a, dm2aa = rdm_helper.trans_rdm12_spin1(
+        'FCItdm12kern_a_cplx', cibra, ciket, norb, nelec, link_index)
+    dm1b, dm2bb = rdm_helper.trans_rdm12_spin1(
+        'FCItdm12kern_b_cplx', cibra, ciket, norb, nelec, link_index)
+    _, dm2ab = rdm_helper.trans_rdm12_spin1(
+        'FCItdm12kern_ab_cplx', cibra, ciket, norb, nelec, link_index)
+    _, dm2ba = rdm_helper.trans_rdm12_spin1(
+        'FCItdm12kern_ab_cplx', ciket, cibra, norb, nelec, link_index)
+    dm2ba = dm2ba.transpose(3, 2, 1, 0).conj()
+    if reorder:
+        dm1a, dm2aa = rdm_helper.reorder_tdm(dm1a, dm2aa, inplace=True)
+        dm1b, dm2bb = rdm_helper.reorder_tdm(dm1b, dm2bb, inplace=True)
+    return (dm1a, dm1b), (dm2aa, dm2ab, dm2ba, dm2bb)
+
+
+def trans_rdm12(cibra, ciket, norb, nelec, link_index=None, reorder=True):
+    r'''Spin-summed complex transition 1- and 2-RDM.'''
+    (dm1a, dm1b), (dm2aa, dm2ab, dm2ba, dm2bb) = trans_rdm12s(
+        cibra, ciket, norb, nelec, link_index=link_index, reorder=reorder)
+    return dm1a + dm1b, dm2aa + dm2ab + dm2ba + dm2bb
+
+
 def make_rdm1s(fcivec, norb, nelec, link_index=None):
     make_rdm1s.__doc__ = direct_spin1.make_rdm1s.__doc__ + '''
     Compute the spin-separated 1-RDMs for a complex FCI vector using the backend C function.
@@ -348,6 +390,33 @@ def make_rdm12_py(fcivec, norb, nelec, link_index=None, reorder=True):
     rdm1 = dm1a + dm1b
     rdm2 = dm2aa + dm2bb + dm2ab + dm2ab.transpose(2, 3, 0, 1)
     return rdm1.conj().T, rdm2
+
+
+def make_tdm1s_py(cibra, ciket, norb, nelec, link_index=None):
+    r'''Python implementation of spin-separated complex transition 1-RDMs.'''
+    link_index = _unpack(norb, nelec, link_index)
+    return rdm_helper.make_tdm1s_py(
+        cibra, ciket, norb, nelec, link_index=link_index)
+
+
+def make_tdm12s_py(cibra, ciket, norb, nelec, link_index=None,
+                   reorder=True):
+    r'''Python implementation of spin-separated complex transition RDMs.'''
+    link_index = _unpack(norb, nelec, link_index)
+    return rdm_helper.make_tdm12s_py(
+        cibra, ciket, norb, nelec, link_index=link_index, reorder=reorder)
+
+
+def trans_rdm1s_py(cibra, ciket, norb, nelec, link_index=None):
+    r'''Alias matching the PySCF transition-RDM naming convention.'''
+    return make_tdm1s_py(cibra, ciket, norb, nelec, link_index=link_index)
+
+
+def trans_rdm12s_py(cibra, ciket, norb, nelec, link_index=None,
+                    reorder=True):
+    r'''Alias matching the PySCF transition-RDM naming convention.'''
+    return make_tdm12s_py(
+        cibra, ciket, norb, nelec, link_index=link_index, reorder=reorder)
 
 def _make_diag_precond(hdiag, level_shift=1e-3):
     '''
@@ -629,6 +698,22 @@ class FCISolver(direct_spin1.FCISolver):
     def make_rdm12(self, fcivec, norb, nelec, link_index=None, reorder=True):
         return make_rdm12(fcivec, norb, nelec, link_index, reorder)
 
+    def trans_rdm1s(self, cibra, ciket, norb, nelec, link_index=None):
+        return trans_rdm1s(cibra, ciket, norb, nelec, link_index)
+
+    def trans_rdm1(self, cibra, ciket, norb, nelec, link_index=None):
+        return trans_rdm1(cibra, ciket, norb, nelec, link_index)
+
+    def trans_rdm12s(self, cibra, ciket, norb, nelec, link_index=None,
+                     reorder=True):
+        return trans_rdm12s(
+            cibra, ciket, norb, nelec, link_index, reorder)
+
+    def trans_rdm12(self, cibra, ciket, norb, nelec, link_index=None,
+                    reorder=True):
+        return trans_rdm12(
+            cibra, ciket, norb, nelec, link_index, reorder)
+
     def get_init_guess(self, norb, nelec, nroots, hdiag):
         return get_init_guess_cplx(norb, nelec, nroots, hdiag)
     
@@ -643,6 +728,22 @@ class FCISolver(direct_spin1.FCISolver):
     
     def make_rdm12_py(self, fcivec, norb, nelec, link_index=None, reorder=True):
         return make_rdm12_py(fcivec, norb, nelec, link_index, reorder)
+
+    def make_tdm1s_py(self, cibra, ciket, norb, nelec, link_index=None):
+        return make_tdm1s_py(cibra, ciket, norb, nelec, link_index)
+
+    def make_tdm12s_py(self, cibra, ciket, norb, nelec, link_index=None,
+                       reorder=True):
+        return make_tdm12s_py(
+            cibra, ciket, norb, nelec, link_index, reorder)
+
+    def trans_rdm1s_py(self, cibra, ciket, norb, nelec, link_index=None):
+        return trans_rdm1s_py(cibra, ciket, norb, nelec, link_index)
+
+    def trans_rdm12s_py(self, cibra, ciket, norb, nelec, link_index=None,
+                        reorder=True):
+        return trans_rdm12s_py(
+            cibra, ciket, norb, nelec, link_index, reorder)
     
     def contract_ss(self, fcivec, norb, nelec):
         nelec = _unpack_nelec(nelec, self.spin)
