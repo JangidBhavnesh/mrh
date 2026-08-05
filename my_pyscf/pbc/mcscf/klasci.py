@@ -520,38 +520,6 @@ class PBCLASCINoSymm(casci.PBCCASCI, LASCINoSymm):
         kpts: array_like, optional
             k-points for the calculation.
     '''
-      
-    # def __init__(self, kmf, ncas, nelecas, ncore=None, spin_mult=None, 
-    #              kmesh=None, kpts=None):
-    #     self.spin_mult = spin_mult
-    #     assert kmesh is not None
-    #     nkpts = np.prod(kmesh)           
-    #     self.ncas_sub = nkpts * (ncas,)
-    #     if isinstance(nelecas, int):
-    #         self.nelecas_sub = nkpts * (nelecas,)
-    #     elif isinstance(nelecas, tuple) and len(nelecas) == 2:
-    #         self.nelecas_sub = nkpts * (nelecas,)
-    #     self.spin_sub = spin_mult * nkpts if spin_mult is not None else None
-    #     self.nroots = 1
-    #     # Initialize the parent classes.
-    #     _PBCCASCIForLAS.__init__(self, kmf, ncas, nelecas, ncore=ncore)
-    #     LASCINoSymm.__init__(self, kmf, ncas=self.ncas_sub, nelecas=self.nelecas_sub, ncore=ncore, spin_sub=self.spin_sub)
-
-    #     self.kmesh = kmesh
-    #     self.kpts = kpts if kpts is not None else kmf.kpts
-    #     nkpts = len(self.kpts)
-    #     assert nkpts == np.prod(kmesh), "kmesh and kpts do not match."
-
-    #     # Making sure this is for an unit cell, not summed over multiple unit cells.
-    #     self.ncas = ncas
-    #     self.nelecas = nelecas
-
-    #     # the total active space should be stored as ncastot, nelecstot
-    #     self.ncastot = sum(self.ncas_sub)
-    #     if isinstance(self.nelecas_sub[0], int):
-    #         self.nelecstot = sum(self.nelecas_sub)
-    #     else:
-    #         self.nelecstot = tuple(map(sum, zip(*self.nelecas_sub)))
 
     # Currently initializing the LASCINosymm is breaking a lot of things in
     # PBCCASCI module. As an example, the fcisolver class is reassigned to direct_spin1 or the
@@ -559,21 +527,7 @@ class PBCLASCINoSymm(casci.PBCCASCI, LASCINoSymm):
     # then register the functions that I need from PBCCASCIForLAS to this class. 
     # This is not a clean way to do it but it is the fastest way to get it working. I will refactor this later.
 
-    @property
-    def kpts(self):
-        '''K-points used by both the mean-field and k-LASCI calculations.'''
-        return np.array(self._scf.kpts, copy=True)
 
-    @kpts.setter
-    def kpts(self, value):
-        value = np.asarray(value)
-        kmf_kpts = np.asarray(self._scf.kpts)
-        if (value.shape != kmf_kpts.shape
-                or not np.allclose(value, kmf_kpts, atol=1e-10, rtol=0.0)):
-            msg = "kpts must match kmf.kpts in shape, ordering, and values; "
-            msg += f"got shapes {value.shape} and {kmf_kpts.shape}"
-            raise ValueError(msg)
-    
     def __init__(self, kmf, ncas, nelecas, ncore=None, spin_mult=None,
                  kmesh=None, kpts=None, frozen=None, frozen_ci=None, **kwargs):
         self.init_guess_ci = 'aufbau1'
@@ -634,6 +588,21 @@ class PBCLASCINoSymm(casci.PBCCASCI, LASCINoSymm):
         solver = csf_solver(self.cell, smult)
         solver.spin = nelec[0] - nelec[1]
         return get_h1e_zipped_fcisolver(state_average_n_mix(self, [solver], [1.0]).fcisolver)
+
+    @property
+    def kpts(self):
+        '''K-points used by both the mean-field and k-LASCI calculations.'''
+        return np.array(self._scf.kpts, copy=True)
+
+    @kpts.setter
+    def kpts(self, value):
+        value = np.asarray(value)
+        kmf_kpts = np.asarray(self._scf.kpts)
+        if (value.shape != kmf_kpts.shape
+                or not np.allclose(value, kmf_kpts, atol=1e-10, rtol=0.0)):
+            msg = "kpts must match kmf.kpts in shape, ordering, and values; "
+            msg += f"got shapes {value.shape} and {kmf_kpts.shape}"
+            raise ValueError(msg)
 
     # Register these functions.
     get_sym_fr = LASCINoSymm.get_sym_fr
