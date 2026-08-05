@@ -4,19 +4,15 @@ from pyscf import lib
 from pyscf.pbc.df.df_ao2mo import ao2mo_7d, gamma_point, unique
 from pyscf.pbc.lib import kpts_helper
 from pyscf.ao2mo import _ao2mo
-from pyscf.ao2mo.incore import _conc_mos
+from pyscf.ao2mo.incore import iden_coeffs, _conc_mos
 
 # Author: Bhavnesh Jangid
-
 
 def ao2mo_7d(mydf, mo_coeff_kpts, kpts=None, factor=1, out=None):
     '''
     Optimized function to perform the AO2MO transformation.
     Block AO -> Block MO basis. This is optimized version of the one in
     the pyscf.pbc.df.df_ao2mo module.
-
-    See the pyscf.pbc.df.df_ao2mo.ao2mo_7d function for more details on the 
-    parameters.
     '''
     cell = mydf.cell
     if kpts is None:
@@ -58,8 +54,6 @@ def ao2mo_7d(mydf, mo_coeff_kpts, kpts=None, factor=1, out=None):
     # Create a temporary file to store the intermediate zkl arrays for 
     # each unique q = kj - ki.
     # This will save the expensive zkl computation for each (ki, kj) pair in the same q group.
-
-    # Create a temporary HDF5 file to store the intermediate zkl arrays for each unique q = kj - ki.
     feri = lib.H5TmpFile()
     for uniq_id, kpt in enumerate(uniq_kpts):
         adapted_ji_idx = np.where(uniq_inverse == uniq_id)[0]
@@ -161,7 +155,9 @@ if __name__ == "__main__":
     cell.verbose = 4
     cell.build()
 
-    kmesh = [10, 1, 1]
+    # Use a small 1D kmesh first. Increase to [6,1,1] or [8,1,1]
+    # if you want a clearer caching advantage.
+    kmesh = [4, 4, 4]
     kpts = cell.make_kpts(kmesh)
     nkpts = len(kpts)
 
@@ -169,8 +165,8 @@ if __name__ == "__main__":
     # Mean-field calculation.
     # ------------------------------------------------------------
     kmf = scf.KRHF(cell, kpts, exxdiv=None).density_fit()
-    # kmf.with_df._cderi_to_save = "cderi.diamond.h5"
-    kmf.with_df._cderi = "cderi.diamond.h5"
+    kmf.with_df._cderi_to_save = "cderi.diamond.h5"
+    # kmf.with_df._cderi = "cderi.diamond.h5"
     kmf.conv_tol = 1e-1
 
     t0 = timer_start()
@@ -190,18 +186,16 @@ if __name__ == "__main__":
     t0 = timer_start()
     eri_ref = kmf.with_df.ao2mo_7d(mo_coeff_kpts, kpts=kpts)
     timer_stop("Original PySCF ao2mo_7d", t0)
-    timer_new = time.perf_counter() - t
-    
-    
+    print("Original PySCF ao2mo_7d wall time =", time.perf_counter() - t, "s")
     # ------------------------------------------------------------
     # Optimized cached ao2mo_7d defined above.
     # ------------------------------------------------------------
+
     t = time.perf_counter()
     t0 = timer_start()
     eri_new = ao2mo_7d(kmf.with_df, mo_coeff_kpts, kpts=kpts)
     timer_stop("Cached zkl ao2mo_7d", t0)
-    timer_cached = time.perf_counter() - t
-
+    print("Cached zkl ao2mo_7d wall time =", time.perf_counter() - t, "s")
 
     # ------------------------------------------------------------
     # Check correctness.
@@ -212,10 +206,8 @@ if __name__ == "__main__":
 
     print()
     print("Correctness check:")
-    print(f"  max abs diff = {diff:.2e}")
-    print(f"  relative diff = {rel:.2e}")
-    print(f"Original PySCF    = {timer_new:.2f} s")
-    print(f"Optimized version = {timer_cached:.2f} s")
-    print(f"Speedup factor = {timer_new / timer_cached:.2f}")
+    print("  max abs diff =", diff)
+    print("  relative diff =", rel)
+
     assert np.allclose(eri_ref, eri_new, atol=1e-9, rtol=1e-9)
     print("AO2MO cached implementation agrees with original PySCF ao2mo_7d.")
