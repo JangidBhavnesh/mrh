@@ -3,6 +3,7 @@
 import numpy as np
 import scipy.linalg
 from functools import reduce
+from itertools import product
 
 from pyscf import lib
 from pyscf.fci import cistring
@@ -104,10 +105,9 @@ def kLASCI(kmf, ncas, nelecas, ncore=None, spin_mult=None, kmesh=None,
     # The CI vectors, mo_coeff, hamiltonian everything would be packed different in this
     # class.
     klas_cls = PBCLASCITransSymm if trans_sym else PBCLASCINoSymm
-    klas = klas_cls(
-        kmf, ncas, nelecas, ncore=ncore, spin_mult=spin_mult,
-        kmesh=kmesh, kpts=kpts,
-    )
+    klas = klas_cls(kmf, ncas, nelecas, ncore=ncore, spin_mult=spin_mult,
+                    kmesh=kmesh, kpts=kpts,)
+
     if trans_sym:
         klas.set_ref_cell(ref_cell)
 
@@ -159,16 +159,18 @@ def h1e_for_cas(mc, mo_coeff=None, ncas=None, ncore=None):
     assert nkpts == ncell
     assert np.prod(kmesh) == nkpts
 
-    h1ao_R = np.zeros((ncell, nao, ncell, nao), dtype=dtype)
-
-    for ik, k in enumerate(kpts):
-        hk = h1ao_k[ik]
-        for iR, Rv in enumerate(R_cart):
-            for iS, Sv in enumerate(R_cart):
-                phase = np.exp(1j * np.dot(k, Rv - Sv))
-                h1ao_R[iR, :, iS, :] += phase * hk
-
-    h1ao_R /= nkpts
+    # h1ao_R = np.zeros((ncell, nao, ncell, nao), dtype=dtype)
+    # for ik, k in enumerate(kpts):
+    #     hk = h1ao_k[ik]
+    #     for iR, Rv in enumerate(R_cart):
+    #         for iS, Sv in enumerate(R_cart):
+    #             phase = np.exp(1j * np.dot(k, Rv - Sv))
+    #             h1ao_R[iR, :, iS, :] += phase * hk
+    # h1ao_R /= nkpts
+    phase_kR = np.exp(1j * np.einsum('kx,Rx->kR', kpts, R_cart))
+    h1ao_R = np.einsum('kR,kS,kij->RiSj',
+                       phase_kR, phase_kR.conj(), h1ao_k,
+                       optimize=True,) / nkpts
     h1ao_R = h1ao_R.reshape(nkpts*nao, nkpts*nao)
 
     wannier_orb, R_indices_check = get_wannier_orbs(mc._scf, kmesh, mo_act_kpts)[:2]
@@ -268,14 +270,20 @@ def convert_h1e_mo_k_to_wann(kmf, kmesh, h1e_mo_k):
     assert h1e_mo_k.shape[0] == nkpts
     assert h1e_mo_k.shape[1] == h1e_mo_k.shape[2]
 
-    h1eff_R = np.zeros((ncell, norb, ncell, norb), dtype=dtype)
-    for ik, k in enumerate(kpts):
-        hk = h1e_mo_k[ik]
-        for iR, Rv in enumerate(R_cart):
-            for iS, Sv in enumerate(R_cart):
-                phase = np.exp(1j * np.dot(k, Rv - Sv))
-                h1eff_R[iR, :, iS, :] += phase * hk
-    h1eff_R /= nkpts
+    # h1eff_R = np.zeros((ncell, norb, ncell, norb), dtype=dtype)
+    # for ik, k in enumerate(kpts):
+    #     hk = h1e_mo_k[ik]
+    #     for iR, Rv in enumerate(R_cart):
+    #         for iS, Sv in enumerate(R_cart):
+    #             phase = np.exp(1j * np.dot(k, Rv - Sv))
+    #             h1eff_R[iR, :, iS, :] += phase * hk
+    # h1eff_R /= nkpts
+    phase_kR = np.exp(1j * np.einsum('kx,Rx->kR', kpts, R_cart))
+    h1eff_R = np.einsum(
+        'kR,kS,kij->RiSj',
+        phase_kR, phase_kR.conj(), h1e_mo_k,
+        optimize=True,
+    ) / nkpts
     h1eff_R = h1eff_R.reshape(ncell * norb, ncell * norb)
     return h1eff_R
 
@@ -473,15 +481,21 @@ def convert_dmao_R_to_dmao_k(kmf, kmesh, dm_R):
     assert nao == cell.nao_nr()
 
     dm_R = dm_R.reshape(nkpts, nao, nkpts, nao)
-    dm_k = np.zeros((nkpts, nao, nao), dtype=dtype)
-
-    for ik, k in enumerate(kpts):
-        for iR, Rv in enumerate(R_cart):
-            phase_R = np.exp(-1j * np.dot(k, Rv))
-            for iS, Sv in enumerate(R_cart):
-                phase_S = np.exp(+1j * np.dot(k, Sv))
-                dm_k[ik] += phase_R * dm_R[iR, :, iS, :] * phase_S
-    dm_k /= nkpts # Remember the normalization.
+    # dm_k = np.zeros((nkpts, nao, nao), dtype=dtype)
+    # for ik, k in enumerate(kpts):
+    #     for iR, Rv in enumerate(R_cart):
+    #         phase_R = np.exp(-1j * np.dot(k, Rv))
+    #         for iS, Sv in enumerate(R_cart):
+    #             phase_S = np.exp(+1j * np.dot(k, Sv))
+    #             dm_k[ik] += phase_R * dm_R[iR, :, iS, :] * phase_S
+    # dm_k /= nkpts  # Remember the normalization.
+    phase_kR = np.exp(1j * np.einsum('kx,Rx->kR', kpts, R_cart))
+    dm_k = np.einsum(
+        'kR,RiSj,kS->kij',
+        phase_kR.conj(), dm_R, phase_kR,
+        optimize=True,
+    ) / nkpts
+    dm_k = dm_k.astype(dtype, copy=False)
     return dm_k
 
 class PBCLASCINoSymm(casci.PBCCASCI, LASCINoSymm):
@@ -951,14 +965,22 @@ class PBCLASCITransSymm(PBCLASCINoSymm):
             ts.R_to_i[ts.mod_index(ref_R + delta)]
             for delta in ts.R_indices
         ]
-        for idS, iS in enumerate(translated_cells):
-            for idU, iU in enumerate(translated_cells):
-                for idV, iV in enumerate(translated_cells):
-                    h2_packed[..., idS, idU, idV, :, :, :, :] = (
-                        h2_blocks[
-                            ..., self.ref_cell, :, iS, :, iU, :, iV, :
-                        ]
-                    )
+        # for idS, iS in enumerate(translated_cells):
+        #     for idU, iU in enumerate(translated_cells):
+        #         for idV, iV in enumerate(translated_cells):
+        #             h2_packed[..., idS, idU, idV, :, :, :, :] = (
+        #                 h2_blocks[
+        #                     ..., self.ref_cell, :, iS, :, iU, :, iV, :
+        #                 ]
+        #             )
+        translated_cell_triplets = list(
+            product(enumerate(translated_cells), repeat=3)
+        )
+        for ((idS, iS), (idU, iU),
+             (idV, iV)) in translated_cell_triplets:
+            h2_packed[..., idS, idU, idV, :, :, :, :] = h2_blocks[
+                ..., self.ref_cell, :, iS, :, iU, :, iV, :
+            ]
         return h2_packed
     
     def _sanity_check_active_space_consistency(self, mo_coeff):
