@@ -463,7 +463,6 @@ class _DMET:
         self.get_imp_nelecs()
         self.get_core_elecs()
         self.dump_flags()
-        self.dump_flags()
         dmet_mf = self._get_dmet_mf()
         return dmet_mf
     
