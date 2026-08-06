@@ -231,3 +231,4 @@ def make_rdm12s_py(fcivec, norb, nelec, link_index=None, reorder=True):
     dm2bb = dm2bb.transpose(0, 2, 1, 3).conj()
     return (dm1a, dm1b), (dm2aa, dm2ab, dm2bb)
 
+
