@@ -86,6 +86,7 @@ def _compare_two_RDM(dmA, dmB):
     np.testing.assert_allclose(dmA.imag, dmB.imag, atol=1e-10, rtol=1e-10)
     np.testing.assert_allclose(dmA, dmB, atol=1e-10, rtol=1e-10)
 
+
 class KnownValues(unittest.TestCase):
 
     # Unit-Test-1: In the limit of the zero imaginary part of CI coeff, the
@@ -211,3 +212,4 @@ class KnownValues(unittest.TestCase):
 if __name__ == "__main__":
     # print("Full Tests for RDM construction")
     unittest.main()
+
