@@ -672,3 +672,4 @@ def _unpack(norb, nelec, link_index, spin=None):
         return link_indexa, link_indexb
     else:
         return link_index
+
