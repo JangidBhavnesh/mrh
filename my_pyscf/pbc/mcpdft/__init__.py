@@ -50,7 +50,8 @@ def _MCPDFT (mc_class, kmc_or_kmf, ot, ncas, nelecas, ncore=None, frozen=None,
                                 ot, **kwargs)
 
     if kmc0 is not None:
-        if isinstance(kmc0, pbc_mcscf.CASCI):
+        from mrh.my_pyscf.pbc.mcscf.casci import PBCCASCI
+        if isinstance(kmc0, PBCCASCI):
             kmc.kmesh = kmc0.kmesh
             kmc.kpts = kmc0.kpts
         kmc.verbose = kmc0.verbose
