@@ -138,6 +138,84 @@ void FCImake_rdm1b_cplx(double complex *rdm1,
 }
 
 
+/*
+ * Complex transition 1-RDMs.  Unlike FCImake_rdm1[ab]_cplx, these routines
+ * use both CI vectors, evaluate every orbital pair, and do not impose
+ * Hermiticity. Note: in python wrapper, we transpose it to get the respective
+ * rdm1[i, a] matrix (not conjugate transpose).  The matrix elements are defined as
+ *
+ *     rdm1[a,i] = <cibra|a^+_a a_i|ciket>.
+ */
+void FCItrans_rdm1a_cplx(double complex *rdm1,
+                         double complex *cibra,
+                         double complex *ciket,
+                         int norb, int na, int nb, int nlinka, int nlinkb,
+                         int *link_indexa, int *link_indexb)
+{
+        int i, a, j, k, str0, str1, sign;
+        double complex *pket, *pbra;
+        _LinkT *tab;
+        _LinkT *clink = malloc(sizeof(_LinkT) * (size_t)nlinka * (size_t)na);
+        FCIcompress_link(clink, link_indexa, norb, na, nlinka);
+
+        NPzset0(rdm1, norb*norb);
+        for (str0 = 0; str0 < na; str0++) {
+                tab = clink + str0 * nlinka;
+                pket = ciket + (size_t)str0 * (size_t)nb;
+                for (j = 0; j < nlinka; j++) {
+                        a    = EXTRACT_CRE (tab[j]);
+                        i    = EXTRACT_DES (tab[j]);
+                        str1 = EXTRACT_ADDR(tab[j]);
+                        sign = EXTRACT_SIGN(tab[j]);
+                        if (sign == 0) {
+                                break;
+                        }
+                        pbra = cibra + (size_t)str1 * (size_t)nb;
+                        for (k = 0; k < nb; k++) {
+                                rdm1[a*norb+i] += ((double)sign)
+                                                * conj(pbra[k]) * pket[k];
+                        }
+                }
+        }
+        free(clink);
+}
+
+
+void FCItrans_rdm1b_cplx(double complex *rdm1,
+                         double complex *cibra,
+                         double complex *ciket,
+                         int norb, int na, int nb, int nlinka, int nlinkb,
+                         int *link_indexa, int *link_indexb)
+{
+        int i, a, j, k, stra, str1, sign;
+        double complex *pket, *pbra;
+        _LinkT *tab;
+        _LinkT *clink = malloc(sizeof(_LinkT) * (size_t)nlinkb * (size_t)nb);
+        FCIcompress_link(clink, link_indexb, norb, nb, nlinkb);
+
+        NPzset0(rdm1, norb*norb);
+        for (stra = 0; stra < na; stra++) {
+                pbra = cibra + (size_t)stra * (size_t)nb;
+                pket = ciket + (size_t)stra * (size_t)nb;
+                for (k = 0; k < nb; k++) {
+                        tab = clink + k * nlinkb;
+                        for (j = 0; j < nlinkb; j++) {
+                                a    = EXTRACT_CRE (tab[j]);
+                                i    = EXTRACT_DES (tab[j]);
+                                str1 = EXTRACT_ADDR(tab[j]);
+                                sign = EXTRACT_SIGN(tab[j]);
+                                if (sign == 0) {
+                                        break;
+                                }
+                                rdm1[a*norb+i] += ((double)sign)
+                                                * conj(pbra[str1]) * pket[k];
+                        }
+                }
+        }
+        free(clink);
+}
+
+
 static void _transpose_jikl_cplx(double complex *dm2, int norb)
 {
         int nnorb = norb * norb;
@@ -471,6 +549,94 @@ void FCIrdm12kern_b_cplx(double complex *rdm1, double complex *rdm2,
                 }
         }
         free(buf);
+}
+
+
+/*
+ * Same-spin complex transition 1- and 2-RDM kernels.  buf0 is the
+ * one-body-excited ket and buf1 is the one-body-excited bra, so the 2-TDM
+ * contraction is buf0 * buf1^H rather than the ket-ket product used by the
+ * ordinary RDM kernels above.
+ */
+void FCItdm12kern_a_cplx(double complex *tdm1, double complex *tdm2,
+                         double complex *bra, double complex *ket,
+                         int bcount, int stra_id, int strb_id,
+                         int norb, int na, int nb, int nlinka, int nlinkb,
+                         _LinkT *clink_indexa, _LinkT *clink_indexb, int symm)
+{
+        const int INC1 = 1;
+        const char TRANS_N = 'N';
+        const char TRANS_C = 'C';
+        const double complex Z1 = 1.0;
+        const int nnorb = norb * norb;
+        double csum;
+        double complex *buf0 = calloc((size_t)nnorb * (size_t)bcount,
+                                      sizeof(double complex));
+        double complex *buf1 = calloc((size_t)nnorb * (size_t)bcount,
+                                      sizeof(double complex));
+        double complex *v = malloc(sizeof(double complex) * (size_t)bcount);
+
+        (void)symm;
+        csum = FCIrdm2_a_t1ci_cplx(bra, buf1, bcount, stra_id, strb_id,
+                                   norb, nb, nlinka, clink_indexa);
+        if (csum < CSUMTHR) { goto _normal_end_a; }
+        csum = FCIrdm2_a_t1ci_cplx(ket, buf0, bcount, stra_id, strb_id,
+                                   norb, nb, nlinka, clink_indexa);
+        if (csum < CSUMTHR) { goto _normal_end_a; }
+
+        for (int k = 0; k < bcount; k++) {
+                v[k] = conj(bra[(size_t)stra_id * (size_t)nb + strb_id + k]);
+        }
+        zgemv_(&TRANS_N, &nnorb, &bcount, &Z1, buf0, &nnorb,
+               v, &INC1, &Z1, tdm1, &INC1);
+        zgemm_(&TRANS_N, &TRANS_C, &nnorb, &nnorb, &bcount,
+               &Z1, buf0, &nnorb, buf1, &nnorb, &Z1, tdm2, &nnorb);
+
+_normal_end_a:
+        free(v);
+        free(buf1);
+        free(buf0);
+}
+
+
+void FCItdm12kern_b_cplx(double complex *tdm1, double complex *tdm2,
+                         double complex *bra, double complex *ket,
+                         int bcount, int stra_id, int strb_id,
+                         int norb, int na, int nb, int nlinka, int nlinkb,
+                         _LinkT *clink_indexa, _LinkT *clink_indexb, int symm)
+{
+        const int INC1 = 1;
+        const char TRANS_N = 'N';
+        const char TRANS_C = 'C';
+        const double complex Z1 = 1.0;
+        const int nnorb = norb * norb;
+        double csum;
+        double complex *buf0 = calloc((size_t)nnorb * (size_t)bcount,
+                                      sizeof(double complex));
+        double complex *buf1 = calloc((size_t)nnorb * (size_t)bcount,
+                                      sizeof(double complex));
+        double complex *v = malloc(sizeof(double complex) * (size_t)bcount);
+
+        (void)symm;
+        csum = FCIrdm2_b_t1ci_cplx(bra, buf1, bcount, stra_id, strb_id,
+                                   norb, nb, nlinkb, clink_indexb);
+        if (csum < CSUMTHR) { goto _normal_end_b; }
+        csum = FCIrdm2_b_t1ci_cplx(ket, buf0, bcount, stra_id, strb_id,
+                                   norb, nb, nlinkb, clink_indexb);
+        if (csum < CSUMTHR) { goto _normal_end_b; }
+
+        for (int k = 0; k < bcount; k++) {
+                v[k] = conj(bra[(size_t)stra_id * (size_t)nb + strb_id + k]);
+        }
+        zgemv_(&TRANS_N, &nnorb, &bcount, &Z1, buf0, &nnorb,
+               v, &INC1, &Z1, tdm1, &INC1);
+        zgemm_(&TRANS_N, &TRANS_C, &nnorb, &nnorb, &bcount,
+               &Z1, buf0, &nnorb, buf1, &nnorb, &Z1, tdm2, &nnorb);
+
+_normal_end_b:
+        free(v);
+        free(buf1);
+        free(buf0);
 }
 
 /*
