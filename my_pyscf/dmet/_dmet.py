@@ -71,7 +71,8 @@ class _DMET:
     '''
     Density Matrix Embedding Theory
     '''
-    def __init__(self, mf, lo_method='meta_lowdin', bath_tol=1e-6, atmlst=None, density_fit=True, **kwargs):
+    def __init__(self, mf, lo_method='meta_lowdin', bath_tol=1e-6, atmlst=None, 
+                 density_fit=True, **kwargs):
         _keys = ['loc_rdm1','mask_frag','mask_env','ao2lo','ao2eo',
                  'ao2co','lo2eo','lo2co','imp_nelec','core_nelec',]
         '''
@@ -431,6 +432,7 @@ class _DMET:
         emb_mf.conv_tol = 1e-10
         emb_mf.max_cycle = 100
         emb_mf.energy_nuc = lambda *args: core_energy
+        emb_mol.nao_nr = lambda *args: neo
         emb_mf.kernel(dm_guess)
 
         assert emb_mf.converged, 'DMET mean-field did not converge'
@@ -486,7 +488,7 @@ class _DMET:
         dm_full_ao = dm = mf.make_rdm1()
         if dm.ndim > 2:
             dm = dm[0] + dm[1]
-       
+
         cor2ao = ao2co.T @ s
         core_dm = get_basis_transform(dm, cor2ao.T)
        
@@ -499,7 +501,9 @@ class _DMET:
         h1e = mf.get_hcore()
        
         if dm_full_ao.ndim > 2:
-            veff = mf.get_veff(dm=globalrdm)
+            # Passing the separated globalrdm to avoid the warning of the get_veff function.
+            # It's not a bug but still avoiding the warning by passing the separated globalrdm.
+            veff = mf.get_veff(dm=[0.5*globalrdm, 0.5*globalrdm])
             h1e += 0.25 * (veff[0] + veff[1])
             del veff
         else:

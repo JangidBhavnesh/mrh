@@ -30,8 +30,13 @@ def make_rdm1_spin1(fname, cibra, ciket, norb, nelec, link_index=None):
     Wrapper function for backend C function, to compute the spin-separated 1-RDMs.
     '''
     assert (cibra is not None and ciket is not None)
+
     cibra = np.asarray(cibra, order='C')
     ciket = np.asarray(ciket, order='C')
+    if cibra.dtype is not np.complex128 or ciket.dtype is not np.complex128:
+        cibra = cibra.astype(np.complex128)
+        ciket = ciket.astype(np.complex128)
+
     dtype = ciket.dtype
     link_indexa, link_indexb = _unpack(norb, nelec, link_index)
     na,nlinka = link_indexa.shape[:2]
