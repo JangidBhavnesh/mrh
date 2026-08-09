@@ -1317,7 +1317,7 @@ def kernel_ms1(fci, h1e, eri, norb, nelec, nkpts, target_k=0, ci0=None,
     t0 = log.timer_debug1("k-FCI kernel setup options/link_index", *t0)
     contract_map = _as_contract_map(
         norb, nelec, nkpts, target_k, link_index=link_index,
-        log_obj=fci, kmom=kmom)
+        explicit_ab=False, log_obj=fci, kmom=kmom)
     link_index = contract_map.link_index
     kmom = contract_map.kmom
     t0 = log.timer_debug1("k-FCI kernel contract map", *t0)
