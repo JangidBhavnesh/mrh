@@ -1,6 +1,8 @@
 import numpy as np
 import ctypes
+import sys
 
+from pyscf import lib
 from pyscf.fci import cistring
 from pyscf.fci.addons import _unpack_nelec
 
@@ -104,10 +106,9 @@ def _as_contract_map(norb, nelec, nkpts, target_k=0, link_index=None,
 
     link_index = _unpack_k(norb, nelec, nkpts, link_index=link_index,
                            spin=spin, kmom=kmom, kconserv=kconserv)
-    return kfci_helper.make_kfci_contract_map(
+    return kfci_helper.KFCILayoutMap.build(
         norb, nelec, nkpts, target_k, link_index=link_index,
-        build_pair_tables=False, explicit_ab=False, kmom=kmom,
-        kconserv=kconserv)
+        kmom=kmom, kconserv=kconserv)
 
 def _unpack_k(norb, nelec, nkpts, link_index=None, spin=None, kmom=None,
               kconserv=None):
@@ -291,39 +292,50 @@ def contract_ss(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
     link_indexa, link_indexb = contract_map.link_index
 
     _init_contract_ss_lib()
-    libpbcfci_k.FCIcontract_ss_k(
-        fcivec.ctypes.data_as(ctypes.c_void_p),
-        ci1.ctypes.data_as(ctypes.c_void_p),
-        ctypes.c_int(norb),
-        ctypes.c_int(neleca),
-        ctypes.c_int(nelecb),
-        ctypes.c_int(nkpts),
-        ctypes.c_int(contract_map.blocks.shape[0]),
-        contract_map.blocks.ctypes.data_as(ctypes.c_void_p),
-        link_indexa.ctypes.data_as(ctypes.c_void_p),
-        ctypes.c_int(link_indexa.shape[0]),
-        ctypes.c_int(link_indexa.shape[1]),
-        link_indexb.ctypes.data_as(ctypes.c_void_p),
-        ctypes.c_int(link_indexb.shape[0]),
-        ctypes.c_int(link_indexb.shape[1]),
-        contract_map.stra_ids.ctypes.data_as(ctypes.c_void_p),
-        contract_map.stra_offsets.ctypes.data_as(ctypes.c_void_p),
-        contract_map.strb_ids.ctypes.data_as(ctypes.c_void_p),
-        contract_map.strb_offsets.ctypes.data_as(ctypes.c_void_p),
-        contract_map.str2tot_a.ctypes.data_as(ctypes.c_void_p),
-        contract_map.str2tot_b.ctypes.data_as(ctypes.c_void_p),
-    )
+    with lib.with_omp_threads(lib.num_threads()):
+        libpbcfci_k.FCIcontract_ss_k(
+            fcivec.ctypes.data_as(ctypes.c_void_p),
+            ci1.ctypes.data_as(ctypes.c_void_p),
+            ctypes.c_int(norb),
+            ctypes.c_int(neleca),
+            ctypes.c_int(nelecb),
+            ctypes.c_int(nkpts),
+            ctypes.c_int(contract_map.blocks.shape[0]),
+            contract_map.blocks.ctypes.data_as(ctypes.c_void_p),
+            link_indexa.ctypes.data_as(ctypes.c_void_p),
+            ctypes.c_int(link_indexa.shape[0]),
+            ctypes.c_int(link_indexa.shape[1]),
+            link_indexb.ctypes.data_as(ctypes.c_void_p),
+            ctypes.c_int(link_indexb.shape[0]),
+            ctypes.c_int(link_indexb.shape[1]),
+            contract_map.stra_ids.ctypes.data_as(ctypes.c_void_p),
+            contract_map.stra_offsets.ctypes.data_as(ctypes.c_void_p),
+            contract_map.strb_ids.ctypes.data_as(ctypes.c_void_p),
+            contract_map.strb_offsets.ctypes.data_as(ctypes.c_void_p),
+            contract_map.str2tot_a.ctypes.data_as(ctypes.c_void_p),
+            contract_map.str2tot_b.ctypes.data_as(ctypes.c_void_p),
+        )
     return ci1
 
 def spin_square(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
-                spin=None, kmom=None, kconserv=None, **kwargs):
+                spin=None, contract_map=None, kmom=None, kconserv=None,
+                **kwargs):
     '''
     Spin square for a k-FCI vector in a fixed total momentum sector.
     '''
-    ci_full = embed_ksector_ci_to_full(fcivec, norb, nelec, nkpts,
-                                       target_k=target_k,
-                                       link_index=link_index, spin=spin,
-                                       kmom=kmom, kconserv=kconserv)
-    ci_full = np.asarray(ci_full, dtype=np.complex128, order="C")
-    return spin_op.spin_square0(ci_full, norb, _unpack_nelec(nelec, spin),
-                                **kwargs)
+    fcivec = np.asarray(fcivec, dtype=np.complex128, order="C")
+    ci1 = contract_ss(
+        fcivec, norb, nelec, nkpts, target_k=target_k,
+        link_index=link_index, spin=spin, contract_map=contract_map,
+        kmom=kmom, kconserv=kconserv)
+    ss_complex = np.vdot(fcivec.ravel(), ci1.ravel())
+
+    verbose = kwargs.get('verbose', 0)
+    if abs(ss_complex.imag) > 1e-3:
+        log = lib.logger.Logger(sys.stdout, verbose)
+        log.warn("Spin square is not real. Imaginary part = %s",
+                 ss_complex.imag)
+
+    ss = ss_complex.real
+    s = np.sqrt(ss + 0.25) - 0.5
+    return ss, 2*s + 1
