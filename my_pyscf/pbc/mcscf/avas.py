@@ -60,7 +60,6 @@ def _kernel(avas_obj, mf, mo_coeff, mo_occ, mo_energy, ovlp, log, baslst, pcell,
         mo_coeff = np.asarray(mo_coeff[0])
         mo_occ = np.asarray(mo_occ[0])
         mo_energy = np.asarray(mo_energy[0])
-        print('mo_coeff shape', mo_coeff.shape)
     else:
         mo_coeff = np.asarray(mo_coeff)
         mo_occ = np.asarray(mo_occ)

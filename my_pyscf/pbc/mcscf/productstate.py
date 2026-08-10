@@ -3,11 +3,13 @@ from scipy import linalg
 from itertools import combinations
 
 from pyscf import lib
-from pyscf.scf.addons import canonical_orth_
 from pyscf.fci import cistring
 
 from mrh.my_pyscf.pbc.fci.csf_cplx import cplxCSFFCISolver as CSFFCISolver
-from mrh.my_pyscf.mcscf.productstate import ProductStateFCISolver as molProductStateFCISolver, state_average_fcisolver
+from mrh.my_pyscf.mcscf.productstate import (
+    ProductStateFCISolver as molProductStateFCISolver,
+    ImpureProductStateFCISolver as molImpureProductStateFCISolver,
+)
 
 # Author: Bhavnesh Jangid
 
@@ -61,63 +63,6 @@ class PBCProductStateFCISolver (molProductStateFCISolver):
         energy_elec = self.energy_elec (h1, h2, ci1, norb_f, nelec_f,
             ecore=ecore, efinal=e, **kwargs)
         return converged, energy_elec, ci1
-
-    def get_init_guess (self, ci0, norb_f, nelec_f, h1, h2, nroots=None):
-        '''Generate CI guess vectors for all fragments.
-
-        Args:
-            ci0: list of length ncells or None
-                Contains either None or ndarrays of guess CI vectors. Any new guess CI vectors
-                constructed by this function are constrained to be orthogonal to those already
-                provided here, if any.
-            norb_f: list of length ncells of integers
-                Number of orbitals in each fragment
-            nelec_f: list of length ncells of integers
-                Number of electrons (in reference state) in each fragment
-            h1: ndarray of shape (ncas,ncas) or (2,ncas,ncas)
-                One-electron Hamiltonian amplitudes
-            h2: ndarray of shape (ncas,ncas,ncas,ncas)
-                Two-electron Hamiltonian amplitudes
-
-        Returns:
-            ci1: list of length ncells of ndarrays
-                Orthonormal guess CI vectors. Any vectors present in ci0 are preserved unaltered.
-        '''
-        if ci0 is None: ci0 = [None for i in range (len (norb_f))]
-        ci1 = [c for c in ci0] # reference safety
-        if h1.ndim < 3: h1 = np.stack ([h1, h1], axis=0)
-        for ix, (no, ne, solver) in enumerate (zip (norb_f, nelec_f, self.fcisolvers)):
-            solver.check_transformer_cache ()
-            snroots = solver.nroots if nroots is None else min (nroots, solver.transformer.ncsf)
-            nelec = self._get_nelec (solver, ne)
-            i = sum (norb_f[:ix])
-            j = i + norb_f[ix]
-            hdiag_csf = solver.make_hdiag_csf (h1[:,i:j,i:j], h2[i:j,i:j,i:j,i:j],
-                                               no, nelec)
-            ci1_guess = solver.get_init_guess (no, nelec, snroots, hdiag_csf)
-            na = cistring.num_strings (no, nelec[0])
-            nb = cistring.num_strings (no, nelec[1])
-            if ci1[ix] is None:
-                ci1[ix] = ci1_guess
-            elif np.asarray (ci1[ix]).reshape (-1,na*nb).shape[0] < snroots:
-                ci1_inp = np.asarray (ci1[ix]).reshape (-1,na*nb)
-                ci1_guess = np.asarray (ci1_guess).reshape (-1,na*nb)
-                x = np.append (ci1_inp, ci1_guess, axis=0)
-                x = canonical_orth_(x.conj () @ x.T).T @ x
-                # ^ an orthonormal basis
-                assert (x.shape[0] >= snroots)
-                x2inp = x.conj () @ ci1_inp.T
-                ninp = ci1_inp.shape[0]
-                u, svals, vh = linalg.svd (x2inp, full_matrices=True)
-                u[:,:ninp] = u[:,:ninp] @ vh
-                ci1_new = u.T @ x
-                nnew = ci1_new.shape[0]
-                ovlp = ci1_new.conj () @ ci1_inp.T
-                assert (np.all (np.abs (ovlp[:ninp,:ninp] - np.eye (ninp)) < 1e-3)), '{}'.format (ovlp)
-                ovlp = (ci1_new.conj () @ ci1_new.T)
-                assert (np.all (np.abs (ovlp - np.eye (nnew)) < 1e-3)), '{}'.format (ovlp)
-                ci1[ix] = ci1_new[:snroots].reshape (snroots, na, nb)
-        return self._check_init_guess (ci1, norb_f, nelec_f, nroots=nroots)
 
     def _check_init_guess (self, ci0, norb_f, nelec_f, nroots=None):
         ci1 = []
@@ -179,27 +124,6 @@ class PBCProductStateFCISolver (molProductStateFCISolver):
                 for l, c in zip (g_lbls[i], g_coeffs[i]):
                     log.info ('%s : %e', l, c)
 
-    def _1shot (self, it, h0eff, h1eff, h2, e0, ci0, norb_f, nelec_f, orbsym=None,
-                serialfrag=False, **kwargs):
-        ncells = len (norb_f)
-        nj = np.cumsum (norb_f)
-        ni = nj - norb_f
-        zipper = [h0eff, h1eff, ci0, norb_f, nelec_f, self.fcisolvers, ni, nj]
-        e1 = [e for e in e0]
-        ci1 = [c for c in ci0]
-
-        for ifrag, (h0e, h1e, c, no, ne, solver, i, j) in enumerate (zip (*zipper)):
-            if serialfrag and it % ncells != ifrag: continue
-            h2e = h2[i:j,i:j,i:j,i:j]
-            osym = getattr (solver, 'orbsym', None)
-            if orbsym is not None: osym=orbsym[i:j]
-            nelec = self._get_nelec (solver, ne)
-            e, c1 = solver.kernel (h1e, h2e, no, nelec, ci0=c, ecore=h0e,
-                orbsym=osym, **kwargs)
-            e1[ifrag] = e
-            ci1[ifrag] = c1
-        return e1, ci1
-
     def _get_grad (self, h1eff, h2, ci, norb_f, nelec_f, orbsym=None,
             **kwargs):
         nj = np.cumsum (norb_f)
@@ -239,57 +163,6 @@ class PBCProductStateFCISolver (molProductStateFCISolver):
                 grad.append (chc[np.tril_indices (nroots,k=-1)])
         return np.concatenate (grad)
 
-    def energy_elec (self, h1, h2, ci, norb_f, nelec_f, ecore=0, **kwargs):
-        dm1s = np.stack (self.make_rdm1s (ci, norb_f, nelec_f), axis=0)
-        if h1.ndim < 3: h1 = np.stack ([h1, h1], axis=0)
-        dm2 = self.make_rdm2 (ci, norb_f, nelec_f)
-        energy_tot = (ecore + np.tensordot (h1, dm1s, axes=3)
-                        + 0.5*np.tensordot (h2, dm2, axes=4))
-        return energy_tot
-
-    def project_hfrag (self, h1, h2, ci, norb_f, nelec_f, 
-                       ecore=0, dm1s=None, dm2=None, **kwargs):
-        '''
-        Project the h1e and h2e on the fragment space.
-        '''
-        if dm1s is None:
-            dm1s = np.stack (self.make_rdm1s (ci, norb_f, nelec_f), axis=0)
-        if h1.ndim < 3:
-            h1 = np.stack ([h1,h1], axis=0)
-        if dm2 is None:
-            dm2 = self.make_rdm2 (ci, norb_f, nelec_f)
-        energy_tot = (ecore + np.tensordot (h1, dm1s, axes=3)
-                        + 0.5*np.tensordot (h2, dm2, axes=4))
-        v1  = np.tensordot (dm1s, h2, axes=2)
-        v1 += v1[::-1] # ja + jb
-        v1 -= np.tensordot (dm1s, h2, axes=((1,2),(2,1)))
-        f1 = h1 + v1
-        h1eff = []
-        h0eff = []
-        nj = np.cumsum (norb_f)
-        ni = nj - norb_f
-        for i, j in zip (ni, nj):
-            dm1s_i = dm1s[:,i:j,i:j]
-            dm2_i = dm2[i:j,i:j,i:j,i:j]
-            # v1 self-interaction
-            h2_i = h2[i:j,i:j,:,:]
-            v1_i = np.tensordot (dm1s_i, h2_i, axes=2)
-            v1_i += v1_i[::-1] # ja + jb
-            h2_i = h2[:,i:j,i:j,:]
-            v1_i -= np.tensordot (dm1s_i, h2_i, axes=((1,2),(2,1)))
-            # cancel off-diagonal energy double-counting
-            e_i = energy_tot - np.tensordot (dm1s, v1_i, axes=3) # overcorrects
-            # cancel h1eff double-counting
-            v1_i = v1_i[:,i:j,i:j] 
-            h1eff.append (f1[:,i:j,i:j]-v1_i)
-            # cancel diagonal energy double-counting
-            h1_i = h1[:,i:j,i:j] - v1_i # v1_i fixes overcorrect
-            h2_i = h2[i:j,i:j,i:j,i:j]
-            e_i -= (np.tensordot (h1_i, dm1s_i, axes=3)
-              + 0.5*np.tensordot (h2_i, dm2_i, axes=4))
-            h0eff.append (e_i)
-        return h1eff, h0eff, ci
-
     def make_rdm1s (self, ci, norb_f, nelec_f, **kwargs):
         norb = sum (norb_f)
         nj = np.cumsum (norb_f)
@@ -317,10 +190,6 @@ class PBCProductStateFCISolver (molProductStateFCISolver):
             dm1a[i:j,i:j] = a[:,:]
             dm1b[i:j,i:j] = b[:,:]
         return dm1a, dm1b
-
-    def make_rdm1 (self, ci, norb_f, nelec_f, **kwargs):
-        dm1a, dm1b = self.make_rdm1s (ci, norb_f, nelec_f, **kwargs)
-        return dm1a + dm1b
 
     def make_rdm2 (self, ci, norb_f, nelec_f, **kwargs):
         norb = sum (norb_f)
@@ -362,20 +231,7 @@ class ImpureProductStateFCISolver (PBCProductStateFCISolver):
 
     over orthonormal sets of CI vectors {nK} for fragment K.'''
 
-    def __init__(self, fcisolvers, stdout=None, verbose=0, lroots=None, lweights=None, **kwargs):
-        PBCProductStateFCISolver.__init__(self, fcisolvers, stdout=stdout, verbose=verbose, **kwargs)
-        if lweights is None:
-            if lroots is not None:
-                lweights = []
-                for lroot in lroots:
-                    l = np.zeros (lroot)
-                    l[0] = 1
-                    lweights.append (l)
-            else:
-                lweights = [[.5,.5],]*len(fcisolvers)
-        for ix, (fcisolver, weights) in enumerate (zip (self.fcisolvers, lweights)):
-            if len (weights) > 1:
-                self.fcisolvers[ix] = state_average_fcisolver (fcisolver, weights=weights)
+    __init__ = molImpureProductStateFCISolver.__init__
 
 
 class PBCTransSymmImpureProductStateFCISolver(ImpureProductStateFCISolver):

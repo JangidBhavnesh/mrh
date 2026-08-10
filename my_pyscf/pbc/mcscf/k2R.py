@@ -91,3 +91,34 @@ def get_mo_coeff_k2R(kmf, mo_coeff_kpts, ncore, ncas, kmesh=None):
     mo_phase = lib.einsum('kum,kui->kmi', C_k.conj(), np.dot(s_k_g, mo_coeff_R))
     return scell, phase, mo_coeff_R, mo_phase
 
+
+
+def get_mo_coeff_k2R_wokmf(cell, mo_coeff_kpts, ncore, ncas, kpts, kmesh=None):
+    '''
+    This does the same as the above function but doesn't have dependancy on the 
+    kmf object.
+    '''
+    cell = cell
+    kpts = kpts
+    dtype = mo_coeff_kpts[0].dtype
+
+    mo_coeff_k = np.array([mo[:, ncore:ncore+ncas] 
+                           for mo in mo_coeff_kpts], dtype=dtype)
+    C_k = np.asarray(mo_coeff_k)
+    Nk, nao, nmo = C_k.shape
+
+    scell, phase = get_phase(cell, kpts, kmesh)
+
+    NR = phase.shape[0]
+
+    assert Nk==NR, "Please use the kmesh in the k-CASSCF"
+    k_phase = np.eye(Nk, dtype=dtype)
+    mo_coeff_R = np.dot(phase, (C_k[:, :, :, None] * k_phase[:, None, None, :]).reshape(Nk, -1)).reshape(NR, nao, nmo, NR)
+    mo_coeff_R = mo_coeff_R.transpose(0, 1, 3, 2).reshape(NR*nao, NR*nmo)
+
+    s_k = cell.pbc_intor('int1e_ovlp', kpts=kpts)
+    s_k_g = np.einsum('kuv,Rk->kuRv', s_k, phase.conj()).reshape(Nk,nao,NR*nao)
+    mo_phase = lib.einsum('kum,kui->kmi', C_k.conj(), np.dot(s_k_g, mo_coeff_R))
+    return scell, phase, mo_coeff_R, mo_phase
+
+    

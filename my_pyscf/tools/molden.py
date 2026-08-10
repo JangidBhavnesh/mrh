@@ -41,7 +41,9 @@ def from_si_mcscf (mc, fname, state=None, si=None, cas_natorb=False, cas_mo_ener
         return from_sa_mcscf (mc, fname, state=state, cas_natorb=cas_natorb,
                               cas_mo_energy=cas_mo_energy, **kwargs)
 
-def from_lasscf (las, fname, state=None, natorb_casdm1=None, only_as=False, **kwargs):
+def from_lasscf (las, fname, state=None, natorb_casdm1=None, only_as=False, cas_natorb=True, **kwargs):
+    if not cas_natorb:
+        raise NotImplementedError ("LASSCF moldens without using natural orbitals of some kind")
     if state is not None: natorb_casdm1 = las.states_make_casdm1s ()[state].sum (0)
     # Rotating CI vectors is stupid slow for large active spaces
     # and completely unnecessary here

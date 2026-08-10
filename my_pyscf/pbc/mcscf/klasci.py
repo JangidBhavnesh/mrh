@@ -3,6 +3,7 @@
 import numpy as np
 import scipy.linalg
 from functools import reduce
+from itertools import product
 
 from pyscf import lib
 from pyscf.fci import cistring
@@ -104,10 +105,9 @@ def kLASCI(kmf, ncas, nelecas, ncore=None, spin_mult=None, kmesh=None,
     # The CI vectors, mo_coeff, hamiltonian everything would be packed different in this
     # class.
     klas_cls = PBCLASCITransSymm if trans_sym else PBCLASCINoSymm
-    klas = klas_cls(
-        kmf, ncas, nelecas, ncore=ncore, spin_mult=spin_mult,
-        kmesh=kmesh, kpts=kpts,
-    )
+    klas = klas_cls(kmf, ncas, nelecas, ncore=ncore, spin_mult=spin_mult,
+                    kmesh=kmesh, kpts=kpts,)
+
     if trans_sym:
         klas.set_ref_cell(ref_cell)
 
@@ -159,16 +159,18 @@ def h1e_for_cas(mc, mo_coeff=None, ncas=None, ncore=None):
     assert nkpts == ncell
     assert np.prod(kmesh) == nkpts
 
-    h1ao_R = np.zeros((ncell, nao, ncell, nao), dtype=dtype)
-
-    for ik, k in enumerate(kpts):
-        hk = h1ao_k[ik]
-        for iR, Rv in enumerate(R_cart):
-            for iS, Sv in enumerate(R_cart):
-                phase = np.exp(1j * np.dot(k, Rv - Sv))
-                h1ao_R[iR, :, iS, :] += phase * hk
-
-    h1ao_R /= nkpts
+    # h1ao_R = np.zeros((ncell, nao, ncell, nao), dtype=dtype)
+    # for ik, k in enumerate(kpts):
+    #     hk = h1ao_k[ik]
+    #     for iR, Rv in enumerate(R_cart):
+    #         for iS, Sv in enumerate(R_cart):
+    #             phase = np.exp(1j * np.dot(k, Rv - Sv))
+    #             h1ao_R[iR, :, iS, :] += phase * hk
+    # h1ao_R /= nkpts
+    phase_kR = np.exp(1j * np.einsum('kx,Rx->kR', kpts, R_cart))
+    h1ao_R = np.einsum('kR,kS,kij->RiSj',
+                       phase_kR, phase_kR.conj(), h1ao_k,
+                       optimize=True,) / nkpts
     h1ao_R = h1ao_R.reshape(nkpts*nao, nkpts*nao)
 
     wannier_orb, R_indices_check = get_wannier_orbs(mc._scf, kmesh, mo_act_kpts)[:2]
@@ -268,14 +270,20 @@ def convert_h1e_mo_k_to_wann(kmf, kmesh, h1e_mo_k):
     assert h1e_mo_k.shape[0] == nkpts
     assert h1e_mo_k.shape[1] == h1e_mo_k.shape[2]
 
-    h1eff_R = np.zeros((ncell, norb, ncell, norb), dtype=dtype)
-    for ik, k in enumerate(kpts):
-        hk = h1e_mo_k[ik]
-        for iR, Rv in enumerate(R_cart):
-            for iS, Sv in enumerate(R_cart):
-                phase = np.exp(1j * np.dot(k, Rv - Sv))
-                h1eff_R[iR, :, iS, :] += phase * hk
-    h1eff_R /= nkpts
+    # h1eff_R = np.zeros((ncell, norb, ncell, norb), dtype=dtype)
+    # for ik, k in enumerate(kpts):
+    #     hk = h1e_mo_k[ik]
+    #     for iR, Rv in enumerate(R_cart):
+    #         for iS, Sv in enumerate(R_cart):
+    #             phase = np.exp(1j * np.dot(k, Rv - Sv))
+    #             h1eff_R[iR, :, iS, :] += phase * hk
+    # h1eff_R /= nkpts
+    phase_kR = np.exp(1j * np.einsum('kx,Rx->kR', kpts, R_cart))
+    h1eff_R = np.einsum(
+        'kR,kS,kij->RiSj',
+        phase_kR, phase_kR.conj(), h1e_mo_k,
+        optimize=True,
+    ) / nkpts
     h1eff_R = h1eff_R.reshape(ncell * norb, ncell * norb)
     return h1eff_R
 
@@ -473,15 +481,21 @@ def convert_dmao_R_to_dmao_k(kmf, kmesh, dm_R):
     assert nao == cell.nao_nr()
 
     dm_R = dm_R.reshape(nkpts, nao, nkpts, nao)
-    dm_k = np.zeros((nkpts, nao, nao), dtype=dtype)
-
-    for ik, k in enumerate(kpts):
-        for iR, Rv in enumerate(R_cart):
-            phase_R = np.exp(-1j * np.dot(k, Rv))
-            for iS, Sv in enumerate(R_cart):
-                phase_S = np.exp(+1j * np.dot(k, Sv))
-                dm_k[ik] += phase_R * dm_R[iR, :, iS, :] * phase_S
-    dm_k /= nkpts # Remember the normalization.
+    # dm_k = np.zeros((nkpts, nao, nao), dtype=dtype)
+    # for ik, k in enumerate(kpts):
+    #     for iR, Rv in enumerate(R_cart):
+    #         phase_R = np.exp(-1j * np.dot(k, Rv))
+    #         for iS, Sv in enumerate(R_cart):
+    #             phase_S = np.exp(+1j * np.dot(k, Sv))
+    #             dm_k[ik] += phase_R * dm_R[iR, :, iS, :] * phase_S
+    # dm_k /= nkpts  # Remember the normalization.
+    phase_kR = np.exp(1j * np.einsum('kx,Rx->kR', kpts, R_cart))
+    dm_k = np.einsum(
+        'kR,RiSj,kS->kij',
+        phase_kR.conj(), dm_R, phase_kR,
+        optimize=True,
+    ) / nkpts
+    dm_k = dm_k.astype(dtype, copy=False)
     return dm_k
 
 class PBCLASCINoSymm(casci.PBCCASCI, LASCINoSymm):
@@ -506,38 +520,6 @@ class PBCLASCINoSymm(casci.PBCCASCI, LASCINoSymm):
         kpts: array_like, optional
             k-points for the calculation.
     '''
-      
-    # def __init__(self, kmf, ncas, nelecas, ncore=None, spin_mult=None, 
-    #              kmesh=None, kpts=None):
-    #     self.spin_mult = spin_mult
-    #     assert kmesh is not None
-    #     nkpts = np.prod(kmesh)           
-    #     self.ncas_sub = nkpts * (ncas,)
-    #     if isinstance(nelecas, int):
-    #         self.nelecas_sub = nkpts * (nelecas,)
-    #     elif isinstance(nelecas, tuple) and len(nelecas) == 2:
-    #         self.nelecas_sub = nkpts * (nelecas,)
-    #     self.spin_sub = spin_mult * nkpts if spin_mult is not None else None
-    #     self.nroots = 1
-    #     # Initialize the parent classes.
-    #     _PBCCASCIForLAS.__init__(self, kmf, ncas, nelecas, ncore=ncore)
-    #     LASCINoSymm.__init__(self, kmf, ncas=self.ncas_sub, nelecas=self.nelecas_sub, ncore=ncore, spin_sub=self.spin_sub)
-
-    #     self.kmesh = kmesh
-    #     self.kpts = kpts if kpts is not None else kmf.kpts
-    #     nkpts = len(self.kpts)
-    #     assert nkpts == np.prod(kmesh), "kmesh and kpts do not match."
-
-    #     # Making sure this is for an unit cell, not summed over multiple unit cells.
-    #     self.ncas = ncas
-    #     self.nelecas = nelecas
-
-    #     # the total active space should be stored as ncastot, nelecstot
-    #     self.ncastot = sum(self.ncas_sub)
-    #     if isinstance(self.nelecas_sub[0], int):
-    #         self.nelecstot = sum(self.nelecas_sub)
-    #     else:
-    #         self.nelecstot = tuple(map(sum, zip(*self.nelecas_sub)))
 
     # Currently initializing the LASCINosymm is breaking a lot of things in
     # PBCCASCI module. As an example, the fcisolver class is reassigned to direct_spin1 or the
@@ -545,21 +527,6 @@ class PBCLASCINoSymm(casci.PBCCASCI, LASCINoSymm):
     # then register the functions that I need from PBCCASCIForLAS to this class. 
     # This is not a clean way to do it but it is the fastest way to get it working. I will refactor this later.
 
-    @property
-    def kpts(self):
-        '''K-points used by both the mean-field and k-LASCI calculations.'''
-        return np.array(self._scf.kpts, copy=True)
-
-    @kpts.setter
-    def kpts(self, value):
-        value = np.asarray(value)
-        kmf_kpts = np.asarray(self._scf.kpts)
-        if (value.shape != kmf_kpts.shape
-                or not np.allclose(value, kmf_kpts, atol=1e-10, rtol=0.0)):
-            msg = "kpts must match kmf.kpts in shape, ordering, and values; "
-            msg += f"got shapes {value.shape} and {kmf_kpts.shape}"
-            raise ValueError(msg)
-    
     def __init__(self, kmf, ncas, nelecas, ncore=None, spin_mult=None,
                  kmesh=None, kpts=None, frozen=None, frozen_ci=None, **kwargs):
         self.init_guess_ci = 'aufbau1'
@@ -620,6 +587,21 @@ class PBCLASCINoSymm(casci.PBCCASCI, LASCINoSymm):
         solver = csf_solver(self.cell, smult)
         solver.spin = nelec[0] - nelec[1]
         return get_h1e_zipped_fcisolver(state_average_n_mix(self, [solver], [1.0]).fcisolver)
+
+    @property
+    def kpts(self):
+        '''K-points used by both the mean-field and k-LASCI calculations.'''
+        return np.array(self._scf.kpts, copy=True)
+
+    @kpts.setter
+    def kpts(self, value):
+        value = np.asarray(value)
+        kmf_kpts = np.asarray(self._scf.kpts)
+        if (value.shape != kmf_kpts.shape
+                or not np.allclose(value, kmf_kpts, atol=1e-10, rtol=0.0)):
+            msg = "kpts must match kmf.kpts in shape, ordering, and values; "
+            msg += f"got shapes {value.shape} and {kmf_kpts.shape}"
+            raise ValueError(msg)
 
     # Register these functions.
     get_sym_fr = LASCINoSymm.get_sym_fr
@@ -951,14 +933,22 @@ class PBCLASCITransSymm(PBCLASCINoSymm):
             ts.R_to_i[ts.mod_index(ref_R + delta)]
             for delta in ts.R_indices
         ]
-        for idS, iS in enumerate(translated_cells):
-            for idU, iU in enumerate(translated_cells):
-                for idV, iV in enumerate(translated_cells):
-                    h2_packed[..., idS, idU, idV, :, :, :, :] = (
-                        h2_blocks[
-                            ..., self.ref_cell, :, iS, :, iU, :, iV, :
-                        ]
-                    )
+        # for idS, iS in enumerate(translated_cells):
+        #     for idU, iU in enumerate(translated_cells):
+        #         for idV, iV in enumerate(translated_cells):
+        #             h2_packed[..., idS, idU, idV, :, :, :, :] = (
+        #                 h2_blocks[
+        #                     ..., self.ref_cell, :, iS, :, iU, :, iV, :
+        #                 ]
+        #             )
+        translated_cell_triplets = list(
+            product(enumerate(translated_cells), repeat=3)
+        )
+        for ((idS, iS), (idU, iU),
+             (idV, iV)) in translated_cell_triplets:
+            h2_packed[..., idS, idU, idV, :, :, :, :] = h2_blocks[
+                ..., self.ref_cell, :, iS, :, iU, :, iV, :
+            ]
         return h2_packed
     
     def _sanity_check_active_space_consistency(self, mo_coeff):
