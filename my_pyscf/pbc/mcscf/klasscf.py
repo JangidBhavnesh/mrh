@@ -45,7 +45,7 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
         if kmesh is None: kmesh = las.kmesh
         kpts = np.asarray(kpts)
         kmesh = tuple(int(n) for n in kmesh)
-    
+
         if len(kmesh) != 3 or any(n <= 0 for n in kmesh):
             raise ValueError("kmesh must contain three positive integers")
         ncell = int(np.prod(kmesh))
@@ -61,7 +61,6 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
         self.nkpts = len(kpts)
         self.ncell = ncell
 
-        self.casdm1frs = casdm1frs
         self.h1eff = h1eff
         self.h2eff = h2eff
 
@@ -76,3 +75,32 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
         self.fciboxes = las.fciboxes
         self.nroots = las.nroots
         self.weights = las.weights
+
+        self._init_dms_(casdm1frs)
+
+    def _init_dms_(self, casdm1frs):
+        """
+        Initialize the spin-separated active-space 1-RDMs.
+
+        I think the ``casdm1frs[f][r]`` is the 1-RDM of fragment/cell ``f`` and root
+        ``r``.  The CI-only hop needs these reference densities when forming
+        the first-order effective one-electron Hamiltonian.  No 2-RDM or
+        cumulant is initialized here.
+        """
+        if casdm1frs is None:
+            casdm1frs = self.las.states_make_casdm1s_sub(
+                ci=self.ci,
+                ncas_sub=self.ncas_sub,
+                nelecas_sub=self.nelecas_sub,
+            )
+
+        self.casdm1frs = casdm1frs
+        self.casdm1fs = self.las.make_casdm1s_sub(
+            casdm1frs=casdm1frs,
+        )
+        self.casdm1rs = self.las.states_make_casdm1s(
+            casdm1frs=casdm1frs,
+        )
+        self.casdm1s = np.einsum(
+            "r,rsij->sij", self.weights, self.casdm1rs,
+        )
