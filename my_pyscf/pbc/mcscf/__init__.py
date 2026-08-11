@@ -10,6 +10,10 @@ from mrh.my_pyscf.pbc.mcscf.klasci import (
     PBCLASCITransSymm,
     kLASCI,
 )
+from mrh.my_pyscf.pbc.mcscf.klasscf import (
+    KLASSCF_HessianOperator,
+    KLASSCF_TransSymmHessianOperator,
+)
 
 def CASCI(kmf, ncas, nelecas, ncore=None):
     assert isinstance(kmf, scf.hf.SCF),  "CASCI only works with periodic SCF objects"
