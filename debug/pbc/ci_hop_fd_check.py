@@ -80,3 +80,37 @@ def run_klasci(case_name):
 
     return klasci, lo_coeff
 
+def copy_ci(ci):
+    return [[np.array(c0, copy=True) 
+             for c0 in ci0_r] 
+             for ci0_r in ci]
+
+def flatten_ci(ci):
+    '''
+    Flatten a cell/root nested CI list in Hessian-operator order.
+    '''
+    return np.concatenate([
+        np.asarray(c0).reshape(-1) 
+        for ci0_r in ci 
+        for c0 in ci0_r])
+
+
+def build_product_solver(klasci):
+    '''
+    Build the full-cell product solver for the single global root.
+    '''
+    fcisolvers = [box.fcisolvers[0] 
+                  for box in klasci.fciboxes]
+    return PBCProductStateFCISolver(fcisolvers)
+
+
+def get_h1frs(product_solver, h1e, h2e, ci, klasci):
+    '''
+    Build root-indexed effective one-electron Hamiltonian blocks.
+    '''
+    ci_cells = [ci0_r[0] for ci0_r in ci]
+    h1eff = product_solver.project_hfrag(
+        h1e, h2e, ci_cells, klasci.ncas_sub, klasci.nelecas_sub,
+    )[0]
+    return [np.asarray(h1eff_f)[None, ...] 
+            for h1eff_f in h1eff]
