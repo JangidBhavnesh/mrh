@@ -114,3 +114,79 @@ def get_h1frs(product_solver, h1e, h2e, ci, klasci):
     )[0]
     return [np.asarray(h1eff_f)[None, ...] 
             for h1eff_f in h1eff]
+
+def get_ci_gradient(hop, product_solver, h1e, h2e, ci, klasci):
+    '''
+    Evaluate the determinant-basis CI gradient 
+    Reminder: ``g_c = 2 Q H_eff c``.
+    '''
+    h1frs = get_h1frs(product_solver, h1e, h2e, ci, klasci)
+    hc = hop.Hci_all(None, h1frs, h2e, ci)
+    gradient = []
+    for hc_r, ci0_r in zip(hc, ci):
+        for hc0, c0 in zip(hc_r, ci0_r):
+            residual = hc0 - np.vdot(c0, hc0) * c0
+            gradient.append((2.0 * residual).reshape(-1))
+    return np.concatenate(gradient)
+
+
+def make_trial_direction(klasci, ci, seed=17):
+    '''
+    Build a normalized complex, spin-adapted tangent CI direction.
+    '''
+    dtype = ci[0][0].dtype
+    rng = np.random.default_rng(seed)
+    direction = []
+    for fcibox, ci0_r in zip(klasci.fciboxes, ci):
+        direction_r = []
+        for solver, c0 in zip(fcibox.fcisolvers, ci0_r):
+            transformer = solver.transformer
+            d_csf = (
+                rng.standard_normal(transformer.ncsf)
+                + 1j * rng.standard_normal(transformer.ncsf)
+            )
+            d_csf = d_csf.astype(dtype)
+            d_real = transformer.vec_csf2det(
+                d_csf.real, order='C', normalize=False,
+            )
+            d_imag = transformer.vec_csf2det(
+                d_csf.imag, order='C', normalize=False,
+            )
+            d = d_real.astype(np.complex128)
+            d.real = d_real
+            d.imag = d_imag
+            d = d.reshape(np.shape(c0))
+            d -= np.vdot(c0, d) * c0
+            direction_r.append(d)
+        direction.append(direction_r)
+
+    norm = np.linalg.norm(flatten_ci(direction))
+    if norm == 0:
+        raise RuntimeError('the projected trial CI direction is zero')
+    out_x = [[d / norm for d in direction_r] 
+             for direction_r in direction]
+    return out_x
+
+def displace_ci(ci, direction, step):
+    '''
+    Apply and normalize a CI displacement independently in every cell.
+    '''
+    displaced = []
+    for ci0_r, direction_r in zip(ci, direction):
+        displaced_r = []
+        for c0, d in zip(ci0_r, direction_r):
+            c1 = c0 + step * d
+            c1 /= np.linalg.norm(c1)
+            displaced_r.append(c1)
+        displaced.append(displaced_r)
+    return displaced
+
+def extrapolate_zero_step(trial_norms, finite_difference_hops):
+    '''
+    Extrapolate centered finite differences linearly in the squared step.
+    '''
+    fit_slice = slice(2, 7)
+    x = trial_norms[fit_slice] ** 2
+    y = np.asarray(finite_difference_hops)[fit_slice]
+    coefficients = np.polynomial.polynomial.polyfit(x, y, 1)
+    return coefficients[0]
