@@ -72,6 +72,9 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
         self.fciboxes = las.fciboxes
         self.nroots = las.nroots
         self.weights = las.weights
+        self.nvar_ci = sum(
+            np.size(c0) for ci0_r in self.ci for c0 in ci0_r
+        )
 
         self._init_dms_(casdm1frs)
         self._init_ham_(h1eff, h2eff)
@@ -150,12 +153,11 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
         self.linkstr = []
         for fcibox, norb, nelec in zip(
                 self.fciboxes, self.ncas_sub, self.nelecas_sub):
-            self.linkstrl.append(
-                fcibox.states_gen_linkstr(norb, nelec, True)
-            )
-            self.linkstr.append(
-                fcibox.states_gen_linkstr(norb, nelec, False)
-            )
+            # The complex periodic contractions require ordinary link tables,
+            # without the molecular lower-triangular index packing.
+            linkstr = fcibox.states_gen_linkstr(norb, nelec, False)
+            self.linkstrl.append(linkstr)
+            self.linkstr.append(linkstr)
         hc0 = self.Hci_all(None, self.h1frs, self.eri_cas, self.ci)
         self.e0 = [[np.vdot(c, hc) for c, hc in zip(ci_r, hc_r)] 
                    for ci_r, hc_r in zip(self.ci, hc0)]
@@ -267,3 +269,110 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
             )
 
         return h1frs
+
+    def ci_response_diag(self, ci1):
+        """Apply the same-cell blocks of the CI Hessian.
+
+        This is the complex generalization of the molecular CI-diagonal
+        response. Both the input and output are projected relative to the
+        current CI vector using the Hermitian inner product.
+        """
+        ci2 = self.Hci_all(
+            [[-energy for energy in energy_r] for energy_r in self.e0],
+            self.h1frs,
+            self.eri_cas,
+            ci1,
+        )
+
+        response = []
+        for ci2_r, ci1_r, ci0_r, residual_r in zip(
+                ci2, ci1, self.ci, self.hci0):
+            response_r = []
+            for hc1, c1, c0, residual in zip(
+                    ci2_r, ci1_r, ci0_r, residual_r):
+                output_overlap = np.vdot(residual, c1)
+                input_overlap = np.vdot(c0, c1)
+                response_r.append(2.0 * (
+                    hc1
+                    - output_overlap * c0
+                    - input_overlap * residual
+                ))
+            response.append(response_r)
+
+        return response
+
+    def ci_response_offdiag(self, h1frs_response):
+        """Apply the different-cell blocks of the CI Hessian.
+
+        ``h1frs_response`` is the effective one-electron response returned by
+        :meth:`get_h1eff_response`. It contains no self-cell contribution.
+        """
+        response = []
+        for ifrag, (fcibox, norb, nelec, h1rs, ci0_r) in enumerate(zip(
+                self.fciboxes, self.ncas_sub, self.nelecas_sub,
+                h1frs_response, self.ci)):
+            h0_r = [0.0] * self.nroots
+            zero_h2 = np.zeros((norb,) * 4, dtype=self.eri_cas.dtype)
+            linkstrl = (
+                None if self.linkstrl is None else self.linkstrl[ifrag]
+            )
+            response.append(self.Hci(
+                fcibox, norb, nelec, h0_r, h1rs, zero_h2, ci0_r,
+                linkstrl=linkstrl,
+            ))
+
+        response = [
+            [
+                2.0 * (hc - np.vdot(c0, hc) * c0)
+                for hc, c0 in zip(response_r, ci0_r)
+            ]
+            for response_r, ci0_r in zip(response, self.ci)
+        ]
+        return response
+
+    @property
+    def shape(self):
+        """Shape of the temporary CI-only Hessian operator."""
+        return self.nvar_ci, self.nvar_ci
+
+    def _matvec(self, x):
+        """Apply the CI-only Hessian to a flat trial CI vector.
+
+        For now, ``x`` contains determinant-basis CI amplitudes for every
+        cell and root in the same order as ``self.ci``. The returned vector
+        uses exactly the same ordering and has the same size.
+        """
+        x = np.asarray(x)
+        x_flat = x.reshape(-1)
+        if x_flat.size != self.nvar_ci:
+            raise ValueError(
+                f"trial vector has size {x_flat.size}; expected {self.nvar_ci}"
+            )
+
+        ci1 = []
+        offset = 0
+        for ci0_r in self.ci:
+            ci1_r = []
+            for c0 in ci0_r:
+                size = np.size(c0)
+                ci1_r.append(
+                    x_flat[offset:offset + size].reshape(np.shape(c0))
+                )
+                offset += size
+            ci1.append(ci1_r)
+
+        tdm1rs = self.make_tdm1s_sub(ci1)
+        h1frs_response = self.get_h1eff_response(tdm1rs)
+        ci2_diag = self.ci_response_diag(ci1)
+        ci2_offdiag = self.ci_response_offdiag(h1frs_response)
+
+        ci2 = []
+        for diag_r, offdiag_r, ci1_r in zip(
+                ci2_diag, ci2_offdiag, ci1):
+            for diag, offdiag, trial in zip(diag_r, offdiag_r, ci1_r):
+                ci2.append(
+                    np.asarray(diag + offdiag + self.level_shift * trial)
+                    .reshape(-1)
+                )
+
+        return np.concatenate(ci2)
