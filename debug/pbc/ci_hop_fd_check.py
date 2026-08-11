@@ -254,3 +254,85 @@ def compute_hop_errors(case_name):
         ),
     }
     return results
+
+
+def print_results(case_name, results):
+    '''Print the step-size convergence table.'''
+    print(f'\n=== {case_name} k-LASSCF CI-hop finite-difference check ===')
+    print('k-point mesh:', CASE_CONFIGS[case_name]['kmesh'])
+    print('CI vector size:', results['ci_size'])
+    print('Trial direction norm:', results['direction_norm'])
+    print('Reference CI-gradient norm:', results['reference_gradient_norm'])
+    print('Analytic CI-hop norm:', results['analytic_hop_norm'])
+    print('\n trial norm       absolute error       relative error')
+    for norm, absolute, relative in zip(
+            TRIAL_NORMS,
+            results['absolute_errors'],
+            results['relative_errors']):
+        print(f' {norm:10.3e}    {absolute:16.8e}    {relative:16.8e}')
+    print('\nMinimum relative error:', np.min(results['relative_errors']))
+    print('Zero-step extrapolated absolute error:',
+          results['zero_step_error'])
+    print('Zero-step extrapolated relative error:',
+          results['zero_step_relative_error'])
+
+def plot_errors(case_name, results, output_path=None):
+    if output_path is None:
+        output_path = f'ci_hop_error_{case_name.lower()}.png'
+   
+    errors = results['relative_errors']
+    minimum_index = int(np.argmin(errors))
+
+    figure, axis = plt.subplots(figsize=(6.0, 4.2))
+    axis.loglog(TRIAL_NORMS, errors, 'o-', linewidth=1.5,
+        label='Centered finite difference',
+    )
+    quadratic_reference = errors[0] * (
+        TRIAL_NORMS / TRIAL_NORMS[0]
+    ) ** 2
+    axis.loglog(
+        TRIAL_NORMS, quadratic_reference, ':', color='0.4',
+        linewidth=1.2, label=r'$O(\epsilon^2)$ reference',
+    )
+    axis.scatter(
+        TRIAL_NORMS[minimum_index], errors[minimum_index],
+        color='tab:red', zorder=3, label='Minimum error',
+    )
+    axis.axhline(
+        results['zero_step_relative_error'], color='tab:green',
+        linestyle='--', linewidth=1.2, label='Zero-step extrapolation',
+    )
+    axis.set_xlabel('Trial-vector norm')
+    axis.set_ylabel('Relative CI-hop error')
+    axis.set_title(f'{case_name} k-LASSCF CI-hop accuracy')
+    axis.grid(True, which='both', alpha=0.3)
+    axis.legend()
+    figure.tight_layout()
+    figure.savefig(output_path, dpi=200)
+    plt.close(figure)
+    return output_path
+
+def validate_results(results):
+    '''
+    Check that reducing the trial norm improves the hop comparison.
+    '''
+    if results['reference_gradient_norm'] >= 1e-7:
+        raise AssertionError('the reference CI gradient is not converged')
+    if results['analytic_hop_norm'] == 0:
+        raise AssertionError('the analytic CI hop is zero')
+    if np.min(results['relative_errors']) >= results['relative_errors'][0]:
+        raise AssertionError(
+            'the finite-difference hop did not improve as the trial norm fell'
+        )
+    if results['zero_step_relative_error'] >= results['relative_errors'][0]:
+        raise AssertionError(
+            'the zero-step extrapolation did not improve the comparison'
+        )
+
+if __name__ == '__main__':
+    for case in CASE_CONFIGS.keys():
+        results = compute_hop_errors(case)
+        print_results(case, results)
+        plot_path = plot_errors(case, results)
+        print(f'Plot saved to: {plot_path}')
+        validate_results(results)
