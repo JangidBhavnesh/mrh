@@ -17,6 +17,12 @@ from mrh.my_pyscf.pbc.mcscf.klasscf import KLASSCF_HessianOperator
 from mrh.my_pyscf.pbc.mcscf.productstate import PBCProductStateFCISolver
 
 
+# Author: Bhavnesh Jangid
+
+'''
+CI-hop finite-difference check for k-LASSCF.
+'''
+
 # Different dimensional cases:
 CASE_CONFIGS = {
     '1D': {
