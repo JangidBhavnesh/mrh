@@ -190,3 +190,67 @@ def extrapolate_zero_step(trial_norms, finite_difference_hops):
     y = np.asarray(finite_difference_hops)[fit_slice]
     coefficients = np.polynomial.polynomial.polyfit(x, y, 1)
     return coefficients[0]
+
+
+
+def compute_hop_errors(case_name):
+    '''
+    Compute analytic and finite-difference CI hops for one case.
+    '''
+    klasci, lo_coeff = run_klasci(case_name)
+    h1e = klasci.h1e_for_cas(mo_coeff=lo_coeff, 
+                             ncas=klasci.ncas, 
+                             ncore=klasci.ncore,)[0]
+    h2e = klasci.get_h2cas(lo_coeff)
+    product_solver = build_product_solver(klasci)
+    ci0 = copy_ci(klasci.ci)
+    h1frs = get_h1frs(product_solver, h1e, h2e, ci0, klasci)
+
+    hop = KLASSCF_HessianOperator(
+        klasci, None, mo_coeff=lo_coeff, ci=ci0,
+        h1eff=h1frs, h2eff=h2e,
+    )
+
+    # The level shift is an iterative-solver aid, not part of the derivative
+    # of the physical CI gradient used in this finite-difference check.
+    hop.level_shift = 0.0
+
+    direction = make_trial_direction(klasci, ci0)
+    direction_flat = flatten_ci(direction)
+    analytic_hop = hop.matvec(direction_flat)
+    gradient_ref = get_ci_gradient(
+        hop, product_solver, h1e, h2e, ci0, klasci,)
+
+    finite_difference_hops = []
+    absolute_errors = []
+    relative_errors = []
+    for trial_norm in TRIAL_NORMS:
+        ci_plus = displace_ci(ci0, direction, trial_norm)
+        ci_minus = displace_ci(ci0, direction, -trial_norm)
+        gradient_plus = get_ci_gradient(
+            hop, product_solver, h1e, h2e, ci_plus, klasci,)
+        gradient_minus = get_ci_gradient(
+            hop, product_solver, h1e, h2e, ci_minus, klasci,)
+
+        finite_difference_hop = (gradient_plus - gradient_minus) / (2.0 * trial_norm)
+        error = np.linalg.norm(analytic_hop - finite_difference_hop)
+        finite_difference_hops.append(finite_difference_hop)
+        absolute_errors.append(error)
+        relative_errors.append(error / np.linalg.norm(analytic_hop))
+
+    zero_step_hop = extrapolate_zero_step(TRIAL_NORMS, finite_difference_hops,)
+    zero_step_error = np.linalg.norm(analytic_hop - zero_step_hop)
+
+    results = {
+        'ci_size': direction_flat.size,
+        'direction_norm': np.linalg.norm(direction_flat),
+        'reference_gradient_norm': np.linalg.norm(gradient_ref),
+        'analytic_hop_norm': np.linalg.norm(analytic_hop),
+        'absolute_errors': np.asarray(absolute_errors),
+        'relative_errors': np.asarray(relative_errors),
+        'zero_step_error': zero_step_error,
+        'zero_step_relative_error': (
+            zero_step_error / np.linalg.norm(analytic_hop)
+        ),
+    }
+    return results
