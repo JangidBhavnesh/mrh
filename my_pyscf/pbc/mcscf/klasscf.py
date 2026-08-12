@@ -5,6 +5,7 @@ import numpy as np
 from mrh.my_pyscf.mcscf.lasscf_sync_o0 import (
     LASSCF_HessianOperator as molLASSCF_HessianOperator,
 )
+from mrh.my_pyscf.pbc.fci import cplx_csf_helper
 
 class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
     """Periodic CI-only Hessian operator for k-LASSCF.
@@ -71,9 +72,21 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
         self.fciboxes = las.fciboxes
         self.nroots = las.nroots
         self.weights = las.weights
-        self.nvar_ci = sum(
-            np.size(c0) for ci0_r in self.ci for c0 in ci0_r
-        )
+        self.ci_transformers = ugg.ci_transformers
+        self.frozen_ci = set(getattr(ugg, "frozen_ci", None) or [])
+        if len(self.ci_transformers) != len(self.ci):
+            msg = (f"ugg.ci_transformers must contain one entry per CI cell; ")
+            raise ValueError(msg)
+        self.nvar_ci = 0
+
+        for ifrag, (transformers, ci0_r) in enumerate(zip(self.ci_transformers, self.ci)):
+            if len(transformers) != len(ci0_r):
+                msg = f"cell {ifrag} has {len(transformers)} CSF transformers \
+                    for {len(ci0_r)} CI roots"
+                raise ValueError(msg)
+                
+            if ifrag not in self.frozen_ci:
+                self.nvar_ci += sum(t.ncsf for t in transformers)
 
         self._init_dms_(casdm1frs)
         self._init_ham_(h1eff, h2eff)
@@ -300,6 +313,51 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
 
         return response
 
+    def _get_Hci_diag(self):
+        """
+        Build the CI preconditioner diagonal in packed CSF coordinates.
+        """
+        hci_diag = []
+        for ifrag, (fcibox, norb, nelec, h1rs, transformers) in enumerate(zip(
+                self.fciboxes, self.ncas_sub, self.nelecas_sub,
+                self.h1frs, self.ci_transformers)):
+            if ifrag in self.frozen_ci:
+                continue
+            i = int(np.sum(self.ncas_sub[:ifrag]))
+            j = i + int(norb)
+            h2 = self.eri_cas[i:j, i:j, i:j, i:j]
+            hdiag_csf_r = fcibox.states_make_hdiag_csf(
+                h1rs, h2, norb, nelec,
+            )
+            if len(hdiag_csf_r) != len(transformers):
+                msg = (
+                    f"cell {ifrag} produced {len(hdiag_csf_r)} Hamiltonian "
+                    f"diagonals for {len(transformers)} CI roots"
+                )
+                raise ValueError(msg)
+            
+            for iroot, (transformer, hdiag_csf) in enumerate(zip(
+                    transformers, hdiag_csf_r)):
+                hdiag_csf = np.asarray(transformer.pack_csf(hdiag_csf))
+                if hdiag_csf.size != transformer.ncsf:
+                    msg = (
+                        f"cell {ifrag}, root {iroot} packed Hamiltonian "
+                        f"diagonal has size {hdiag_csf.size}; expected "
+                        f"{transformer.ncsf}"
+                    )
+                    raise ValueError(msg)
+                
+                hci_diag.append(hdiag_csf.reshape(-1))
+
+        return hci_diag
+
+    def _get_Hdiag(self):
+        """Return the CI-only diagonal in the operator's CSF ordering."""
+        hci_diag = self._get_Hci_diag()
+        if not hci_diag:
+            return np.empty(0, dtype=np.result_type(self.eri_cas.dtype))
+        return np.concatenate(hci_diag)
+
     def ci_response_offdiag(self, h1frs_response):
         """Apply the different-cell blocks of the CI Hessian.
 
@@ -312,21 +370,15 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
                 h1frs_response, self.ci)):
             h0_r = [0.0] * self.nroots
             zero_h2 = np.zeros((norb,) * 4, dtype=self.eri_cas.dtype)
-            linkstrl = (
-                None if self.linkstrl is None else self.linkstrl[ifrag]
-            )
+            linkstrl = (None if self.linkstrl is None 
+                        else self.linkstrl[ifrag])
             response.append(self.Hci(
                 fcibox, norb, nelec, h0_r, h1rs, zero_h2, ci0_r,
                 linkstrl=linkstrl,
             ))
-
-        response = [
-            [
-                2.0 * (hc - np.vdot(c0, hc) * c0)
-                for hc, c0 in zip(response_r, ci0_r)
-            ]
-            for response_r, ci0_r in zip(response, self.ci)
-        ]
+        response = [[ 2.0 * (hc - np.vdot(c0, hc) * c0) 
+                     for hc, c0 in zip(response_r, ci0_r)]
+                     for response_r, ci0_r in zip(response, self.ci)]
         return response
 
     @property
@@ -335,7 +387,7 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
         return self.nvar_ci, self.nvar_ci
 
     def _unpack_ci_vector(self, x):
-        """Restore a flat CI trial vector to the layout of ``self.ci``."""
+        """Transform a packed complex CSF step to determinant arrays."""
         x_flat = np.asarray(x).reshape(-1)
         if x_flat.size != self.nvar_ci:
             raise ValueError(
@@ -344,35 +396,57 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
 
         ci1 = []
         offset = 0
-        for ci0_r in self.ci:
+        for ifrag, (transformers, ci0_r) in enumerate(zip(
+                self.ci_transformers, self.ci)):
             ci1_r = []
-            for c0 in ci0_r:
-                size = np.size(c0)
-                ci1_r.append(
-                    x_flat[offset:offset + size].reshape(np.shape(c0))
+            for transformer, c0 in zip(transformers, ci0_r):
+                if ifrag in self.frozen_ci:
+                    ci1_r.append(np.zeros_like(c0))
+                    continue
+                ncsf = transformer.ncsf
+                c1 = cplx_csf_helper.vec_csf2det_cplx(
+                    transformer, x_flat[offset:offset + ncsf],
+                    normalize=False,
                 )
-                offset += size
+                ci1_r.append(np.asarray(c1).reshape(np.shape(c0)))
+                offset += ncsf
             ci1.append(ci1_r)
+        if offset != x_flat.size:
+            raise ValueError(
+                f"consumed {offset} CSF coefficients from a vector of size "
+                f"{x_flat.size}"
+            )
         return ci1
 
-    @staticmethod
-    def _flatten_ci_vector(ci):
-        """Flatten a cell/root nested CI list without changing its ordering."""
-        vectors = [
-            np.asarray(c0).reshape(-1)
-            for ci0_r in ci
-            for c0 in ci0_r
-        ]
+    def _flatten_ci_vector(self, ci):
+        """Transform determinant-array responses to packed complex CSFs."""
+        if len(ci) != len(self.ci_transformers):
+            raise ValueError("CI response must contain one entry per cell")
+        vectors = []
+        for ifrag, (transformers, ci_r) in enumerate(zip(
+                self.ci_transformers, ci)):
+            if len(transformers) != len(ci_r):
+                raise ValueError(
+                    f"cell {ifrag} has {len(ci_r)} CI responses for "
+                    f"{len(transformers)} roots"
+                )
+            if ifrag in self.frozen_ci:
+                continue
+            for transformer, c0 in zip(transformers, ci_r):
+                c0_csf = cplx_csf_helper.vec_det2csf_cplx(
+                    transformer, c0, normalize=False,
+                )
+                vectors.append(np.asarray(c0_csf).reshape(-1))
         if not vectors:
-            return np.empty(0)
+            return np.empty(0, dtype=np.complex128)
         return np.concatenate(vectors)
 
     def _matvec(self, x):
         """Apply the CI-only Hessian to a flat trial CI vector.
 
-        For now, ``x`` contains determinant-basis CI amplitudes for every
-        cell and root in the same order as ``self.ci``. The returned vector
-        uses exactly the same ordering and has the same size.
+        ``x`` contains packed CSF amplitudes for every non-frozen cell and
+        root. Hamiltonian and RDM operations are evaluated in the determinant
+        representation before the response is transformed back to CSFs.
         """
         ci1 = self._unpack_ci_vector(x)
 
@@ -384,13 +458,12 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
         ci2 = []
         for diag_r, offdiag_r, ci1_r in zip(
                 ci2_diag, ci2_offdiag, ci1):
-            for diag, offdiag, trial in zip(diag_r, offdiag_r, ci1_r):
-                ci2.append(
-                    np.asarray(diag + offdiag + self.level_shift * trial)
-                    .reshape(-1)
-                )
+            ci2.append([
+                diag + offdiag + self.level_shift * trial
+                for diag, offdiag, trial in zip(diag_r, offdiag_r, ci1_r)
+            ])
 
-        return np.concatenate(ci2)
+        return self._flatten_ci_vector(ci2)
 
 
 class KLASSCF_TransSymmHessianOperator(KLASSCF_HessianOperator):
