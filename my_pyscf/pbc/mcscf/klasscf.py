@@ -7,6 +7,100 @@ from mrh.my_pyscf.mcscf.lasscf_sync_o0 import (
 )
 from mrh.my_pyscf.pbc.fci import cplx_csf_helper
 
+
+def get_grad_orb (klas, mo_coeff_kpts=None, ci=None, h2eff_sub=None, 
+                  veff_kpts=None, dm1s_kpts=None, hermi=-1):
+    '''Return energy gradient for orbital rotation.
+    
+    Note: this function expects arrays of different sizes than
+    what is expected by the molecular version of the same function.
+
+    Args:
+        klas : instance of :class:`KLASSCF`
+
+    Kwargs:
+        mo_coeff_kpts : ndarray of shape (nkpts,nao,nmo)
+            Contains molecular orbitals
+        ci : list (length=nfrags) of list (length=nroots) of ndarray
+            Contains CI vectors (# Note the CI vectors are in the Wannier basis)
+        h2eff_sub : ndarray of shape (nkpts, nkpts, nkpts, nmo, ncas, ncas, ncas)
+            Contains ERIs in the bloch MO basis.
+        veff_kpts : ndarray of shape (2,nkpts,nao,nao)
+            Spin-separated, state-averaged 1-electron mean-field potential in the AO basis
+        dm1s_kpts : ndarray of shape (2,nkpts,nao,nao)
+            Spin-separated, state-averaged 1-RDM in the AO basis
+        hermi : integer
+            Control (anti-)symmetrization. 0 means to return the effective Fock matrix,
+            F1 = h.D + g.d. -1 means to return the true orbital-rotation gradient, which is skew-
+            symmetric: gorb = F1 - F1.conj().T. +1 means to return the symmetrized effective Fock matrix,
+            (F1 + F1.conj().T) / 2. The factor of 2 difference between hermi=-1 and the other two options
+            is intentional and necessary.
+
+    Returns:
+        gorb : ndarray of shape (nmo,nmo)
+            Orbital rotation gradients as a square antihermitian array
+    '''
+
+    cell = klas._scf.cell
+    kpts = klas.kpts
+    nkpts = len(kpts)
+
+    if mo_coeff_kpts is None:
+        mo_coeff_kpts = klas.mo_coeff
+    if ci is None: ci = klas.ci
+    if dm1s_kpts is None:
+        dm1s_kpts = klas.make_rdm1s (mo_coeff=mo_coeff_kpts, ci=ci)
+    if h2eff_sub is not None:
+        #h2eff_sub = klas.get_h2eff (mo_coeff) 
+        # Not caching in entire array.
+        pass
+    if veff_kpts is None:
+        veff_kpts = klas.get_veff (cell, dm = dm1s_kpts)
+
+    nao, nmo = mo_coeff_kpts.shape[-2:]
+    ncore = klas.ncore
+    ncas = klas.ncas
+    nocc = klas.ncore + klas.ncas
+    dtype = np.result_type(mo_coeff_kpts.dtype, veff_kpts.dtype,
+                            dm1s_kpts.dtype)
+
+    ovlp_kpts = klas._scf.get_ovlp (kpts=kpts)
+    hcore_kpts = klas.get_hcore (kpts=kpts)
+    h1es_kpts = hcore_kpts[None,:,:,:] + veff_kpts
+
+    hcore_kpts = veff_kpts = None
+
+    f1 = np.empty((nkpts, nmo, nmo), dtype=dtype)
+
+    # smo_cas = klas._scf.get_ovlp () @ mo_coeff_kpts[:,ncore:nocc]
+    # smoH_cas = smo_cas.conj ().T
+    # f1 = h1s[0] @ dm1s[0] + h1s[1] @ dm1s[1]
+    for k in range(nkpts):
+        temp = h1es_kpts[0,k] @ dm1s_kpts[0,k] + h1es_kpts[1,k] @ dm1s_kpts[1,k]
+        smo_coeff_k = ovlp_kpts[k] @ mo_coeff_kpts[k]
+        f1[k] = smo_coeff_k.conjugate ().T @ temp @ smo_coeff_k
+
+    # It's in Wannier basis:
+    casdm2 = klas.make_casdm2 (ci=ci)
+    casdm1s = np.stack ([smoH_cas @ d @ smo_cas for d in dm1s], axis=0)
+    casdm1 = casdm1s.sum (0)
+    
+    casdm2 -= np.multiply.outer (casdm1, casdm1)
+    casdm2 += np.multiply.outer (casdm1s[0], casdm1s[0]).transpose (0,3,2,1)
+    casdm2 += np.multiply.outer (casdm1s[1], casdm1s[1]).transpose (0,3,2,1)
+    eri = h2eff_sub.reshape (nmo*ncas, ncas*(ncas+1)//2)
+    eri = lib.numpy_helper.unpack_tril (eri).reshape (nmo, ncas, ncas, ncas)
+    f1[:,ncore:nocc] += np.tensordot (eri, casdm2, axes=((1,2,3),(1,2,3)))
+
+    if hermi == -1:
+        return f1 - f1.T
+    elif hermi == 1:
+        return .5*(f1+f1.T)
+    elif hermi == 0:
+        return f1
+    else:
+        raise ValueError ("kwarg 'hermi' must = -1, 0, or +1")
+        
 class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
     """Periodic CI-only Hessian operator for k-LASSCF.
 
