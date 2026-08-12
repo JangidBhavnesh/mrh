@@ -5,7 +5,9 @@ import numpy as np
 from mrh.my_pyscf.mcscf.lasscf_sync_o0 import (
     LASSCF_HessianOperator as molLASSCF_HessianOperator,
 )
+from pyscf.pbc.lib import kpts_helper
 from mrh.my_pyscf.pbc.fci import cplx_csf_helper
+from mrh.my_pyscf.pbc.mcscf.mc1step import _get_casdm2_kpts
 
 
 def get_grad_orb (klas, mo_coeff_kpts=None, ci=None, h2eff_sub=None, 
@@ -67,39 +69,49 @@ def get_grad_orb (klas, mo_coeff_kpts=None, ci=None, h2eff_sub=None,
     ovlp_kpts = klas._scf.get_ovlp (kpts=kpts)
     hcore_kpts = klas.get_hcore (kpts=kpts)
     h1es_kpts = hcore_kpts[None,:,:,:] + veff_kpts
-
     hcore_kpts = veff_kpts = None
 
     f1 = np.empty((nkpts, nmo, nmo), dtype=dtype)
 
-    # smo_cas = klas._scf.get_ovlp () @ mo_coeff_kpts[:,ncore:nocc]
-    # smoH_cas = smo_cas.conj ().T
-    # f1 = h1s[0] @ dm1s[0] + h1s[1] @ dm1s[1]
     for k in range(nkpts):
-        temp = h1es_kpts[0,k] @ dm1s_kpts[0,k] + h1es_kpts[1,k] @ dm1s_kpts[1,k]
         smo_coeff_k = ovlp_kpts[k] @ mo_coeff_kpts[k]
-        f1[k] = smo_coeff_k.conjugate ().T @ temp @ smo_coeff_k
+        smo_coeff_k_H = smo_coeff_k.conjugate ().T
+        mo_coeff_k = mo_coeff_kpts[k]
+        mo_coeff_k_H = mo_coeff_k.conjugate ().T
+        dm1s_mo = smo_coeff_k_H @ dm1s_kpts[:,k] @ smo_coeff_k
+        h1es_mo = mo_coeff_k_H @ h1es_kpts[:,k] @ mo_coeff_k
+        f1[k] = h1es_mo[0] @ dm1s_mo[0] + h1es_mo[1] @ dm1s_mo[1] 
 
+    smo_coeff_k = smo_coeff_k_H = mo_coeff_k = mo_coeff_k_H = None
+    
     # It's in Wannier basis:
     casdm2 = klas.make_casdm2 (ci=ci)
-    casdm1s = np.stack ([smoH_cas @ d @ smo_cas for d in dm1s], axis=0)
+
+    # Currently, it's formed by transforming the dm1s, but it would be wiser to just reconstruct it.
+    casdm1s = klas.make_casdm1s (ci=ci)
     casdm1 = casdm1s.sum (0)
-    
     casdm2 -= np.multiply.outer (casdm1, casdm1)
     casdm2 += np.multiply.outer (casdm1s[0], casdm1s[0]).transpose (0,3,2,1)
     casdm2 += np.multiply.outer (casdm1s[1], casdm1s[1]).transpose (0,3,2,1)
-    eri = h2eff_sub.reshape (nmo*ncas, ncas*(ncas+1)//2)
-    eri = lib.numpy_helper.unpack_tril (eri).reshape (nmo, ncas, ncas, ncas)
-    f1[:,ncore:nocc] += np.tensordot (eri, casdm2, axes=((1,2,3),(1,2,3)))
 
-    if hermi == -1:
-        return f1 - f1.T
-    elif hermi == 1:
-        return .5*(f1+f1.T)
-    elif hermi == 0:
-        return f1
-    else:
-        raise ValueError ("kwarg 'hermi' must = -1, 0, or +1")
+    casdm1 = casdm1s = None
+
+    mo_phase = None
+    kconserv = kpts_helper.get_kconserv(cell, kpts)
+
+    for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
+        k4 = kconserv[k1, k2, k3]
+        casdm2_kpts = _get_casdm2_kpts(casdm2, mo_phase, (k1, k2, k3, k4))
+        paaa_kpts = klas.eri.ppaa[k1, k2, k3, k4]
+        f1[k][:,ncore:nocc] += np.tensordot (paaa_kpts, casdm2_kpts, 
+                                          axes=((1,2,3),(1,2,3)))
+
+    casdm2 = None
+
+    if hermi == -1: return f1 - f1.conj().transpose(0,2,1)
+    elif hermi == 1: return .5*(f1+f1.conj().transpose(0,2,1))
+    elif hermi == 0: return f1
+    else: raise ValueError ("kwarg 'hermi' must = -1, 0, or +1")
         
 class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
     """Periodic CI-only Hessian operator for k-LASSCF.
