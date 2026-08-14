@@ -8,6 +8,7 @@ from mrh.my_pyscf.mcscf.lasscf_sync_o0 import (
 from pyscf.pbc.lib import kpts_helper
 from mrh.my_pyscf.pbc.fci import cplx_csf_helper
 from mrh.my_pyscf.pbc.mcscf.mc1step import _get_casdm2_kpts
+from mrh.my_pyscf.pbc.util.wannier import get_wannier_orbs
 
 
 def get_grad_orb (klas, mo_coeff_kpts=None, ci=None, h2eff_sub=None, 
@@ -39,7 +40,7 @@ def get_grad_orb (klas, mo_coeff_kpts=None, ci=None, h2eff_sub=None,
             is intentional and necessary.
 
     Returns:
-        gorb : ndarray of shape (nmo,nmo)
+        gorb : ndarray of shape (nkpts,nmo,nmo)
             Orbital rotation gradients as a square antihermitian array
     '''
 
@@ -52,12 +53,8 @@ def get_grad_orb (klas, mo_coeff_kpts=None, ci=None, h2eff_sub=None,
     if ci is None: ci = klas.ci
     if dm1s_kpts is None:
         dm1s_kpts = klas.make_rdm1s (mo_coeff=mo_coeff_kpts, ci=ci)
-    if h2eff_sub is not None:
-        #h2eff_sub = klas.get_h2eff (mo_coeff) 
-        # Not caching in entire array.
-        pass
     if veff_kpts is None:
-        veff_kpts = klas.get_veff (cell, dm = dm1s_kpts)
+        veff_kpts = klas.get_veff (cell, dm_kpts=dm1s_kpts)
 
     nao, nmo = mo_coeff_kpts.shape[-2:]
     ncore = klas.ncore
@@ -83,7 +80,7 @@ def get_grad_orb (klas, mo_coeff_kpts=None, ci=None, h2eff_sub=None,
         f1[k] = h1es_mo[0] @ dm1s_mo[0] + h1es_mo[1] @ dm1s_mo[1] 
 
     smo_coeff_k = smo_coeff_k_H = mo_coeff_k = mo_coeff_k_H = None
-    
+
     # It's in Wannier basis:
     casdm2 = klas.make_casdm2 (ci=ci)
 
@@ -96,15 +93,17 @@ def get_grad_orb (klas, mo_coeff_kpts=None, ci=None, h2eff_sub=None,
 
     casdm1 = casdm1s = None
 
-    mo_phase = None
+    mo_act_kpts = mo_coeff_kpts[:, :, ncore:nocc]
+    mo_phase = get_wannier_orbs(klas._scf, klas.kmesh, mo_act_kpts,)[-1]
+    
     kconserv = kpts_helper.get_kconserv(cell, kpts)
 
     for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
         k4 = kconserv[k1, k2, k3]
         casdm2_kpts = _get_casdm2_kpts(casdm2, mo_phase, (k1, k2, k3, k4))
         paaa_kpts = klas.eri.ppaa[k1, k2, k3, k4]
-        f1[k][:,ncore:nocc] += np.tensordot (paaa_kpts, casdm2_kpts, 
-                                          axes=((1,2,3),(1,2,3)))
+        f1[k1][:,ncore:nocc] += np.tensordot (paaa_kpts, casdm2_kpts,
+                                             axes=((1,2,3),(1,2,3)))
 
     casdm2 = None
 
