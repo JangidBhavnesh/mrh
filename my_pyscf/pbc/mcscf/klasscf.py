@@ -9,6 +9,10 @@ from pyscf.pbc.lib import kpts_helper
 from mrh.my_pyscf.pbc.fci import cplx_csf_helper
 from mrh.my_pyscf.pbc.mcscf.mc1step import _get_casdm2_kpts
 from mrh.my_pyscf.pbc.mcscf.klas_ao2mo import _ERIS
+from mrh.my_pyscf.pbc.mcscf.klasci import (
+    PBCLASCINoSymm,
+    PBCLASCITransSymm,
+)
 from mrh.my_pyscf.pbc.util.wannier import get_wannier_orbs
 
 
@@ -56,7 +60,7 @@ def get_grad_orb (klas, mo_coeff_kpts=None, ci=None, h2eff_sub=None,
     if dm1s_kpts is None:
         dm1s_kpts = klas.make_rdm1s (mo_coeff=mo_coeff_kpts, ci=ci)
     if h2eff_sub is None:
-        h2eff_sub = _ERIS(klas, mo_coeff_kpts)
+        h2eff_sub = klas._klasscf_eris(klas, mo_coeff_kpts)
     if veff_kpts is None:
         veff_kpts = klas.get_veff (cell, dm_kpts=dm1s_kpts)
 
@@ -993,3 +997,12 @@ class KLASSCF_TransSymmHessianOperator(KLASSCF_HessianOperator):
         ci1 = self._unpack_cif(self._pack_ci(ci1))
         x_trans = self._flatten_ci_vector(ci1)
         return KLASSCF_HessianOperator._matvec(self, x_trans)
+
+
+# Make the orbital-gradient implementation available on both periodic LAS
+# variants.  The current periodic Hessian is CI-only, so its constructor does
+# not initialize these comparatively expensive orbital AO2MO intermediates.
+PBCLASCINoSymm.get_grad_orb = get_grad_orb
+PBCLASCINoSymm._klasscf_eris = _ERIS
+PBCLASCITransSymm.get_grad_orb = get_grad_orb
+PBCLASCITransSymm._klasscf_eris = _ERIS
