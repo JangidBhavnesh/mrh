@@ -113,11 +113,15 @@ def kLASCI(kmf, ncas, nelecas, ncore=None, spin_mult=None, kmesh=None,
 
     return klas
 
-@lib.with_doc(casci.h1e_for_cas.__doc__)
+@lib.with_doc(casci.h1e_for_cas.__doc__ + """
+
+    Notes:
+        Unlike k-CASCI, k-LASCI returns the active-space one-electron
+        Hamiltonian in the Wannier basis. The frozen-core contribution and
+        k-point AO-to-MO projection are shared with k-CASCI; only the final
+        representation change is different.
+""")
 def h1e_for_cas(mc, mo_coeff=None, ncas=None, ncore=None):
-    # Unlike k-CASCI, k-LASCI uses a Wannier basis for the active-space
-    # Hamiltonian.  The core contribution and k-point AO-to-MO projection are
-    # shared with k-CASCI; only this final representation change is different.
     h1e_kpts, ecore = mc.h1e_kpts_for_cas(
         mo_coeff=mo_coeff, ncas=ncas, ncore=ncore,
     )
@@ -126,23 +130,26 @@ def h1e_for_cas(mc, mo_coeff=None, ncas=None, ncore=None):
     )
     return h1eff_wann, ecore
 
-@lib.with_doc(casci.PBCCASCI.get_h2eff.__doc__)
+@lib.with_doc(casci.PBCCASCI.get_h2eff.__doc__ + """
+
+    Notes:
+        This k-LASCI implementation returns the two-electron integrals in the
+        Wannier basis. It first transforms the integrals to the k-point active
+        MO basis and then applies the k-to-Wannier transformation.
+
+    Args:
+        mc : PBCCASCI
+            Periodic CASCI object.
+        mo_coeff : list or ndarray of shape (nkpts, nao, nmo)
+            MO coefficients at each k-point. If not provided, ``mc.mo_coeff``
+            is used.
+
+    Returns:
+        h2eff_R : ndarray
+            Two-electron integrals in the Wannier basis with shape
+            ``(nkpts*ncas, nkpts*ncas, nkpts*ncas, nkpts*ncas)``.
+""")
 def h2e_for_cas(mc, mo_coeff=None):
-    '''
-    AO2MO Transformation of the 2e integrals in the Wannier basis for k-LASCI.
-    The way we do this is by first transforming the 2e integrals from k-space MO basis to 
-    real space MO basis, and then transforming it to the Wannier basis using the wannier 
-    orbital coefficients.
-    args:
-        mc: PBCCASCI object
-            periodic CASCI object
-        mo_coeff: list/np.ndarray (nkpts, nao, nmo)
-            MO coefficients for each k-point. If None, it will be taken from the 
-            PBCCASCI object.
-    returns:
-        h2eff_R: ndarray (nkpts*ncas, nkpts*ncas, nkpts*ncas, nkpts*ncas)
-            2e integrals in the Wannier basis in real space.
-    '''
     kmf = mc._scf
     cell = kmf.cell
     ncore = mc.ncore
@@ -230,7 +237,13 @@ def convert_h1e_mo_k_to_wann(kmf, kmesh, h1e_mo_k):
     h1eff_R = h1eff_R.reshape(ncell * norb, ncell * norb)
     return h1eff_R
 
-@lib.with_doc(mollasci.h1e_for_las.__doc__)
+@lib.with_doc(mollasci.h1e_for_las.__doc__ + """
+
+    Notes:
+        In the periodic implementation, ``mo_coeff`` has shape
+        ``(nkpts, nao, nmo)`` and the active-space Hamiltonian and density
+        matrices are represented in the Wannier basis.
+""")
 def h1e_for_las (las, mo_coeff=None, ncas=None, ncore=None, nelecas=None, 
                  ci=None, ncas_sub=None,
                  nelecas_sub=None, veff=None, h2eff_sub=None, casdm1s_sub=None, casdm1frs=None,
@@ -300,7 +313,13 @@ def h1e_for_las (las, mo_coeff=None, ncas=None, ncore=None, nelecas=None,
 
     return h1e_fr
 
-@lib.with_doc(mollasci.kernel.__doc__)
+@lib.with_doc(mollasci.kernel.__doc__ + """
+
+    Notes:
+        This is the periodic k-LASCI kernel. The orbital coefficients carry a
+        leading k-point dimension, and the reported total and CAS energies are
+        normalized by the number of k-points.
+""")
 def kernel (las, mo_coeff=None, ci0=None, lroots=None, lweights=None, verbose=0,
                assert_no_dupes=False, _dry_run=False):
     if assert_no_dupes: mollasci.assert_no_duplicates (las)
@@ -557,7 +576,12 @@ class PBCLASCINoSymm(casci.PBCCASCI, LASCINoSymm):
     get_h2cas = h2e_for_cas = h2e_for_cas 
     localize_init_guess = klasci_guess.localize_init_guess
     
-    @lib.with_doc(kernel.__doc__)
+    @lib.with_doc(kernel.__doc__ + """
+
+        Notes:
+            This method stores the results returned by the module-level
+            periodic k-LASCI kernel on the current object.
+    """)
     def kernel (self, mo_coeff=None, ci0=None, lroots=None, lweights=None, verbose=None,
                assert_no_dupes=False, _dry_run=False):
         nkpts = len(self.kpts)
@@ -611,7 +635,12 @@ class PBCLASCINoSymm(casci.PBCCASCI, LASCINoSymm):
         mo = mo[:,:self.ncas_sub[idx]]
         return mo
     
-    @lib.with_doc(mollasci.LASCINoSymm.make_rdm1s.__doc__)
+    @lib.with_doc(mollasci.LASCINoSymm.make_casdm1s_sub.__doc__ + """
+
+        Notes:
+            The returned fragment density matrices are expressed in the
+            Wannier active-orbital basis.
+    """)
     def make_casdm1s_sub (self, ci=None, ncas_sub=None, nelecas_sub=None,
             casdm1frs=None, w=None, **kwargs):
         if casdm1frs is None:
