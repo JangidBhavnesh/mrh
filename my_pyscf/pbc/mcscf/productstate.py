@@ -1,5 +1,4 @@
 import numpy as np
-from scipy import linalg
 from itertools import combinations
 
 from pyscf import lib
@@ -21,108 +20,7 @@ from mrh.my_pyscf.mcscf.productstate import (
 
 class PBCProductStateFCISolver (molProductStateFCISolver):
 
-    def kernel (self, h1, h2, norb_f, nelec_f, ecore=0, ci0=None, orbsym=None,
-            conv_tol_grad=1e-4, conv_tol_self=1e-10, max_cycle_macro=50,
-            serialfrag=False, **kwargs):
-        log = self.log
-        converged = False
-        e_sigma = 0.0
-        e = [0 for n in norb_f]
-        ci1 = ci0
-        log.info ('Entering product-state fixed-point CI iteration')
-        for it in range (max_cycle_macro):
-            ci0 = self.get_init_guess (ci1, norb_f, nelec_f, h1, h2)
-            # Issue #86: put get_init_guess INSIDE the iteration in case _1shot below encounters
-            # linear dependencies and can't populate all CI vectors for all fragments.
-            h1eff, h0eff, ci0 = self.project_hfrag (h1, h2, ci0, norb_f, nelec_f,
-                ecore=ecore, **kwargs)
-
-            grad = self._get_grad (h1eff, h2, ci0, norb_f, nelec_f, **kwargs)
-            grad_max = np.amax (np.abs (grad))
-            solvers_converged = [np.all (np.asarray (s.converged)) for s in self.fcisolvers]
-            nconv = sum ([int (c) for c in solvers_converged])
-            log.info ('Cycle %d: max grad = %e ; sigma = %e ; %d/%d fragment CI solvers converged',
-                      it, grad_max, e_sigma.real, nconv, len (self.fcisolvers))
-            log.debug ('e vector = {}'.format (e))
-            if nconv<len(self.fcisolvers): log.debug ('unconverged fragment CI solvers: {}'.format (
-                list(np.where (np.logical_not (solvers_converged))[0])))
-            if ((grad_max < conv_tol_grad) and (e_sigma < conv_tol_self)
-                and all ([solvers_converged]) and it>0):
-                converged = True
-                break
-            e, ci1 = self._1shot (it, h0eff, h1eff, h2, e, ci0, norb_f, nelec_f,
-                orbsym=orbsym, serialfrag=serialfrag, **kwargs)
-            e_sigma = np.amax (e) - np.amin (e)
-        conv_str = ['NOT converged','converged'][int (converged)]
-        log.info (('Product_state fixed-point CI iteration {} after {} '
-                   'cycles').format (conv_str, it))
-        if not converged:
-            ci1 = self.get_init_guess (ci1, norb_f, nelec_f, h1, h2)
-            # Issue #86: see above, same problem
-            self._debug_csfs (log, ci0, ci1, norb_f, nelec_f, grad)
-        energy_elec = self.energy_elec (h1, h2, ci1, norb_f, nelec_f,
-            ecore=ecore, efinal=e, **kwargs)
-        return converged, energy_elec, ci1
-
-    def _check_init_guess (self, ci0, norb_f, nelec_f, nroots=None):
-        ci1 = []
-        if ci0 is None: ci0 = [None for i in range (len (norb_f))]
-        for ix, (no, ne, solver) in enumerate (zip (norb_f, nelec_f, self.fcisolvers)):
-            solver.check_transformer_cache ()
-            snroots = solver.nroots if nroots is None else min (nroots, solver.transformer.ncsf)
-            nelec = self._get_nelec (solver, ne)
-            neleca, nelecb = nelec
-            na = cistring.num_strings (no, neleca)
-            nb = cistring.num_strings (no, nelecb)
-            zguess = np.zeros ((snroots,na,nb), dtype=np.complex128)
-            cguess = np.asarray (ci0[ix]).reshape (-1,na,nb)
-            ngroots = min (zguess.shape[0], cguess.shape[0])
-            zguess[:ngroots,:,:] = cguess[:ngroots,:,:]
-            ci1.append (zguess)
-            if snroots>na*nb:
-                raise RuntimeError ("{} roots > {} determinants in fragment {}".format (
-                    snroots, na*nb, ix))
-            if isinstance (solver, CSFFCISolver):
-                solver.check_transformer_cache ()
-                if snroots>solver.transformer.ncsf:
-                    raise RuntimeError ("{} roots > {} CSFs in fragment {} (nelec={}, smult={})".format (
-                        snroots, solver.transformer.ncsf, ix, solver.nelec, solver.smult))
-        return ci1
-                
-    def _debug_csfs (self, log, ci0, ci1, norb_f, nelec_f, grad, nroots=None):
-        if not all ([isinstance (s, CSFFCISolver) for s in self.fcisolvers]):
-            return
-        if log.verbose < lib.logger.INFO: return
-        transformers = [s.transformer for s in self.fcisolvers]
-        grad_f = []
-        for s,t in zip (self.fcisolvers, transformers):
-            snroots = nroots if nroots is not None else s.nroots
-            grad_f.append (grad[:t.ncsf*snroots].reshape (snroots, t.ncsf))
-            offs = (t.ncsf*snroots) + (snroots*(snroots-1)//2)
-            grad = grad[offs:]
-        assert (len (grad) == 0)
-        log.info ('Debugging CI and gradient vectors...')
-        for ix, (grad, c0, c1, s, t) in enumerate (zip (grad_f, ci0, ci1, self.fcisolvers, transformers)):
-            log.info ('Fragment %d', ix)
-            c0_csf, c0_norm = t.vec_det2csf (c0, normalize=True, return_norm=True)
-            c1_csf, c1_norm = t.vec_det2csf (c1, normalize=True, return_norm=True)
-            log.info ('CI vector norm = %s', str(c1_norm))
-            grad_norm = linalg.norm (grad)
-            log.info ('Gradient norm = %e', grad_norm)
-            c0_lbls, c0_coeffs = t.printable_largest_csf (c0_csf, 10)
-            c1_lbls, c1_coeffs = t.printable_largest_csf (c1_csf, 10)
-            g_lbls, g_coeffs = t.printable_largest_csf (grad, 10, normalize=False)
-            nroots = len (c0_lbls)
-            for i in range (nroots):
-                log.info ('Previous CI vector leading components (%d/%d):', i, nroots)
-                for l, c in zip (c0_lbls[i], c0_coeffs[i]):
-                    log.info ('%s : %e', l, c)
-                log.info ('Current CI vector leading components (%d/%d):', i, nroots)
-                for l, c in zip (c1_lbls[i], c1_coeffs[i]):
-                    log.info ('%s : %e', l, c)
-                log.info ('Grad vector leading components (%d/%d):', i, nroots)
-                for l, c in zip (g_lbls[i], g_coeffs[i]):
-                    log.info ('%s : %e', l, c)
+    ci_dtype = np.complex128
 
     def _get_grad (self, h1eff, h2, ci, norb_f, nelec_f, orbsym=None,
             **kwargs):
@@ -162,34 +60,6 @@ class PBCProductStateFCISolver (molProductStateFCISolver):
                 chc -= chc.T
                 grad.append (chc[np.tril_indices (nroots,k=-1)])
         return np.concatenate (grad)
-
-    def make_rdm1s (self, ci, norb_f, nelec_f, **kwargs):
-        norb = sum (norb_f)
-        nj = np.cumsum (norb_f)
-        ni = nj - norb_f
-        dm1s_f = []
-        for ix, (i, j, c, no, ne, s) in enumerate (zip (ni, nj, ci, norb_f, nelec_f, self.fcisolvers)):
-            nelec = self._get_nelec (s, ne)
-            if getattr (c, 'ndim', 3) == 3: c = list (c)
-            try:
-                a, b = s.make_rdm1s (c, no, nelec)
-            except AssertionError as e:
-                print (type (c), np.asarray (c).shape, no, nelec, ix, type (s), getattr (s, 'weights', None))
-                raise (e)
-            except ValueError as e:
-                print ("frag=",ix,"nroots=",s.nroots,"no=",no,"ne=",nelec,'c.shape=',np.asarray(c).shape)
-                if isinstance (s, CSFFCISolver):
-                    print ("smult=",s.smult,"ncsf=",s.transformer.ncsf)
-                raise (e)
-            dm1s_f.append ((i, j, np.asarray(a), np.asarray(b)))
-        dtype = np.result_type (float,
-            *[dm for _, _, a, b in dm1s_f for dm in (a, b)])
-        dm1a = np.zeros ((norb, norb), dtype=dtype)
-        dm1b = np.zeros ((norb, norb), dtype=dtype)
-        for i, j, a, b in dm1s_f:
-            dm1a[i:j,i:j] = a[:,:]
-            dm1b[i:j,i:j] = b[:,:]
-        return dm1a, dm1b
 
     def make_rdm2 (self, ci, norb_f, nelec_f, **kwargs):
         norb = sum (norb_f)

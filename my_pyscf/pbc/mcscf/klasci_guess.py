@@ -241,9 +241,16 @@ def localize_init_guess(klas, frag_atoms=None, mo_coeff=None, spin=None,
                 # directions, consistent with the molecular SVD framework.
                 c_local = c_act @ u
         else:
-            _, svals, c_local, _ = klas._svd(
+            _, svals, c_local, localized_occ = klas._svd(
                 ortho_lo, c_act, s=ovlp[k], mo_occ=active_occ[k]
             )
+            # _svd sorts all occupation sectors together by their singular
+            # values. Restore the conventional occupied-to-virtual ordering
+            # while applying the same permutation to the orbitals and their
+            # singular values.
+            occ_order = np.argsort(-localized_occ, kind='stable')
+            c_local = c_local[:, occ_order]
+            svals = svals[occ_order]
 
         if len(svals) < ncas:
             msg = "Note sufficient AOs were selected to localize the active space."
@@ -278,4 +285,3 @@ def localize_init_guess(klas, frag_atoms=None, mo_coeff=None, spin=None,
         return result[0]
     else:
         return tuple(result)
-

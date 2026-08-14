@@ -9,6 +9,18 @@ from mrh.my_pyscf.fci.csfstring import CSFTransformer
 from mrh.my_pyscf.mcscf.addons import StateAverageNMixFCISolver
 from itertools import combinations
 
+
+def _is_csf_solver(solver):
+    '''Recognize real or complex CSF solvers without importing PBC modules.'''
+    if isinstance(solver, CSFFCISolver):
+        return True
+    transformer = getattr(solver, 'transformer', None)
+    return (transformer is not None
+            and hasattr(transformer, 'ncsf')
+            and callable(getattr(transformer, 'vec_det2csf', None))
+            and callable(getattr(transformer, 'printable_largest_csf', None)))
+
+
 # TODO: linkstr support
 class ProductStateFCISolver (StateAverageNMixFCISolver, lib.StreamObject):
     r'''Minimize the energy of a wave function of the form
@@ -44,7 +56,7 @@ class ProductStateFCISolver (StateAverageNMixFCISolver, lib.StreamObject):
             solvers_converged = [np.all (np.asarray (s.converged)) for s in self.fcisolvers]
             nconv = sum ([int (c) for c in solvers_converged])
             log.info ('Cycle %d: max grad = %e ; sigma = %e ; %d/%d fragment CI solvers converged',
-                      it, grad_max, e_sigma, nconv, len (self.fcisolvers))
+                      it, grad_max, np.real(e_sigma), nconv, len (self.fcisolvers))
             log.debug ('e vector = {}'.format (e))
             if nconv<len(self.fcisolvers): log.debug ('unconverged fragment CI solvers: {}'.format (
                 list(np.where (np.logical_not (solvers_converged))[0])))
@@ -133,15 +145,18 @@ class ProductStateFCISolver (StateAverageNMixFCISolver, lib.StreamObject):
             neleca, nelecb = nelec
             na = cistring.num_strings (no, neleca)
             nb = cistring.num_strings (no, nelecb)
-            zguess = np.zeros ((snroots,na,nb))
             cguess = np.asarray (ci0[ix]).reshape (-1,na,nb)
+            dtype = np.result_type(
+                getattr(self, 'ci_dtype', float), cguess.dtype,
+            )
+            zguess = np.zeros ((snroots,na,nb), dtype=dtype)
             ngroots = min (zguess.shape[0], cguess.shape[0])
             zguess[:ngroots,:,:] = cguess[:ngroots,:,:]
             ci1.append (zguess)
             if snroots>na*nb:
                 raise RuntimeError ("{} roots > {} determinants in fragment {}".format (
                     snroots, na*nb, ix))
-            if isinstance (solver, CSFFCISolver):
+            if _is_csf_solver(solver):
                 solver.check_transformer_cache ()
                 if snroots>solver.transformer.ncsf:
                     raise RuntimeError ("{} roots > {} CSFs in fragment {} (nelec={}, smult={})".format (
@@ -149,7 +164,7 @@ class ProductStateFCISolver (StateAverageNMixFCISolver, lib.StreamObject):
         return ci1
                 
     def _debug_csfs (self, log, ci0, ci1, norb_f, nelec_f, grad, nroots=None):
-        if not all ([isinstance (s, CSFFCISolver) for s in self.fcisolvers]):
+        if not all (_is_csf_solver(s) for s in self.fcisolvers):
             return
         if log.verbose < lib.logger.INFO: return
         transformers = [s.transformer for s in self.fcisolvers]
@@ -283,10 +298,9 @@ class ProductStateFCISolver (StateAverageNMixFCISolver, lib.StreamObject):
 
     def make_rdm1s (self, ci, norb_f, nelec_f, **kwargs):
         norb = sum (norb_f)
-        dm1a = np.zeros ((norb, norb))
-        dm1b = np.zeros ((norb, norb))
         nj = np.cumsum (norb_f)
         ni = nj - norb_f
+        dm1s_f = []
         for ix, (i, j, c, no, ne, s) in enumerate (zip (ni, nj, ci, norb_f, nelec_f, self.fcisolvers)):
             nelec = self._get_nelec (s, ne)
             if getattr (c, 'ndim', 3) == 3: c = list (c)
@@ -297,9 +311,15 @@ class ProductStateFCISolver (StateAverageNMixFCISolver, lib.StreamObject):
                 raise (e)
             except ValueError as e:
                 print ("frag=",ix,"nroots=",s.nroots,"no=",no,"ne=",nelec,'c.shape=',np.asarray(c).shape)
-                if isinstance (s, CSFFCISolver):
+                if _is_csf_solver(s):
                     print ("smult=",s.smult,"ncsf=",s.transformer.ncsf)
                 raise (e)
+            dm1s_f.append ((i, j, np.asarray(a), np.asarray(b)))
+        dtype = np.result_type (float,
+            *[dm for _, _, a, b in dm1s_f for dm in (a, b)])
+        dm1a = np.zeros ((norb, norb), dtype=dtype)
+        dm1b = np.zeros ((norb, norb), dtype=dtype)
+        for i, j, a, b in dm1s_f:
             dm1a[i:j,i:j] = a[:,:]
             dm1b[i:j,i:j] = b[:,:]
         return dm1a, dm1b
@@ -357,6 +377,4 @@ class ImpureProductStateFCISolver (ProductStateFCISolver):
         for ix, (fcisolver, weights) in enumerate (zip (self.fcisolvers, lweights)):
             if len (weights) > 1:
                 self.fcisolvers[ix] = state_average_fcisolver (fcisolver, weights=weights)
-
-
 
