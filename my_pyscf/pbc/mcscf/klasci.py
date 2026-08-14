@@ -422,7 +422,7 @@ def kernel (las, mo_coeff=None, ci0=None, lroots=None, lweights=None, verbose=0,
     return converged, e_tot, e_states, e_cas, e_lexc, ci1
 
 
-def convert_dmao_R_to_dmao_k(kmf, kmesh, dm_R):
+def _convert_dmao_R_to_dmao_k(kmf, kmesh, dm_R):
     '''
     Convert the density matrix from real space to k-space.
     '''
@@ -682,7 +682,7 @@ class PBCLASCINoSymm(casci.PBCCASCI, LASCINoSymm):
             f"Shape mismatch: {rdm1s_ao_wann.shape} != (2, {nkpts*nao}, {nkpts*nao})"
         
         rdm1s_ao_k = np.array([
-            convert_dmao_R_to_dmao_k(self._scf, self.kmesh, rdm1s_ao_wann[s]) 
+            _convert_dmao_R_to_dmao_k(self._scf, self.kmesh, rdm1s_ao_wann[s]) 
             for s in range(2)])
         
         assert rdm1s_ao_k.shape == (2, nkpts, nao, nao), \
