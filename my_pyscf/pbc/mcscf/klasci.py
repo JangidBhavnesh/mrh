@@ -125,7 +125,7 @@ def h1e_for_cas(mc, mo_coeff=None, ncas=None, ncore=None):
     h1e_kpts, ecore = mc.h1e_kpts_for_cas(
         mo_coeff=mo_coeff, ncas=ncas, ncore=ncore,
     )
-    h1eff_wann = convert_h1e_mo_k_to_wann(
+    h1eff_wann = _convert_h1e_mo_k_to_wann(
         mc._scf, mc.kmesh, h1e_kpts,
     )
     return h1eff_wann, ecore
@@ -185,7 +185,7 @@ def h2e_for_cas(mc, mo_coeff=None):
     assert eris.shape == (nkpts*ncas, nkpts*ncas, nkpts*ncas, nkpts*ncas)
     return eris
 
-def convert_h1e_mo_k_to_wann(kmf, kmesh, h1e_mo_k):
+def _convert_h1e_mo_k_to_wann(kmf, kmesh, h1e_mo_k):
     '''
     Convert h1e from k-space localized/block MO basis to Wannier basis.
     args:
@@ -279,7 +279,7 @@ def h1e_for_las (las, mo_coeff=None, ncas=None, ncore=None, nelecas=None,
         moH_cas = mo_cas.conj ().T
         h1e_k[:, k] = moH_cas @ (hcore_k[k][None,:,:] + veff[:, k, :, :]) @ mo_cas
 
-    h1e_mo_wann = np.array([convert_h1e_mo_k_to_wann(las._scf, las.kmesh, h1e_k[s]) 
+    h1e_mo_wann = np.array([_convert_h1e_mo_k_to_wann(las._scf, las.kmesh, h1e_k[s]) 
                             for s in range(2)])
     h1e_k = hcore_k = None
 
