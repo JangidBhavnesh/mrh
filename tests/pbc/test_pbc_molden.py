@@ -9,7 +9,6 @@ from mrh.my_pyscf.pbc.util import pbcmolden
 
 '''
 Test cases for the pbcmolden module.
-
 '''
 
 class FakeCell:
@@ -40,6 +39,7 @@ class FakeMC:
 class KnownValues(unittest.TestCase):
 
     def test_from_mo_active_k2r(self):
+        '''Test active orbitals in the k-to-R basis.'''
         kmf = FakeKMF()
         coeff_R = np.ones((6, 4), dtype=complex)
         coeff_R += 0.25j
@@ -74,6 +74,7 @@ class KnownValues(unittest.TestCase):
         )
 
     def test_from_mo_active_wannier(self):
+        '''Test active orbitals in the Wannier basis.'''
         kmf = FakeKMF()
         wannier_orb = np.arange(24, dtype=float).reshape(2, 3, 2, 2)
 
@@ -101,6 +102,7 @@ class KnownValues(unittest.TestCase):
         self.assertIsNone(write_molden.call_args.kwargs["ene"])
 
     def test_object_wrappers(self):
+        '''Test wrapper defaults.'''
         kmf = FakeKMF()
         mc = FakeMC(kmf)
 
