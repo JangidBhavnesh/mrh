@@ -64,10 +64,14 @@ def h1e_kpts_for_cas(mc, mo_coeff=None, ncas=None, ncore=None):
     # The total energy is divided by nkpts after solving the CAS problem.
     ecore = mc.energy_nuc() * nkpts
     if ncore:
-        coredm_kpts = 2.0 * np.einsum(
-            'kpi,kqi->kpq', mo_core_kpts, mo_core_kpts.conj(),
-            optimize=True,
-        )
+        # coredm_kpts = 2.0 * np.einsum(
+        #     'kpi,kqi->kpq', mo_core_kpts, mo_core_kpts.conj(),
+        #     optimize=True,
+        # )
+        coredm_kpts = np.asarray([
+            2.0 * (mo_core_kpts[k] @ mo_core_kpts[k].conj().T)
+            for k in range(nkpts)
+        ], dtype=dtype)
         corevhf_kpts = mc.get_veff(
             mc.cell, coredm_kpts, hermi=1, kpts=mc._scf.kpts,
         )
@@ -78,11 +82,15 @@ def h1e_kpts_for_cas(mc, mo_coeff=None, ncas=None, ncore=None):
         )
         h1ao_k = h1ao_k + corevhf_kpts
 
-    h1e_kpts = np.einsum(
-        'kpi,kpq,kqj->kij',
-        mo_cas_kpts.conj(), h1ao_k, mo_cas_kpts,
-        optimize=True,
-    )
+    # h1e_kpts = np.einsum(
+    #     'kpi,kpq,kqj->kij',
+    #     mo_cas_kpts.conj(), h1ao_k, mo_cas_kpts,
+    #     optimize=True,
+    # )
+    h1e_kpts = np.asarray([
+        mo_cas_kpts[k].conj().T @ h1ao_k[k] @ mo_cas_kpts[k]
+        for k in range(nkpts)
+    ], dtype=dtype)
     return h1e_kpts, ecore
 
 
