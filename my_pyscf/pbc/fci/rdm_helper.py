@@ -42,10 +42,15 @@ def _make_rdm1_tdm1_spin1(fname, cibra, ciket, norb, nelec,
     r'''
     Call a complex spin-resolved 1-RDM or transition-1-RDM kernel.
     '''
+    assert (cibra is not None and ciket is not None)
 
-    assert cibra is not None and ciket is not None
-    cibra = np.asarray(cibra, dtype=np.complex128, order='C')
-    ciket = np.asarray(ciket, dtype=np.complex128, order='C')
+    cibra = np.asarray(cibra, order='C')
+    ciket = np.asarray(ciket, order='C')
+    if cibra.dtype is not np.complex128 or ciket.dtype is not np.complex128:
+        cibra = cibra.astype(np.complex128)
+        ciket = ciket.astype(np.complex128)
+
+    dtype = ciket.dtype
     link_indexa, link_indexb = _unpack(norb, nelec, link_index)
     na, nlinka = link_indexa.shape[:2]
     nb, nlinkb = link_indexb.shape[:2]

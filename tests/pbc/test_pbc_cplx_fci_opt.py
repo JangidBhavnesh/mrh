@@ -99,7 +99,6 @@ class KnownValues(unittest.TestCase):
 
         # Reference sigma from full spin1 contraction.
         sigma_ref = cisolver_ref.contract_2e(h2, ci0, norb, nelecas)
-
         # Since input is spin0-symmetric, reference output should also be symmetric.
         # Symmetrize only to remove tiny numerical noise from the reference path.
         sigma_ref = 0.5 * (sigma_ref + sigma_ref.T)
@@ -111,7 +110,7 @@ class KnownValues(unittest.TestCase):
             "There is a mismatch in contract_2e outputs between "
             "the optimized spin0 code and the symmetrized spin1 reference."
         )
-        self.assertTrue(np.allclose(sigma_ref, sigma_spin0, atol=1e-8), msg=msg)
+        self.assertTrue(np.allclose(sigma_ref, sigma_spin0.ravel(), atol=1e-8), msg=msg)
 
 if __name__ == "__main__":
     unittest.main()

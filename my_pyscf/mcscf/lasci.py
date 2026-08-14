@@ -904,7 +904,7 @@ class LASCINoSymm (casci.CASCI):
         else:
             assert (len (spin_sub) == self.nfrags)
             for smult, nel in zip (spin_sub, self.nelecas_sub):
-                self.fciboxes.append (self._init_fcibox (smult, nel)) 
+                self.fciboxes.append (self._init_fcibox (smult, nel))
         self.weights = [1.0]
         self.e_states = [0.0]
         self.e_lexc = [[np.array ([0]),],]
@@ -915,7 +915,7 @@ class LASCINoSymm (casci.CASCI):
         mycopy.ci = [[xij for xij in xi] for xi in self.ci]
         return mycopy
 
-    def _init_fcibox (self, smult, nel): 
+    def _init_fcibox (self, smult, nel):
         s = csf_solver (self.mol, smult=smult)
         s.spin = nel[0] - nel[1] 
         return get_h1e_zipped_fcisolver (state_average_n_mix (self, [s], [1.0]).fcisolver)

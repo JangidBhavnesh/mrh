@@ -31,6 +31,69 @@ else:
 # 1. Implement the CASNatorb function.
 # 2.
 
+def h1e_kpts_for_cas(mc, mo_coeff=None, ncas=None, ncore=None):
+    '''
+    Compute the one-electron CAS Hamiltonian at each k-point and the core
+    energy.
+
+    The returned k-point blocks are the common intermediate used to build
+    either the k-CASCI real-space representation or the k-LASCI Wannier
+    representation.
+
+    Returns:
+        h1e_kpts : np.ndarray [nk, ncas, ncas]
+            Active-space one-electron Hamiltonian at each k-point.
+        ecore : np.complex128
+            The core energy.
+    '''
+    if mo_coeff is None:
+        mo_coeff = mc.mo_coeff
+    if ncas is None:
+        ncas = mc.ncas
+    if ncore is None:
+        ncore = mc.ncore
+
+    mo_coeff = np.asarray(mo_coeff)
+    dtype = mo_coeff[0].dtype
+    nkpts = mc.nkpts
+    mo_core_kpts = mo_coeff[:, :, :ncore]
+    mo_cas_kpts = mo_coeff[:, :, ncore:ncore+ncas]
+
+    h1ao_k = np.asarray(mc.get_hcore(), dtype=dtype)
+
+    # The total energy is divided by nkpts after solving the CAS problem.
+    ecore = mc.energy_nuc() * nkpts
+    if ncore:
+        # coredm_kpts = 2.0 * np.einsum(
+        #     'kpi,kqi->kpq', mo_core_kpts, mo_core_kpts.conj(),
+        #     optimize=True,
+        # )
+        coredm_kpts = np.asarray([
+            2.0 * (mo_core_kpts[k] @ mo_core_kpts[k].conj().T)
+            for k in range(nkpts)
+        ], dtype=dtype)
+        corevhf_kpts = mc.get_veff(
+            mc.cell, coredm_kpts, hermi=1, kpts=mc._scf.kpts,
+        )
+        ecore += np.einsum(
+            'kij,kji->', coredm_kpts,
+            h1ao_k + 0.5 * corevhf_kpts,
+            optimize=True,
+        )
+        h1ao_k = h1ao_k + corevhf_kpts
+
+    # h1e_kpts = np.einsum(
+    #     'kpi,kpq,kqj->kij',
+    #     mo_cas_kpts.conj(), h1ao_k, mo_cas_kpts,
+    #     optimize=True,
+    # )
+    h1e_kpts = np.asarray([
+        mo_cas_kpts[k].conj().T @ h1ao_k[k] @ mo_cas_kpts[k]
+        for k in range(nkpts)
+    ], dtype=dtype)
+    return h1e_kpts, ecore
+
+
 def h1e_for_cas(mc, mo_coeff=None, ncas=None, ncore=None):
     '''
     Compute the 1e Hamiltonian for CAS space and core energy.
@@ -50,43 +113,27 @@ def h1e_for_cas(mc, mo_coeff=None, ncas=None, ncore=None):
             The core energy.
     '''
     
-    if mo_coeff is None: 
+    if mo_coeff is None:
         mo_coeff = mc.mo_coeff
-    if ncas is None: 
+    if ncas is None:
         ncas = mc.ncas
-    if ncore is None: 
+    if ncore is None:
         ncore = mc.ncore
-    
-    cell = mc.cell
-    nao = cell.nao_nr()
 
-    dtype = mc.mo_coeff[0].dtype
-    nkpts = mc.nkpts
-    mo_core_kpts = [mo[:, :ncore] for mo in mo_coeff]
+    h1e_kpts, ecore = h1e_kpts_for_cas(
+        mc, mo_coeff=mo_coeff, ncas=ncas, ncore=ncore,
+    )
 
-    h1ao_k = mc.get_hcore().astype(dtype)
-
-    # Remember, I am multiplying by nkpts here because total energy would be divided by nkpts later.
-    ecore = mc.energy_nuc() * nkpts
-    if len(mo_core_kpts) == 0:
-        corevhf_kpts = 0
-    else:
-        coredm_kpts = np.asarray([2.0 * (mo_core_kpts[k] @ mo_core_kpts[k].conj().T) 
-                                  for k in range(nkpts)], dtype=dtype)
-        # corevhf_kpts = mc._scf.get_veff(cell, coredm_kpts, hermi=1)
-        corevhf_kpts = mc.get_veff(cell, coredm_kpts, hermi=1, kpts=mc._scf.kpts)
-        fock = h1ao_k + 0.5 * corevhf_kpts
-        ecore += sum(np.einsum('ij,ji', coredm_kpts[k], fock[k]) for k in range(nkpts))
-        fock = None  # Free memory
-
-    h1ao_k += corevhf_kpts
-
-    phase, mo_coeff_R = get_mo_coeff_k2R(mc._scf, mo_coeff, ncore, ncas, kmesh=mc.kmesh)[1:3]
-    h1ao_R = np.einsum('Rk,kij,Sk->RiSj', phase, h1ao_k, phase.conj())
-    h1ao_R = h1ao_R.reshape(nkpts*nao, nkpts*nao)
-
-    # h1eff_R = _basis_transformation(h1ao_R, mo_coeff_R)
-    h1eff_R = reduce(np.dot, (mo_coeff_R.conj().T, h1ao_R, mo_coeff_R))
+    # Transform the k-point CAS blocks to the same real-space orbital basis
+    # used by the two-electron Hamiltonian and the periodic FCI solver.
+    mo_phase = get_mo_coeff_k2R(
+        mc._scf, mo_coeff, ncore, ncas, kmesh=mc.kmesh,
+    )[-1]
+    h1eff_R = np.einsum(
+        'kpi,kpq,kqj->ij',
+        mo_phase.conj(), h1e_kpts, mo_phase,
+        optimize=True,
+    )
     return h1eff_R, ecore
 
 @lib.with_doc(mcscf.casci.get_fock.__doc__)
@@ -501,7 +548,7 @@ class PBCCASBASE(mcscf.casci.CASBase):
     def get_veff(self, cell=None, dm_kpts=None, hermi=1, kpts=None, **kwargs):
         # Note this would be in k-space: would need transformation
         # before its direct use.
-        vj,vk = self.get_jk(cell, dm_kpts, hermi=hermi, kpts=kpts, **kwargs)
+        vj, vk = self.get_jk(cell, dm_kpts, hermi=hermi, kpts=kpts, **kwargs)
         veff = vj - 0.5 * vk
         return veff
         #return self._scf.get_veff(cell=cell, dm_kpts=dm_kpts, hermi=hermi, kpts=kpts, **kwargs)
@@ -518,6 +565,7 @@ class PBCCASBASE(mcscf.casci.CASBase):
         '''An alias of get_h1eff method'''
         return self.get_h1eff(mo_coeff, ncas, ncore)
 
+    h1e_kpts_for_cas = h1e_kpts_for_cas
     get_h1eff = h1e_for_cas = h1e_for_cas
 
     @lib.with_doc(scf.hf.get_jk.__doc__)

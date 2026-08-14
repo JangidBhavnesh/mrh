@@ -358,6 +358,14 @@ def make_rdm12(fcivec, norb, nelec, link_index=None, reorder=True):
     rdm2 = dm2aa + dm2bb + dm2ab + dm2ab.transpose(2, 3, 0, 1)
     return rdm1.conj().T, rdm2
 
+def make_rdm2(fcivec, norb, nelec, link_index=None, reorder=True):
+    '''
+    Compute the spin-summed 2-RDM for a complex FCI vector using 
+    the backend C function.
+    '''
+    rdm2 = make_rdm12(fcivec, norb, nelec, link_index=link_index, reorder=reorder)[1]
+    return rdm2
+
 def make_rdm1s_py(fcivec, norb, nelec, link_index=None):
     '''
     Python implementation of spin-separated 1-RDMs for a complex FCI vector.
@@ -698,6 +706,9 @@ class FCISolver(direct_spin1.FCISolver):
     def make_rdm12(self, fcivec, norb, nelec, link_index=None, reorder=True):
         return make_rdm12(fcivec, norb, nelec, link_index, reorder)
 
+    def make_rdm2(self, fcivec, norb, nelec, link_index=None, reorder=True):
+        return make_rdm2(fcivec, norb, nelec, link_index, reorder)
+    
     def trans_rdm1s(self, cibra, ciket, norb, nelec, link_index=None):
         return trans_rdm1s(cibra, ciket, norb, nelec, link_index)
 
@@ -762,3 +773,4 @@ def _unpack(norb, nelec, link_index, spin=None):
         return link_indexa, link_indexb
     else:
         return link_index
+
