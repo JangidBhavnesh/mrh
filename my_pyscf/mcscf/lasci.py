@@ -1571,7 +1571,8 @@ class LASCINoSymm (casci.CASCI):
         ncas = sum (ncas_sub)
         ncas_cum = np.cumsum ([0] + ncas_sub.tolist ())
         weights = self.weights
-        casdm2 = np.zeros ((ncas,ncas,ncas,ncas))
+        dtype = np.result_type(*casdm2f, *casdm1frs)
+        casdm2 = np.zeros ((ncas,ncas,ncas,ncas), dtype=dtype)
         # Diagonal 
         for isub, dm2 in enumerate (casdm2f):
             i = ncas_cum[isub]
