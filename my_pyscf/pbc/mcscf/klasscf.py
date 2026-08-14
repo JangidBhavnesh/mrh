@@ -138,6 +138,233 @@ def get_grad_orb (klas, mo_coeff_kpts=None, ci=None, h2eff_sub=None,
     elif hermi == 1: return .5*(f1+f1.conj().transpose(0,2,1))
     elif hermi == 0: return f1
     else: raise ValueError ("kwarg 'hermi' must = -1, 0, or +1")
+
+
+class KLASSCF_UnitaryGroupGenerators:
+    """Pack k-point orbital rotations and Wannier-basis CI variations.
+
+    Orbital variables are ordered by k-point and then by the ordinary
+    nonredundant CASSCF mask. CI variables follow in cell/root order and are
+    transformed between determinant and complex CSF representations.
+    """
+
+    def __init__(self, klas, mo_coeff=None, ci=None):
+        if mo_coeff is None:
+            mo_coeff = klas.mo_coeff
+        if ci is None:
+            ci = klas.ci
+        mo_coeff = np.asarray(mo_coeff)
+        if mo_coeff.ndim != 3:
+            raise ValueError(
+                "mo_coeff must have shape (nkpts, nao, nmo); "
+                f"got {mo_coeff.shape}"
+            )
+
+        self.nkpts = len(klas.kpts)
+        self.nmo = mo_coeff.shape[-1]
+        if mo_coeff.shape[0] != self.nkpts:
+            raise ValueError(
+                f"mo_coeff contains {mo_coeff.shape[0]} k-points; "
+                f"expected {self.nkpts}"
+            )
+
+        ncore = klas.ncore
+        nocc = ncore + klas.ncas
+        orb_idx = np.zeros((self.nmo, self.nmo), dtype=bool)
+        orb_idx[ncore:nocc, :ncore] = True
+        orb_idx[nocc:, :nocc] = True
+        frozen = getattr(klas, "frozen", None)
+        if frozen is not None:
+            if isinstance(frozen, (int, np.integer)):
+                orb_idx[:frozen, :] = False
+                orb_idx[:, :frozen] = False
+            else:
+                frozen = np.asarray(frozen)
+                orb_idx[frozen, :] = False
+                orb_idx[:, frozen] = False
+        self.uniq_orb_idx = np.broadcast_to(
+            orb_idx, (self.nkpts, self.nmo, self.nmo),
+        ).copy()
+        self.frozen_ci = set(getattr(klas, "frozen_ci", None) or [])
+        self.ci = ci
+        self.ci_transformers = []
+        for ifrag, (fcibox, norb, nelec, ci_r) in enumerate(zip(
+                klas.fciboxes, klas.ncas_sub, klas.nelecas_sub, ci)):
+            if len(fcibox.fcisolvers) != len(ci_r):
+                raise ValueError(
+                    f"cell {ifrag} has {len(fcibox.fcisolvers)} solvers for "
+                    f"{len(ci_r)} CI roots"
+                )
+            transformers = []
+            for solver in fcibox.fcisolvers:
+                solver.norb = norb
+                solver.nelec = fcibox._get_nelec(solver, nelec)
+                solver.check_transformer_cache()
+                transformers.append(solver.transformer)
+            self.ci_transformers.append(transformers)
+
+    @property
+    def nvar_orb(self):
+        return int(np.count_nonzero(self.uniq_orb_idx))
+
+    @property
+    def ncsf_sub(self):
+        return np.asarray([
+            [transformer.ncsf for transformer in transformers]
+            for ifrag, transformers in enumerate(self.ci_transformers)
+            if ifrag not in self.frozen_ci
+        ], dtype=int)
+
+    @property
+    def nvar_ci(self):
+        return int(self.ncsf_sub.sum())
+
+    @property
+    def nvar_tot(self):
+        return self.nvar_orb + self.nvar_ci
+
+    def get_gx_idx(self):
+        """k-LASSCF currently optimizes every nonredundant orbital variable."""
+        return np.zeros_like(self.uniq_orb_idx)
+
+    def pack_orb(self, kappa):
+        kappa = np.asarray(kappa)
+        expected_shape = (self.nkpts, self.nmo, self.nmo)
+        if kappa.shape != expected_shape:
+            raise ValueError(
+                f"kappa must have shape {expected_shape}; got {kappa.shape}"
+            )
+        return np.asarray(kappa[self.uniq_orb_idx]).reshape(-1)
+
+    def unpack_orb(self, x_orb):
+        x_orb = np.asarray(x_orb).reshape(-1)
+        if x_orb.size != self.nvar_orb:
+            raise ValueError(
+                f"orbital vector has size {x_orb.size}; "
+                f"expected {self.nvar_orb}"
+            )
+        kappa = np.zeros(
+            (self.nkpts, self.nmo, self.nmo), dtype=x_orb.dtype,
+        )
+        kappa[self.uniq_orb_idx] = x_orb
+        return kappa - kappa.conj().transpose(0, 2, 1)
+
+    def pack_ci(self, ci):
+        if len(ci) != len(self.ci_transformers):
+            raise ValueError("CI input must contain one entry per cell")
+        vectors = []
+        for ifrag, (transformers, ci_r) in enumerate(zip(
+                self.ci_transformers, ci)):
+            if len(ci_r) != len(transformers):
+                raise ValueError(
+                    f"cell {ifrag} has {len(ci_r)} CI vectors; "
+                    f"expected {len(transformers)}"
+                )
+            if ifrag in self.frozen_ci:
+                continue
+            for transformer, c in zip(transformers, ci_r):
+                c_csf = cplx_csf_helper.vec_det2csf_cplx(
+                    transformer, c, normalize=False,
+                )
+                vectors.append(np.asarray(c_csf).reshape(-1))
+        if not vectors:
+            return np.empty(0, dtype=np.complex128)
+        return np.concatenate(vectors)
+
+    def unpack_ci(self, x_ci):
+        x_ci = np.asarray(x_ci).reshape(-1)
+        if x_ci.size != self.nvar_ci:
+            raise ValueError(
+                f"CI vector has size {x_ci.size}; expected {self.nvar_ci}"
+            )
+        ci = []
+        offset = 0
+        for ifrag, (transformers, ci_ref_r) in enumerate(zip(
+                self.ci_transformers, self.ci)):
+            ci_r = []
+            for transformer, c_ref in zip(transformers, ci_ref_r):
+                if ifrag in self.frozen_ci:
+                    dtype = np.result_type(c_ref, x_ci.dtype)
+                    ci_r.append(np.zeros(np.shape(c_ref), dtype=dtype))
+                    continue
+                ncsf = transformer.ncsf
+                c = cplx_csf_helper.vec_csf2det_cplx(
+                    transformer, x_ci[offset:offset + ncsf],
+                    normalize=False,
+                )
+                ci_r.append(np.asarray(c).reshape(np.shape(c_ref)))
+                offset += ncsf
+            ci.append(ci_r)
+        if offset != x_ci.size:
+            raise ValueError(
+                f"consumed {offset} CI variables from a vector of size "
+                f"{x_ci.size}"
+            )
+        return ci
+
+    def pack(self, kappa, ci):
+        x_orb = self.pack_orb(kappa)
+        x_ci = self.pack_ci(ci)
+        dtype = np.result_type(x_orb.dtype, x_ci.dtype)
+        x = np.empty(self.nvar_tot, dtype=dtype)
+        x[:self.nvar_orb] = x_orb
+        x[self.nvar_orb:] = x_ci
+        return x
+
+    def unpack(self, x):
+        x = np.asarray(x).reshape(-1)
+        if x.size != self.nvar_tot:
+            raise ValueError(
+                f"combined vector has size {x.size}; expected {self.nvar_tot}"
+            )
+        return (
+            self.unpack_orb(x[:self.nvar_orb]),
+            self.unpack_ci(x[self.nvar_orb:]),
+        )
+
+
+def get_ugg(klas, mo_coeff=None, ci=None):
+    return klas._ugg(klas, mo_coeff=mo_coeff, ci=ci)
+
+
+def get_grad_ci(
+        klas, mo_coeff=None, ci=None, ugg=None, casdm1frs=None,
+        h1eff=None, h2eff=None):
+    """Return the complex determinant-basis CI energy gradient."""
+    if mo_coeff is None:
+        mo_coeff = klas.mo_coeff
+    if ci is None:
+        ci = klas.ci
+    if ugg is None:
+        ugg = klas.get_ugg(mo_coeff=mo_coeff, ci=ci)
+    hop = KLASSCF_HessianOperator(
+        klas, ugg, mo_coeff=mo_coeff, ci=ci, casdm1frs=casdm1frs,
+        h1eff=h1eff, h2eff=h2eff,
+    )
+    return [[2.0 * residual for residual in residual_r]
+            for residual_r in hop.hci0]
+
+
+def get_grad(
+        klas, mo_coeff=None, ci=None, ugg=None, h2eff_sub=None,
+        veff_kpts=None, dm1s_kpts=None, casdm1frs=None,
+        h1eff=None, h2eff=None):
+    """Return the packed total ``[orbital, CI]`` k-LASSCF gradient."""
+    if mo_coeff is None:
+        mo_coeff = klas.mo_coeff
+    if ci is None:
+        ci = klas.ci
+    if ugg is None:
+        ugg = klas.get_ugg(mo_coeff=mo_coeff, ci=ci)
+    gorb = klas.get_grad_orb(
+        mo_coeff_kpts=mo_coeff, ci=ci, h2eff_sub=h2eff_sub,
+        veff_kpts=veff_kpts, dm1s_kpts=dm1s_kpts,
+    )
+    gci = klas.get_grad_ci(
+        mo_coeff=mo_coeff, ci=ci, ugg=ugg, casdm1frs=casdm1frs,
+        h1eff=h1eff, h2eff=h2eff,
+    )
+    return ugg.pack(gorb, gci)
         
 class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
     """Periodic CI-only Hessian operator for k-LASSCF.
@@ -999,10 +1226,17 @@ class KLASSCF_TransSymmHessianOperator(KLASSCF_HessianOperator):
         return KLASSCF_HessianOperator._matvec(self, x_trans)
 
 
-# Make the orbital-gradient implementation available on both periodic LAS
-# variants.  The current periodic Hessian is CI-only, so its constructor does
-# not initialize these comparatively expensive orbital AO2MO intermediates.
+# Register the complex orbital/CI parameterization and total gradient on both
+# periodic LAS variants. The Hessian action itself remains CI-only for now.
 PBCLASCINoSymm.get_grad_orb = get_grad_orb
 PBCLASCINoSymm._klasscf_eris = _ERIS
+PBCLASCINoSymm._ugg = KLASSCF_UnitaryGroupGenerators
+PBCLASCINoSymm.get_ugg = get_ugg
+PBCLASCINoSymm.get_grad_ci = get_grad_ci
+PBCLASCINoSymm.get_grad = get_grad
 PBCLASCITransSymm.get_grad_orb = get_grad_orb
 PBCLASCITransSymm._klasscf_eris = _ERIS
+PBCLASCITransSymm._ugg = KLASSCF_UnitaryGroupGenerators
+PBCLASCITransSymm.get_ugg = get_ugg
+PBCLASCITransSymm.get_grad_ci = get_grad_ci
+PBCLASCITransSymm.get_grad = get_grad

@@ -11,6 +11,7 @@ from mrh.my_pyscf.pbc.mcscf.klasci import (
     kLASCI,
 )
 from mrh.my_pyscf.pbc.mcscf.klasscf import (
+    KLASSCF_UnitaryGroupGenerators,
     KLASSCF_HessianOperator,
     KLASSCF_TransSymmHessianOperator,
 )
