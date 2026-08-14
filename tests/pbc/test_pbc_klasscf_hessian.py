@@ -19,6 +19,7 @@ class _FakeFCIBox:
     def __init__(self):
         self.fcisolvers = [object()]
         self.collect_calls = 0
+        self.hdiag_calls = 0
         self.transition_operator = np.array(
             [[0.7, 0.2 - 0.3j], [-0.1 + 0.4j, -0.2]],
             dtype=np.complex128,
@@ -33,6 +34,10 @@ class _FakeFCIBox:
     def _get_nelec(self, solver, nelec):
         return tuple(nelec)
 
+    def states_make_hdiag_csf(self, h1, h2, norb, nelec):
+        self.hdiag_calls += 1
+        return [np.array([1.25, 2.5], dtype=np.complex128)]
+
     def _collect(
             self, name, ci1, ci0, norb, nelec, link_index=None, **kwargs):
         if name not in ("trans_rdm1s", "trans_rdm1s_py"):
@@ -45,6 +50,37 @@ class _FakeFCIBox:
             amplitude * self.dm1a_operator,
             amplitude * self.dm1b_operator,
         )]
+
+
+class _IdentityCSFTransformer:
+    """Two-determinant/two-CSF transform used to test complex packing."""
+
+    ndet = 2
+    ncsf = 2
+
+    @staticmethod
+    def vec_det2csf(civec, order="C", normalize=False):
+        return np.array(civec, copy=True)
+
+    @staticmethod
+    def vec_csf2det(civec, order="C", normalize=False):
+        return np.array(civec, copy=True)
+
+    @staticmethod
+    def pack_csf(civec):
+        return np.array(civec, copy=True)
+
+
+def _set_csf_layout(operator):
+    operator.ci_transformers = [
+        [_IdentityCSFTransformer()] for _ in operator.ci
+    ]
+    operator.frozen_ci = set()
+    operator.nvar_ci = sum(
+        transformer.ncsf
+        for transformers in operator.ci_transformers
+        for transformer in transformers
+    )
 
 
 def _new_tdm_operator(cls, phases=None):
@@ -69,6 +105,7 @@ def _new_tdm_operator(cls, phases=None):
     operator.ref_cell = 0
     operator.phase_per_frag = phases
     operator.ci = [[phase * ci_ref] for phase in phases]
+    _set_csf_layout(operator)
     return operator, ci_ref
 
 
@@ -99,7 +136,7 @@ class KnownValuesKLASSCFHessianOperator(unittest.TestCase):
             [np.zeros((2, 1), dtype=np.complex128)],
             [np.zeros((2, 1), dtype=np.complex128)],
         ]
-        operator.nvar_ci = 4
+        _set_csf_layout(operator)
         operator.level_shift = 0.25
         _set_toy_matvec_pipeline(operator)
 
@@ -112,6 +149,50 @@ class KnownValuesKLASSCFHessianOperator(unittest.TestCase):
         self.assertEqual(result.shape, trial.shape)
         self.assertTrue(np.issubdtype(result.dtype, np.complexfloating))
         np.testing.assert_allclose(result, 5.25 * trial)
+
+    def test_hdiag_is_packed_in_csf_operator_order(self):
+        operator, _ = _new_tdm_operator(KLASSCF_HessianOperator)
+        operator.h1frs = [
+            np.zeros((1, 2, 2, 2), dtype=np.complex128)
+            for _ in range(2)
+        ]
+
+        hdiag = operator._get_Hdiag()
+
+        np.testing.assert_allclose(hdiag, [1.25, 2.5, 1.25, 2.5])
+        self.assertEqual(
+            [box.hdiag_calls for box in operator.fciboxes], [1, 1]
+        )
+
+    def test_ci_response_diag_uses_hermitian_projection(self):
+        operator = KLASSCF_HessianOperator.__new__(
+            KLASSCF_HessianOperator
+        )
+        c0 = np.array([1.0, 1.0j], dtype=np.complex128) / np.sqrt(2)
+        trial = np.array([0.3 + 0.2j, -0.4j], dtype=np.complex128)
+        hamiltonian = np.array(
+            [[0.7, 0.2 - 0.5j], [0.2 + 0.5j, -0.1]],
+            dtype=np.complex128,
+        )
+        energy = np.vdot(c0, hamiltonian @ c0)
+        shifted_hamiltonian = hamiltonian - energy * np.eye(2)
+        residual = shifted_hamiltonian @ c0
+        operator.ci = [[c0]]
+        operator.e0 = [[energy]]
+        operator.hci0 = [[residual]]
+        operator.h1frs = None
+        operator.eri_cas = None
+        operator.Hci_all = lambda h0, h1, h2, ci: [[
+            shifted_hamiltonian @ ci[0][0]
+        ]]
+
+        actual = operator.ci_response_diag([[trial]])[0][0]
+
+        projector = np.eye(2) - np.outer(c0, c0.conj())
+        expected = (
+            2.0 * projector @ shifted_hamiltonian @ projector @ trial
+        )
+        np.testing.assert_allclose(actual, expected)
 
     def test_transition_rdm_contracts_every_ci_cell(self):
         operator, ci_ref = _new_tdm_operator(KLASSCF_HessianOperator)
@@ -176,7 +257,6 @@ class KnownValuesKLASSCFTransSymmHessianOperator(unittest.TestCase):
         operator, _ = _new_tdm_operator(
             KLASSCF_TransSymmHessianOperator, phases=phases,
         )
-        operator.nvar_ci = 4
         operator.level_shift = 0.25
         _set_toy_matvec_pipeline(operator)
         trial_ref = np.array([[0.2 + 0.1j], [-0.3j]])
