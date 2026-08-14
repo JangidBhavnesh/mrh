@@ -115,73 +115,16 @@ def kLASCI(kmf, ncas, nelecas, ncore=None, spin_mult=None, kmesh=None,
 
 @lib.with_doc(casci.h1e_for_cas.__doc__)
 def h1e_for_cas(mc, mo_coeff=None, ncas=None, ncore=None):
-    # The difference between this function and one defined in pbc.mcscf.casci is that here 
-    # we are constructing the h1e in the Wannier basis, which is different from the k-space MO basis 
-    # used in standard PBCASCI.
-    if mo_coeff is None: mo_coeff = mc.mo_coeff
-    if ncas is None: ncas = mc.ncas
-    if ncore is None: ncore = mc.ncore
-    
-    cell = mc.cell
-    nao = cell.nao_nr()
-    kpts = mc._scf.kpts
-    kmesh = mc.kmesh
-    dtype = mo_coeff[0].dtype
-    nkpts = mc.nkpts
-
-    mo_core_kpts = [mo[:, :ncore] for mo in mo_coeff]
-    mo_act_kpts = [mo[:, ncore:ncore+ncas] for mo in mo_coeff]
-
-    h1ao_k = mc.get_hcore().astype(dtype)
-
-    # Remember, I am multiplying by nkpts here because total energy would be divided by nkpts later.
-    ecore = mc.energy_nuc() * nkpts
-    if ncore == 0:
-        corevhf_kpts = 0
-    else:
-        coredm_kpts = np.asarray([2.0 * (mo_core_kpts[k] @ mo_core_kpts[k].conj().T) 
-                                  for k in range(nkpts)], dtype=dtype)
-        # corevhf_kpts = mc._scf.get_veff(cell, coredm_kpts, hermi=1)
-        corevhf_kpts = mc.get_veff(cell, coredm_kpts, hermi=1, kpts=mc._scf.kpts)
-        fock = h1ao_k + 0.5 * corevhf_kpts
-        ecore += sum(np.einsum('ij,ji', coredm_kpts[k], fock[k]) for k in range(nkpts))
-        fock = None  # Free memory
-
-    h1ao_k += corevhf_kpts
-
-    # Fourier transform h1ao_k to real space to get h1ao_R, which is the one we will use 
-    # for constructing the effective 1e Hamiltonian in the Wannier basis.
-    ts = TranslationSymm(cell, kmesh)
-    R_indices = ts.R_indices
-    R_cart = np.array([ts.lattice_cart(R) for R in R_indices])
-    ncell = len(R_indices)
-
-    assert nkpts == ncell
-    assert np.prod(kmesh) == nkpts
-
-    # h1ao_R = np.zeros((ncell, nao, ncell, nao), dtype=dtype)
-    # for ik, k in enumerate(kpts):
-    #     hk = h1ao_k[ik]
-    #     for iR, Rv in enumerate(R_cart):
-    #         for iS, Sv in enumerate(R_cart):
-    #             phase = np.exp(1j * np.dot(k, Rv - Sv))
-    #             h1ao_R[iR, :, iS, :] += phase * hk
-    # h1ao_R /= nkpts
-    phase_kR = np.exp(1j * np.einsum('kx,Rx->kR', kpts, R_cart))
-    h1ao_R = np.einsum('kR,kS,kij->RiSj',
-                       phase_kR, phase_kR.conj(), h1ao_k,
-                       optimize=True,) / nkpts
-    h1ao_R = h1ao_R.reshape(nkpts*nao, nkpts*nao)
-
-    wannier_orb, R_indices_check = get_wannier_orbs(mc._scf, kmesh, mo_act_kpts)[:2]
-    wannier_orb = wannier_orb.reshape(nkpts*nao, nkpts*ncas)
-
-    # Sanity check to make sure that the R indices from TranslationSymm and get_wannier_orbs match.
-    assert np.array_equal(R_indices, R_indices_check), "Something is wrong."
-    
-    # Transform h1ao_R to the Wannier basis.
-    h1eff_R = reduce(np.dot, (wannier_orb.conj().T, h1ao_R, wannier_orb))
-    return h1eff_R, ecore
+    # Unlike k-CASCI, k-LASCI uses a Wannier basis for the active-space
+    # Hamiltonian.  The core contribution and k-point AO-to-MO projection are
+    # shared with k-CASCI; only this final representation change is different.
+    h1e_kpts, ecore = mc.h1e_kpts_for_cas(
+        mo_coeff=mo_coeff, ncas=ncas, ncore=ncore,
+    )
+    h1eff_wann = convert_h1e_mo_k_to_wann(
+        mc._scf, mc.kmesh, h1e_kpts,
+    )
+    return h1eff_wann, ecore
 
 @lib.with_doc(casci.PBCCASCI.get_h2eff.__doc__)
 def h2e_for_cas(mc, mo_coeff=None):
