@@ -8,6 +8,7 @@ from mrh.my_pyscf.mcscf.lasscf_sync_o0 import (
 from pyscf.pbc.lib import kpts_helper
 from mrh.my_pyscf.pbc.fci import cplx_csf_helper
 from mrh.my_pyscf.pbc.mcscf.mc1step import _get_casdm2_kpts
+from mrh.my_pyscf.pbc.mcscf.klas_ao2mo import _ERIS
 from mrh.my_pyscf.pbc.util.wannier import get_wannier_orbs
 
 
@@ -26,8 +27,9 @@ def get_grad_orb (klas, mo_coeff_kpts=None, ci=None, h2eff_sub=None,
             Contains molecular orbitals
         ci : list (length=nfrags) of list (length=nroots) of ndarray
             Contains CI vectors (# Note the CI vectors are in the Wannier basis)
-        h2eff_sub : ndarray of shape (nkpts, nkpts, nkpts, nmo, ncas, ncas, ncas)
-            Contains ERIs in the bloch MO basis.
+        h2eff_sub : ndarray or :class:`_ERIS`
+            Either k-LASSCF AO2MO intermediates or ``paaa`` integrals with
+            shape ``(nkpts,nkpts,nkpts,nmo,ncas,ncas,ncas)``.
         veff_kpts : ndarray of shape (2,nkpts,nao,nao)
             Spin-separated, state-averaged 1-electron mean-field potential in the AO basis
         dm1s_kpts : ndarray of shape (2,nkpts,nao,nao)
@@ -53,6 +55,8 @@ def get_grad_orb (klas, mo_coeff_kpts=None, ci=None, h2eff_sub=None,
     if ci is None: ci = klas.ci
     if dm1s_kpts is None:
         dm1s_kpts = klas.make_rdm1s (mo_coeff=mo_coeff_kpts, ci=ci)
+    if h2eff_sub is None:
+        h2eff_sub = _ERIS(klas, mo_coeff_kpts)
     if veff_kpts is None:
         veff_kpts = klas.get_veff (cell, dm_kpts=dm1s_kpts)
 
@@ -60,6 +64,19 @@ def get_grad_orb (klas, mo_coeff_kpts=None, ci=None, h2eff_sub=None,
     ncore = klas.ncore
     ncas = klas.ncas
     nocc = klas.ncore + klas.ncas
+    ncastot = nkpts * ncas
+
+
+    get_paaa = getattr(h2eff_sub, 'paaa', None)
+    if get_paaa is None:
+        expected_shape = (nkpts, nkpts, nkpts, nmo, ncas, ncas, ncas)
+        if np.shape(h2eff_sub) != expected_shape:
+            raise ValueError(
+                f"h2eff_sub must have shape {expected_shape}; "
+                f"got {np.shape(h2eff_sub)}"
+            )
+        get_paaa = lambda k1, k2, k3: h2eff_sub[k1, k2, k3]
+
     dtype = np.result_type(mo_coeff_kpts.dtype, veff_kpts.dtype,
                             dm1s_kpts.dtype)
 
@@ -83,9 +100,13 @@ def get_grad_orb (klas, mo_coeff_kpts=None, ci=None, h2eff_sub=None,
 
     # It's in Wannier basis:
     casdm2 = klas.make_casdm2 (ci=ci)
+    assert casdm2.shape == (ncastot,) * 4, \
+        f"casdm2 shape {casdm2.shape} != {(ncastot,) * 4}"
 
     # Currently, it's formed by transforming the dm1s, but it would be wiser to just reconstruct it.
     casdm1s = klas.make_casdm1s (ci=ci)
+    assert casdm1s.shape == (2, ncastot, ncastot), \
+        f"casdm1s shape {casdm1s.shape} != {(2, ncastot, ncastot)}"
     casdm1 = casdm1s.sum (0)
     casdm2 -= np.multiply.outer (casdm1, casdm1)
     casdm2 += np.multiply.outer (casdm1s[0], casdm1s[0]).transpose (0,3,2,1)
@@ -95,13 +116,15 @@ def get_grad_orb (klas, mo_coeff_kpts=None, ci=None, h2eff_sub=None,
 
     mo_act_kpts = mo_coeff_kpts[:, :, ncore:nocc]
     mo_phase = get_wannier_orbs(klas._scf, klas.kmesh, mo_act_kpts,)[-1]
-    
+
     kconserv = kpts_helper.get_kconserv(cell, kpts)
 
     for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
         k4 = kconserv[k1, k2, k3]
-        casdm2_kpts = _get_casdm2_kpts(casdm2, mo_phase, (k1, k2, k3, k4))
-        paaa_kpts = klas.eri.ppaa[k1, k2, k3, k4]
+        casdm2_kpts = _get_casdm2_kpts(
+            casdm2, mo_phase, (k1, k2, k3, k4),
+        )
+        paaa_kpts = get_paaa(k1, k2, k3)
         f1[k1][:,ncore:nocc] += np.tensordot (paaa_kpts, casdm2_kpts,
                                              axes=((1,2,3),(1,2,3)))
 
