@@ -531,11 +531,27 @@ class PBCCASBASE(mcscf.casci.CASBase):
         vj, vk = self._scf.get_jk(cell=cell, dm_kpts=dm_kpts, hermi=hermi, vhfopt=vhfopt, 
                                 kpts=kpts, kpts_band=kpts_band, with_j=with_j, 
                                 with_k=with_k, omega=omega, **kwargs)
-        assert vj.shape[0] == dm_kpts.shape[0]
-        assert vk.shape[0] == dm_kpts.shape[0]
-        # In case of ROHF mean-field, two J matrices are returned.
-        if vj.ndim == 4 and vj.shape[1] == 2:
-            vj = vj[:, 0] + vj[:, 1]
+
+        dm_kpts = np.asarray(dm_kpts)
+
+        def _check_shape(name, value, requested):
+            if not requested:
+                return
+            if value is None or np.shape(value) != dm_kpts.shape:
+                msg = (f"Unexpected {name} shape {np.shape(value)} for "
+                       f"density shape {dm_kpts.shape}")
+                raise RuntimeError(msg)
+
+        _check_shape("J", vj, with_j)
+        _check_shape("K", vk, with_k)
+
+        if dm_kpts.ndim == 4:
+            if dm_kpts.shape[0] != 2:
+                msg = "A spin-separated density must have " \
+                "shape (2, nkpts, nao, nao)"
+                raise ValueError(msg)
+            if with_j:
+                vj = vj.sum(axis=0)
         return vj, vk
     
     canonicalize = canonicalize
