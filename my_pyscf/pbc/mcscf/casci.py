@@ -499,12 +499,17 @@ class PBCCASBASE(mcscf.casci.CASBase):
         return self
     
     def get_veff(self, cell=None, dm_kpts=None, hermi=1, kpts=None, **kwargs):
-        # Note this would be in k-space: would need transformation
-        # before its direct use.
+        if dm_kpts is None:
+            dm_kpts = self.make_rdm1()
+        dm_kpts = np.asarray(dm_kpts)
         vj, vk = self.get_jk(cell, dm_kpts, hermi=hermi, kpts=kpts, **kwargs)
-        veff = vj - 0.5 * vk
-        return veff
-        #return self._scf.get_veff(cell=cell, dm_kpts=dm_kpts, hermi=hermi, kpts=kpts, **kwargs)
+        if dm_kpts.ndim == 4:
+            # Spin-separated density: J is spin-summed and K remains spin-resolved.
+            return vj[None] - vk
+        if dm_kpts.ndim == 3:
+            # Spin-summed density: use the restricted Hartree-Fock potential.
+            return vj - 0.5 * vk
+        raise ValueError(f"Unexpected density shape {dm_kpts.shape}")
     
     def get_hcore(self, **kwargs):
         '''
