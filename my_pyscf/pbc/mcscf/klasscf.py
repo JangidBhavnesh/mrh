@@ -421,9 +421,9 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
     orbital-response intermediates assume a single molecular MO basis.  Here,
     active-space CI tensors are retained in the Wannier basis, while orbital
     tensors and the disk-backed ``ppaa``, ``papa``, and ``paap`` integrals are
-    retained in the block-MO k-point basis.  The reference orbital
-    intermediates are initialized here; the current ``_matvec`` implementation
-    still applies only the CI-CI Hessian block.
+    retained in the block-MO k-point basis.  The orbital Hessian response is
+    evaluated in that block-MO basis without materializing a dense supercell
+    ERI tensor.
     """
 
     def __init__(
@@ -1012,16 +1012,223 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
         ]
 
     def _orbital_hessian_response(self, kappa1):
-        """Apply the orbital-input Hessian blocks.
-
-        Dispatch reaches this method only when the packed trial vector has a
-        nonzero orbital component.  The periodic orbital-response contraction
-        is the next implementation step; raising here prevents an incomplete
-        zero orbital Hessian from being used silently.
-        """
-        raise NotImplementedError(
-            "the k-LASSCF orbital Hessian response is not implemented"
+        """Apply the orbital-orbital Hessian block to ``kappa1``."""
+        odm1s, ocm2 = self._make_orbital_response_dm(kappa1)
+        veff_prime = self._get_veff_response(odm1s)
+        return self.orbital_response(
+            kappa1, odm1s, ocm2, veff_prime,
         )
+
+    def _make_orbital_response_dm(self, kappa):
+        """Build one-sided 1-RDM and cumulant responses.
+
+        ``odm1s`` is in the block-MO basis.  ``ocm2[k1,k2,k3]`` has three
+        active indices at ``k1``, ``k2``, and ``k3`` and one general orbital
+        index at the momentum-conserving fourth k-point.
+        """
+        _check_shape(
+            kappa, (self.nkpts, self.nmo, self.nmo), label="kappa",
+        )
+        odm1s = -np.einsum(
+            "skpr,krq->skpq", self.dm1s, kappa, optimize=True,
+        )
+
+        dtype = np.result_type(self.cascm2.dtype, kappa.dtype)
+        ocm2 = np.empty(
+            (self.nkpts, self.nkpts, self.nkpts)
+            + (self.ncas, self.ncas, self.ncas, self.nmo),
+            dtype=dtype,
+        )
+        kconserv = kpts_helper.get_kconserv(
+            self.las._scf.cell, self.kpts,
+        )
+        active = slice(self.ncore, self.nocc)
+        for k1, k2, k3 in kpts_helper.loop_kkk(self.nkpts):
+            k4 = kconserv[k1, k2, k3]
+            cascm2_kpts = _get_casdm2_kpts(
+                self.cascm2, self.mo_phase, (k1, k2, k3, k4),
+            )
+            ocm2[k1, k2, k3] = -np.einsum(
+                "abcd,dp->abcp",
+                cascm2_kpts, kappa[k4, active, :],
+                optimize=True,
+            )
+        return odm1s, ocm2
+
+    def _get_veff_response(self, odm1s):
+        """Return spin-resolved JK response in the block-MO basis."""
+        _check_shape(
+            odm1s,
+            (2, self.nkpts, self.nmo, self.nmo),
+            label="odm1s",
+        )
+        dm1s_mo = odm1s + odm1s.conj().transpose(0, 1, 3, 2)
+        dtype = np.result_type(dm1s_mo.dtype, self.mo_coeff.dtype)
+        dm1s_ao = np.empty(
+            (2, self.nkpts, self.nao, self.nao), dtype=dtype,
+        )
+        for k in range(self.nkpts):
+            mo_coeff = self.mo_coeff[k]
+            dm1s_ao[:, k] = (
+                mo_coeff @ dm1s_mo[:, k] @ mo_coeff.conj().T
+            )
+
+        veff_ao = np.asarray(self.las.get_veff(
+            self.las._scf.cell, dm_kpts=dm1s_ao,
+        ))
+        _check_shape(
+            veff_ao,
+            (2, self.nkpts, self.nao, self.nao),
+            label="veff_prime_ao",
+        )
+        veff_mo = np.empty(
+            (2, self.nkpts, self.nmo, self.nmo),
+            dtype=np.result_type(veff_ao.dtype, self.mo_coeff.dtype),
+        )
+        for k in range(self.nkpts):
+            mo_coeff = self.mo_coeff[k]
+            veff_mo[:, k] = (
+                mo_coeff.conj().T @ veff_ao[:, k] @ mo_coeff
+            )
+        return veff_mo
+
+    def _symmetrize_active_ocm2(self, ocm2):
+        """Complete the complex active cumulant response by symmetry."""
+        _check_shape(
+            ocm2,
+            (self.nkpts, self.nkpts, self.nkpts,
+             self.ncas, self.ncas, self.ncas, self.nmo),
+            label="ocm2",
+        )
+        active = slice(self.ncore, self.nocc)
+        one_sided = ocm2[..., active]
+        half = np.empty_like(one_sided)
+        result = np.empty_like(one_sided)
+        kconserv = kpts_helper.get_kconserv(
+            self.las._scf.cell, self.kpts,
+        )
+
+        for k1, k2, k3 in kpts_helper.loop_kkk(self.nkpts):
+            k4 = kconserv[k1, k2, k3]
+            half[k1, k2, k3] = (
+                one_sided[k1, k2, k3]
+                + one_sided[k2, k1, k4].conj().transpose(1, 0, 3, 2)
+            )
+        for k1, k2, k3 in kpts_helper.loop_kkk(self.nkpts):
+            k4 = kconserv[k1, k2, k3]
+            result[k1, k2, k3] = (
+                half[k1, k2, k3]
+                + half[k3, k4, k1].transpose(2, 3, 0, 1)
+            )
+        return result
+
+    def orbital_response(self, kappa, odm1s, ocm2, veff_prime):
+        """Build the complex block-MO orbital Hessian response."""
+        _check_shape(
+            kappa, (self.nkpts, self.nmo, self.nmo), label="kappa",
+        )
+        _check_shape(
+            odm1s, (2, self.nkpts, self.nmo, self.nmo), label="odm1s",
+        )
+        _check_shape(
+            veff_prime,
+            (2, self.nkpts, self.nmo, self.nmo),
+            label="veff_prime",
+        )
+        edm1s = odm1s + odm1s.conj().transpose(0, 1, 3, 2)
+        ecm2 = self._symmetrize_active_ocm2(ocm2)
+        dtype = np.result_type(
+            edm1s.dtype, ecm2.dtype, veff_prime.dtype, self.fock1.dtype,
+        )
+        f1_prime = np.zeros(
+            (self.nkpts, self.nmo, self.nmo), dtype=dtype,
+        )
+        fock1_one_body = np.zeros_like(f1_prime)
+        active = slice(self.ncore, self.nocc)
+
+        for k in range(self.nkpts):
+            for spin in range(2):
+                fock1_one_body[k] += (
+                    self.h1s[spin, k] @ self.dm1s[spin, k]
+                )
+                f1_prime[k] += self.h1s[spin, k] @ edm1s[spin, k]
+                f1_prime[k] += veff_prime[spin, k] @ self.dm1s[spin, k]
+            f1_prime[k] += (
+                self.fock1[k] @ kappa[k]
+                - kappa[k] @ self.fock1[k]
+            ) / 2.0
+
+        for k1, k2, k3 in kpts_helper.loop_kkk(self.nkpts):
+            paaa = self.eri_paaa(k1, k2, k3)
+            f1_prime[k1][:, active] += np.tensordot(
+                paaa, ecm2[k1, k2, k3],
+                axes=((1, 2, 3), (1, 2, 3)),
+            )
+
+        f1_prime += self._orbital_response_external_cumulant(
+            kappa, self.fock1 - fock1_one_body,
+        )
+        return f1_prime - f1_prime.conj().transpose(0, 2, 1)
+
+    def _orbital_response_external_cumulant(
+            self, kappa, fock1_cumulant):
+        """Differentiate the cumulant Fock term for external rotations.
+
+        The molecular real-orbital implementation reduces all four integral
+        derivatives to ``ppaa`` and ``papa`` by permutational symmetry.  For
+        complex Bloch orbitals, some of those permutations also conjugate the
+        integrals.  Contracting the three differentiated active integral
+        indices directly with the disk-backed ``ppaa``, ``papa``, and
+        ``paap`` blocks avoids that real-only assumption.
+
+        The returned matrix omits the final skew-Hermitian completion.  Its
+        ``-F_cumulant @ kappa`` connection term combines with the half
+        commutator already added by :meth:`orbital_response` to give the
+        covariant orbital Hessian used by the molecular implementation.
+        """
+        _check_shape(
+            kappa, (self.nkpts, self.nmo, self.nmo), label="kappa",
+        )
+        _check_shape(
+            fock1_cumulant,
+            (self.nkpts, self.nmo, self.nmo),
+            label="fock1_cumulant",
+        )
+        active = slice(self.ncore, self.nocc)
+        kappa_external = np.array(kappa, copy=True)
+        kappa_external[:, active, active] = 0
+        response = -np.einsum(
+            "kpr,krq->kpq", fock1_cumulant, kappa_external,
+            optimize=True,
+        )
+        kconserv = kpts_helper.get_kconserv(
+            self.las._scf.cell, self.kpts,
+        )
+
+        for k1, k2, k3 in kpts_helper.loop_kkk(self.nkpts):
+            k4 = kconserv[k1, k2, k3]
+            cascm2_kpts = _get_casdm2_kpts(
+                self.cascm2, self.mo_phase, (k1, k2, k3, k4),
+            )
+            ppaa = self.eris.ppaa(k1, k2, k3)
+            papa = self.eris.papa(k1, k2, k3)
+            paap = self.eris.paap(k1, k2, k3)
+            response[k1][:, active] += np.einsum(
+                "pxst,xr,qrst->pq",
+                ppaa, kappa_external[k2, :, active], cascm2_kpts,
+                optimize=True,
+            )
+            response[k1][:, active] -= np.einsum(
+                "sx,prxt,qrst->pq",
+                kappa_external[k3, active, :], papa, cascm2_kpts,
+                optimize=True,
+            )
+            response[k1][:, active] += np.einsum(
+                "prsx,xt,qrst->pq",
+                paap, kappa_external[k4, :, active], cascm2_kpts,
+                optimize=True,
+            )
+        return response
 
     def _zero_ci_step(self, dtype):
         """Return zero determinant vectors with the reference CI layout."""
