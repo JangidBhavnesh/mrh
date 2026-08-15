@@ -1024,7 +1024,8 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
 
         ``odm1s`` is in the block-MO basis.  ``ocm2[k1,k2,k3]`` has three
         active indices at ``k1``, ``k2``, and ``k3`` and one general orbital
-        index at the momentum-conserving fourth k-point.
+        index at ``k4``.  These are bra-ket-bra-ket tensor indices, so their
+        momentum rule is ``k1 - k2 + k3 - k4 = G``.
         """
         _check_shape(
             kappa, (self.nkpts, self.nmo, self.nmo), label="kappa",
@@ -1062,6 +1063,10 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
             (2, self.nkpts, self.nmo, self.nmo),
             label="odm1s",
         )
+        # odm1s = -D kappa is the ket-side response.  Because D is Hermitian
+        # and kappa is anti-Hermitian, its bra-side partner is
+        # (-D kappa)^dagger = kappa D.  Thus this adjoint is the actual
+        # first-order Hermitian density, not a real-orbital transpose shortcut.
         dm1s_mo = odm1s + odm1s.conj().transpose(0, 1, 3, 2)
         dtype = np.result_type(dm1s_mo.dtype, self.mo_coeff.dtype)
         dm1s_ao = np.empty(
@@ -1075,6 +1080,7 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
 
         veff_ao = np.asarray(self.las.get_veff(
             self.las._scf.cell, dm_kpts=dm1s_ao,
+            hermi=1, kpts=self.kpts,
         ))
         _check_shape(
             veff_ao,
@@ -1093,7 +1099,14 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
         return veff_mo
 
     def _symmetrize_active_ocm2(self, ocm2):
-        """Complete the complex active cumulant response by symmetry."""
+        """Complete the active cumulant response using its two symmetries.
+
+        For bra-ket-bra-ket ordering, Hermiticity is
+        ``L[a,b,c,d] = L[b,a,d,c].conj()`` and electron-pair exchange is
+        ``L[a,b,c,d] = L[c,d,a,b]``.  The corresponding source k-point blocks
+        are ``(k2,k1,k4)`` and ``(k3,k4,k1)``; each still obeys the original
+        ``+ - + -`` momentum rule.
+        """
         _check_shape(
             ocm2,
             (self.nkpts, self.nkpts, self.nkpts,
@@ -1185,6 +1198,13 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
         ``-F_cumulant @ kappa`` connection term combines with the half
         commutator already added by :meth:`orbital_response` to give the
         covariant orbital Hessian used by the molecular implementation.
+
+        This is the first-order expansion of ``mc1step.gorb_update``.  The
+        stored ERIs retain bra-ket-bra-ket order and therefore always use
+        ``k1 - k2 + k3 - k4 = G``.  ``mc1step`` also constructs a regrouped
+        ``hdm2_ppaa[p,u,q,v]`` tensor whose labels obey ``k1 + k2 - k3 - k4``;
+        that alternate rule does not apply here because the contractions below
+        consume ``kappa`` before such a regrouped Hessian tensor is formed.
         """
         _check_shape(
             kappa, (self.nkpts, self.nmo, self.nmo), label="kappa",
@@ -1213,16 +1233,20 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
             ppaa = self.eris.ppaa(k1, k2, k3)
             papa = self.eris.papa(k1, k2, k3)
             paap = self.eris.paap(k1, k2, k3)
+            # Ket index 2 of ppaa: dU/dt = kappa.
             response[k1][:, active] += np.einsum(
                 "pxst,xr,qrst->pq",
                 ppaa, kappa_external[k2, :, active], cascm2_kpts,
                 optimize=True,
             )
+            # Bra index 3 of papa: d(U*)/dt = kappa*; using
+            # kappa*_{x,s} = -kappa_{s,x} gives the explicit minus sign.
             response[k1][:, active] -= np.einsum(
                 "sx,prxt,qrst->pq",
                 kappa_external[k3, active, :], papa, cascm2_kpts,
                 optimize=True,
             )
+            # Ket index 4 of paap: dU/dt = kappa.
             response[k1][:, active] += np.einsum(
                 "prsx,xt,qrst->pq",
                 paap, kappa_external[k4, :, active], cascm2_kpts,
