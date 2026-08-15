@@ -130,7 +130,7 @@ class TranslationSymm:
         return kpts
 
     def build_phase_matrix(self, kpts=None, R_indices=None):
-        '''
+        r'''
         Build the phase matrix
         F[R, k] = exp(-i k.R) / sqrt(Nk)
 
@@ -163,7 +163,7 @@ class TranslationSymm:
         return phase
 
     def build_translation_in_real_space(self, T_index, norb=None):
-        '''
+        r'''
         The translation in the real-space block basis
         is a permutation matrix that permutes the cell indices according
         to the translation vector T_index.
@@ -235,7 +235,7 @@ class TranslationSymm:
         return trans_mat
 
     def get_k_to_cell_transmat(self, kpts=None, norb=None):
-        '''
+        r'''
         This function constructs the transformation matrix that maps
         k-space block basis to real-space cell block basis.
         In other words, it constructs the matrix F such that:
