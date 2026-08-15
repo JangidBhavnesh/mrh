@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 
 import numpy as np
+from scipy import linalg
 
 from pyscf.pbc.lib import kpts_helper
 
@@ -1673,6 +1674,143 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
             gradient, (self.ugg.nvar_tot,), label="gradient",
         )
         return gradient
+
+    def _update_mo(self, kappa):
+        """Apply one packed-coordinate orbital step at every k-point.
+
+        ``ugg.unpack_orb`` returns the full anti-Hermitian matrix associated
+        with the independent lower-triangular coordinates.  As in molecular
+        LASSCF, the corresponding orbital generator is ``kappa / 2``; using
+        the full matrix in the exponential would therefore apply twice the
+        requested step.
+        """
+        kappa = np.asarray(kappa)
+        _check_shape(
+            kappa, (self.nkpts, self.nmo, self.nmo), label="kappa",
+        )
+        if not np.all(np.isfinite(kappa)):
+            raise ValueError("kappa must contain only finite values")
+        antihermitian_error = np.linalg.norm(
+            kappa + kappa.conj().transpose(0, 2, 1)
+        )
+        antihermitian_scale = max(np.linalg.norm(kappa), 1.0)
+        if antihermitian_error > 1e-10 * antihermitian_scale:
+            msg = (
+                "kappa must be anti-Hermitian; relative residual is "
+                f"{antihermitian_error / antihermitian_scale:.3e}"
+            )
+            raise ValueError(msg)
+
+        mo_coeff = np.asarray(self.mo_coeff)
+        _check_shape(
+            mo_coeff, (self.nkpts, self.nao, self.nmo),
+            label="mo_coeff",
+        )
+        dtype = np.result_type(mo_coeff.dtype, kappa.dtype)
+        mo1 = np.empty(mo_coeff.shape, dtype=dtype)
+        for k in range(self.nkpts):
+            mo1[k] = mo_coeff[k] @ linalg.expm(kappa[k] / 2.0)
+        return mo1
+
+    def _update_ci(self, dci):
+        """Retract complex CI tangents onto their normalized CI spheres.
+
+        The component of each trial vector parallel to its reference is
+        removed with the complex inner product.  The remaining tangent is
+        applied through the same great-circle update as molecular LASSCF,
+        generalized here to complex determinant coefficients.
+        """
+        if len(dci) != len(self.ci):
+            msg = (
+                f"CI step contains {len(dci)} cells; expected "
+                f"{len(self.ci)}"
+            )
+            raise ValueError(msg)
+
+        ci1 = []
+        for ifrag, (ci0_r, dci_r) in enumerate(zip(self.ci, dci)):
+            if len(dci_r) != len(ci0_r):
+                msg = (
+                    f"CI step for cell {ifrag} contains {len(dci_r)} roots; "
+                    f"expected {len(ci0_r)}"
+                )
+                raise ValueError(msg)
+            ci1_r = []
+            for iroot, (ci0, dc) in enumerate(zip(ci0_r, dci_r)):
+                ci0 = np.asarray(ci0)
+                dc = np.asarray(dc)
+                _check_shape(
+                    dc, ci0.shape,
+                    label=f"dci_{ifrag}_{iroot}",
+                )
+                if not np.all(np.isfinite(ci0)):
+                    msg = (
+                        f"reference CI vector for cell {ifrag}, root "
+                        f"{iroot} must contain only finite values"
+                    )
+                    raise ValueError(msg)
+                if not np.all(np.isfinite(dc)):
+                    msg = (
+                        f"CI step for cell {ifrag}, root {iroot} must "
+                        "contain only finite values"
+                    )
+                    raise ValueError(msg)
+
+                dtype = np.result_type(ci0.dtype, dc.dtype)
+                reference = np.asarray(ci0, dtype=dtype).reshape(-1)
+                tangent = np.asarray(dc, dtype=dtype).reshape(-1)
+                reference_norm = np.linalg.norm(reference)
+                if not np.isclose(
+                        reference_norm, 1.0, atol=1e-8, rtol=1e-8):
+                    msg = (
+                        f"reference CI vector for cell {ifrag}, root "
+                        f"{iroot} has norm {reference_norm}; expected 1"
+                    )
+                    raise ValueError(msg)
+
+                tangent = tangent - reference * np.vdot(
+                    reference, tangent,
+                )
+                tangent_norm = np.linalg.norm(tangent)
+                c1 = (
+                    np.cos(tangent_norm) * reference
+                    + np.sinc(tangent_norm / np.pi) * tangent
+                )
+                c1_norm = np.linalg.norm(c1)
+                if not np.isfinite(c1_norm) or c1_norm < 1e-14:
+                    msg = (
+                        f"CI retraction failed for cell {ifrag}, root "
+                        f"{iroot}"
+                    )
+                    raise ValueError(msg)
+                c1 = (c1 / c1_norm).reshape(ci0.shape)
+                ci1_r.append(c1)
+            ci1.append(ci1_r)
+        return ci1
+
+    def update_mo_ci(self, x):
+        """Apply a combined periodic orbital/CI step without rebuilding ERIs."""
+        x = np.asarray(x).reshape(-1)
+        _check_shape(x, (self.ugg.nvar_tot,), label="step_vector")
+        kappa, dci = self.ugg.unpack(x)
+        return self._update_mo(kappa), self._update_ci(dci)
+
+    def update_mo_ci_eri(self, x, h2eff_sub=None):
+        """Apply a step and rebuild the Wannier active-space integrals.
+
+        ``h2eff_sub`` is accepted for compatibility with the molecular
+        optimizer interface.  Periodic active-space integrals cannot in
+        general be updated from that old tensor after external orbital
+        rotations, so they are recomputed from the updated block MOs.  The
+        disk-backed ``ppaa``, ``papa``, and ``paap`` tensors are rebuilt when
+        the next periodic Hessian operator is constructed.
+        """
+        mo1, ci1 = self.update_mo_ci(x)
+        h2eff1 = np.asarray(self.las.get_h2cas(mo1))
+        _check_shape(
+            h2eff1, (self.ncastot,) * 4, label="updated_h2eff_sub",
+        )
+        return mo1, ci1, h2eff1
 
     def ci_response_offdiag(self, h1frs_response):
         """Apply the different-cell blocks of the CI Hessian.
