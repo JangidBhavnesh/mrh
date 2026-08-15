@@ -500,6 +500,7 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
         self._init_eri_(eris)
         self._init_orb_(mo_phase)
         self._init_ci_()
+        self._Horb_diag_cache = None
 
     def _init_dms_(self, casdm1frs, casdm2fr=None, dm1s_kpts=None):
         """Initialize reference density matrices in their natural bases.
@@ -906,12 +907,77 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
 
         return hci_diag
 
+    def _get_Horb_diag(self):
+        """Return the exact orbital diagonal in packed UGG ordering.
+
+        The periodic OO response is complex and uses disk-backed level-2 ERIs.
+        Reconstructing its diagonal from unit orbital directions keeps the
+        preconditioner exactly consistent with :meth:`_matvec`, including the
+        ``kappa2/2`` packing convention, without building the additional core
+        ERI intermediates used by the older k-CASSCF diagonal formula.  The
+        result is cached because all Hessian intermediates are immutable for
+        the lifetime of this operator.
+        """
+        cached = getattr(self, "_Horb_diag_cache", None)
+        if cached is not None:
+            return np.array(cached, copy=True)
+
+        nvar_orb = self.ugg.nvar_orb
+        if nvar_orb == 0:
+            diagonal = np.empty(0, dtype=np.complex128)
+        else:
+            diagonal = np.empty(nvar_orb, dtype=np.complex128)
+            unit = np.zeros(nvar_orb, dtype=np.complex128)
+            for index in range(nvar_orb):
+                unit[index] = 1.0
+                kappa = self.ugg.unpack_orb(unit)
+                response = np.asarray(
+                    self._orbital_hessian_response(kappa)
+                )
+                _check_shape(
+                    response, np.shape(kappa),
+                    label=f"orbital_hessian_response[{index}]",
+                )
+                packed_response = np.asarray(
+                    self.ugg.pack_orb(response / 2.0)
+                ).reshape(-1)
+                _check_shape(
+                    packed_response, (nvar_orb,),
+                    label=f"packed_orbital_hessian_response[{index}]",
+                )
+                diagonal[index] = packed_response[index]
+                unit[index] = 0.0
+
+        self._Horb_diag_cache = np.array(diagonal, copy=True)
+        return diagonal
+
     def _get_Hdiag(self):
-        """Return the CI-only diagonal in the operator's CSF ordering."""
+        """Return the full orbital-plus-CI diagonal in packed UGG ordering."""
+        horb_diag = self._get_Horb_diag()
         hci_diag = self._get_Hci_diag()
-        if not hci_diag:
-            return np.empty(0, dtype=np.result_type(self.eri_cas.dtype))
-        return np.concatenate(hci_diag)
+        pieces = [horb_diag]
+        pieces.extend(hci_diag)
+        if pieces:
+            diagonal = np.concatenate(pieces)
+        else:
+            diagonal = np.empty(0, dtype=np.complex128)
+        _check_shape(
+            diagonal, (self.ugg.nvar_tot,), label="Hdiag",
+        )
+        return diagonal
+
+    def get_grad(self):
+        """Return the periodic complex gradient in packed UGG ordering."""
+        gorb = self.fock1 - self.fock1.conj().transpose(0, 2, 1)
+        gci = [
+            [2.0 * residual for residual in residual_r]
+            for residual_r in self.hci0
+        ]
+        gradient = np.asarray(self.ugg.pack(gorb, gci)).reshape(-1)
+        _check_shape(
+            gradient, (self.ugg.nvar_tot,), label="gradient",
+        )
+        return gradient
 
     def ci_response_offdiag(self, h1frs_response):
         """Apply the different-cell blocks of the CI Hessian.
