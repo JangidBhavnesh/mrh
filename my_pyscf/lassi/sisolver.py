@@ -370,5 +370,3 @@ def kernel_incore (sisolver, e0, h1, h2, norb_f, ci_fr, nelec_frs, smult_fr, soc
     c = raw2orth.H (c)
     s2_blk = ((s2_blk @ c) * c.conj ()).sum (0)
     return True, e, c, s2_blk
-
-

@@ -57,6 +57,42 @@ def get_grad_exact(las, epsilon=0.0):
     
     return gradients, g_selected, a_idxs_selected, i_idxs_selected
 
+
+def make_casrdm123s_lassi(lsi, state=0):
+    """Build spin-resolved RDMs for one LASSI eigenstate."""
+    dm1s, dm2s = lsi.make_casdm12s(state=state)
+    dm3s = lsi.make_casdm3s(state=state)
+    dm2s = np.asarray(dm2s)
+    dm2_las = np.stack((dm2s[0, :, :, 0], dm2s[0, :, :, 1],
+                        dm2s[1, :, :, 1]))
+    return np.asarray(dm1s), dm2_las, np.asarray(dm3s)
+
+
+def get_grad_exact_lassi(lsi, state=0, epsilon=0.0):
+    """Calculate all LUSCC excitation gradients for a LASSI eigenstate."""
+    las = lsi._las
+    rdm1, rdm2, rdm3 = make_casrdm123s_lassi(lsi, state=state)
+    nmo, ncas, ncore = las.mo_coeff.shape[1], las.ncas, las.ncore
+    nocc = ncore + ncas
+    h2 = lib.numpy_helper.unpack_tril(
+        las.get_h2eff().reshape(nmo*ncas, ncas*(ncas+1)//2)
+    ).reshape(nmo, ncas, ncas, ncas)[ncore:nocc]
+    h1, _ = las.h1e_for_cas(mo_coeff=las.mo_coeff)
+    uop = lasuccsd.gen_uccsd_op(ncas, las.ncas_sub)
+    a_idxs, i_idxs = uop.a_idxs, uop.i_idxs
+    gradients = np.concatenate((
+        get_grad_h1t1(a_idxs, i_idxs, rdm1, h1)
+        + get_grad_h2t1(a_idxs, i_idxs, rdm2, h2),
+        get_grad_h1t2(a_idxs, i_idxs, rdm2, h1)
+        + get_grad_h2t2(a_idxs, i_idxs, rdm2, rdm3, h2),
+    ))
+    selected = [(gradient, index)
+                for index, gradient in enumerate(gradients)
+                if epsilon == 0.0 or abs(gradient) > epsilon]
+    indices = [index for _, index in selected]
+    return (gradients, selected, [a_idxs[index] for index in indices],
+            [i_idxs[index] for index in indices])
+
 def get_h1e_spin(h1):
     n = h1.shape[1]
     nso = 2*n
