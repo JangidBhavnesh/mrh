@@ -1191,6 +1191,56 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
         tdm1s_block[:, :, active, active] = tdm1s_active_block
         return tdm1s_block
 
+    def _transition_cumulant_to_block_fock(self, tcm2):
+        """Transform and contract a Wannier CI transition cumulant.
+
+        Each transformed block retains bra-ket-bra-ket order and therefore
+        uses ``k1 - k2 + k3 - k4 = G``.  The returned generalized-Fock
+        contribution has shape ``(nkpts, nmo, nmo)`` and is nonzero only in
+        its active columns.  As with the transition 1-RDM transformation, no
+        orbital-Hessian factor of two is applied here.
+        """
+        tcm2 = np.asarray(tcm2)
+        _check_shape(
+            tcm2, (self.ncastot,) * 4,
+            label="transition_cumulant",
+        )
+        _check_shape(
+            self.mo_phase,
+            (self.nkpts, self.ncas, self.ncastot),
+            label="mo_phase",
+        )
+        dtype = np.result_type(
+            tcm2.dtype, self.mo_phase.dtype, self.eri_cas.dtype,
+        )
+        fock_response = np.zeros(
+            (self.nkpts, self.nmo, self.nmo), dtype=dtype,
+        )
+        active = slice(self.ncore, self.nocc)
+        kconserv = kpts_helper.get_kconserv(
+            self.las._scf.cell, self.kpts,
+        )
+        for k1, k2, k3 in kpts_helper.loop_kkk(self.nkpts):
+            k4 = kconserv[k1, k2, k3]
+            tcm2_kpts = _get_casdm2_kpts(
+                tcm2, self.mo_phase, (k1, k2, k3, k4),
+            )
+            _check_shape(
+                tcm2_kpts, (self.ncas,) * 4,
+                label=f"transition_cumulant_kpts[{k1},{k2},{k3}]",
+            )
+            paaa = self.eri_paaa(k1, k2, k3)
+            _check_shape(
+                paaa,
+                (self.nmo, self.ncas, self.ncas, self.ncas),
+                label=f"paaa[{k1},{k2},{k3}]",
+            )
+            fock_response[k1][:, active] += np.tensordot(
+                paaa, tcm2_kpts,
+                axes=((1, 2, 3), (1, 2, 3)),
+            )
+        return fock_response
+
     def get_h1eff_response(self, tdm1rs):
         """Build the effective one-electron response from other cells.
 
@@ -1997,6 +2047,30 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
         # (-D kappa)^dagger = kappa D.  Thus this adjoint is the actual
         # first-order Hermitian density, not a real-orbital transpose shortcut.
         dm1s_mo = odm1s + odm1s.conj().transpose(0, 1, 3, 2)
+        return self._get_veff_from_block_dm1s(dm1s_mo)
+
+    def _get_ci_veff_response(self, tdm1s_block):
+        """Return JK response to a full Hermitian CI transition density.
+
+        ``tdm1s_block`` is already Hermitian and must not be completed a
+        second time.  This helper is normalization neutral: it returns the
+        response to exactly the density supplied by its caller.
+        """
+        _check_shape(
+            tdm1s_block,
+            (2, self.nkpts, self.nmo, self.nmo),
+            label="transition_dm1s_block",
+        )
+        return self._get_veff_from_block_dm1s(tdm1s_block)
+
+    def _get_veff_from_block_dm1s(self, dm1s_mo):
+        """Transform a Hermitian block-MO density through the AO JK map."""
+        dm1s_mo = np.asarray(dm1s_mo)
+        _check_shape(
+            dm1s_mo,
+            (2, self.nkpts, self.nmo, self.nmo),
+            label="dm1s_mo_response",
+        )
         dtype = np.result_type(dm1s_mo.dtype, self.mo_coeff.dtype)
         dm1s_ao = np.empty(
             (2, self.nkpts, self.nao, self.nao), dtype=dtype,
