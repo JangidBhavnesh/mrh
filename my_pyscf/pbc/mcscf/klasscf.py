@@ -17,6 +17,18 @@ from mrh.my_pyscf.pbc.mcscf.klasci import (
 from mrh.my_pyscf.pbc.util.wannier import get_wannier_orbs
 
 
+def _check_shape(mat, shape, label="array"):
+    """
+    Raise ``ValueError`` when ``mat`` does not have ``shape``.
+    """
+    shape = tuple(shape)
+    if np.shape(mat) != shape:
+        msg = (
+            f"{label} has shape {np.shape(mat)}; expected {shape}"
+        )
+        raise ValueError(msg)
+
+
 class KLASSCF_UnitaryGroupGenerators:
     """Pack k-point orbital rotations and Wannier-basis CI variations.
 
@@ -41,12 +53,9 @@ class KLASSCF_UnitaryGroupGenerators:
             )
             raise ValueError(msg)
 
-        if mo_coeff.shape[0] != self.nkpts:
-            msg = (
-                f"mo_coeff contains {mo_coeff.shape[0]} k-points; "
-                f"expected {self.nkpts}"
-            )
-            raise ValueError(msg)
+        _check_shape(
+            mo_coeff, (self.nkpts, mo_coeff.shape[1], mo_coeff.shape[2]), label="mo_coeff"
+        )
 
         ncore = klas.ncore
         nocc = ncore + klas.ncas
@@ -115,12 +124,7 @@ class KLASSCF_UnitaryGroupGenerators:
 
     def pack_orb(self, kappa):
         kappa = np.asarray(kappa)
-        expected_shape = (self.nkpts, self.nmo, self.nmo)
-        if kappa.shape != expected_shape:
-            msg = (
-                f"kappa must have shape {expected_shape}; got {kappa.shape}"
-            )
-            raise ValueError(msg)
+        _check_shape(kappa, (self.nkpts, self.nmo, self.nmo), label="kappa")
         return np.asarray(kappa[self.uniq_orb_idx]).reshape(-1)
 
     def unpack_orb(self, x_orb):
@@ -292,12 +296,11 @@ def get_grad_orb (klas, mo_coeff_kpts=None, ci=None, h2eff_sub=None,
 
     get_paaa = getattr(h2eff_sub, 'paaa', None)
     if get_paaa is None:
-        expected_shape = (nkpts, nkpts, nkpts, nmo, ncas, ncas, ncas)
-        if np.shape(h2eff_sub) != expected_shape:
-            raise ValueError(
-                f"h2eff_sub must have shape {expected_shape}; "
-                f"got {np.shape(h2eff_sub)}"
-            )
+        _check_shape(
+            h2eff_sub,
+            (nkpts, nkpts, nkpts, nmo, ncas, ncas, ncas),
+            label="h2eff_sub",
+        )
         get_paaa = lambda k1, k2, k3: h2eff_sub[k1, k2, k3]
 
     dtype = np.result_type(mo_coeff_kpts.dtype, veff_kpts.dtype,
@@ -323,13 +326,11 @@ def get_grad_orb (klas, mo_coeff_kpts=None, ci=None, h2eff_sub=None,
 
     # It's in Wannier basis:
     casdm2 = klas.make_casdm2 (ci=ci)
-    assert casdm2.shape == (ncastot,) * 4, \
-        f"casdm2 shape {casdm2.shape} != {(ncastot,) * 4}"
+    _check_shape(casdm2, (ncastot,) * 4, label="casdm2")
 
     # Currently, it's formed by transforming the dm1s, but it would be wiser to just reconstruct it.
     casdm1s = klas.make_casdm1s (ci=ci)
-    assert casdm1s.shape == (2, ncastot, ncastot), \
-        f"casdm1s shape {casdm1s.shape} != {(2, ncastot, ncastot)}"
+    _check_shape(casdm1s, (2, ncastot, ncastot), label="casdm1s")
     casdm1 = casdm1s.sum (0)
     casdm2 -= np.multiply.outer (casdm1, casdm1)
     casdm2 += np.multiply.outer (casdm1s[0], casdm1s[0]).transpose (0,3,2,1)
@@ -533,20 +534,8 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
             casdm1frs=self.casdm1frs,
             casdm2fr=self.casdm2fr,
         )
-        expected_casdm1_shape = (2, self.ncastot, self.ncastot)
-        expected_casdm2_shape = (self.ncastot,) * 4
-        if np.shape(self.casdm1s) != expected_casdm1_shape:
-            msg = (
-                f"casdm1s must have shape {expected_casdm1_shape}; "
-                f"got {np.shape(self.casdm1s)}"
-            )
-            raise ValueError(msg)
-        if np.shape(self.casdm2) != expected_casdm2_shape:
-            msg = (
-                f"casdm2 must have shape {expected_casdm2_shape}; "
-                f"got {np.shape(self.casdm2)}"
-            )
-            raise ValueError(msg)
+        _check_shape(self.casdm1s, (2, self.ncastot, self.ncastot), label="casdm1s")
+        _check_shape(self.casdm2, (self.ncastot,) * 4, label="casdm2")
 
         casdm1a, casdm1b = self.casdm1s
         casdm1 = casdm1a + casdm1b
@@ -565,22 +554,13 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
                 casdm1s_sub=self.casdm1fs,
             )
         self.dm1s_kpts = np.asarray(dm1s_kpts)
-        expected_dm1_shape = (2, self.nkpts, self.nao, self.nao)
-        if self.dm1s_kpts.shape != expected_dm1_shape:
-            msg = (
-                f"dm1s_kpts must have shape {expected_dm1_shape}; "
-                f"got {self.dm1s_kpts.shape}"
-            )
-            raise ValueError(msg)
+        _check_shape(
+            self.dm1s_kpts, (2, self.nkpts, self.nao, self.nao),
+            label="dm1s_kpts"
+        )
 
         ovlp_kpts = np.asarray(self.las._scf.get_ovlp(kpts=self.kpts))
-        expected_ovlp_shape = (self.nkpts, self.nao, self.nao)
-        if ovlp_kpts.shape != expected_ovlp_shape:
-            msg = (
-                f"overlap matrices must have shape {expected_ovlp_shape}; "
-                f"got {ovlp_kpts.shape}"
-            )
-            raise ValueError(msg)
+        _check_shape(ovlp_kpts, (self.nkpts, self.nao, self.nao), label="ovlp_kpts")
         dtype = np.result_type(
             self.mo_coeff.dtype, self.dm1s_kpts.dtype, ovlp_kpts.dtype,
         )
@@ -606,32 +586,24 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
         if h2eff is None:
             h2eff = self.las.get_h2cas(self.mo_coeff)
         h2eff = np.asarray(h2eff)
-        expected_h2_shape = (self.ncastot,) * 4
-        if h2eff.shape != expected_h2_shape:
-            msg = (f"h2eff must have shape {expected_h2_shape}; " f"got {h2eff.shape}")
-            raise ValueError(msg)
+        _check_shape(h2eff, (self.ncastot,) * 4, label="h2eff")
 
         if veff_kpts is None:
             veff_kpts = self.las.get_veff(
                 self.las._scf.cell, dm_kpts=self.dm1s_kpts,
             )
         self.veff_kpts = np.asarray(veff_kpts)
-        expected_veff_shape = (2, self.nkpts, self.nao, self.nao)
-        if self.veff_kpts.shape != expected_veff_shape:
-            msg = (
-                f"veff_kpts must have shape {expected_veff_shape}; "
-                f"got {self.veff_kpts.shape}"
-            )
-            raise ValueError(msg)
+        _check_shape(
+            self.veff_kpts, (2, self.nkpts, self.nao, self.nao),
+            label="veff_kpts"
+        )
+        _check_shape(
+            self.veff_kpts, (2, self.nkpts, self.nao, self.nao),
+            label="veff_kpts"
+        )
 
         hcore_kpts = np.asarray(self.las.get_hcore(kpts=self.kpts))
-        expected_hcore_shape = (self.nkpts, self.nao, self.nao)
-        if hcore_kpts.shape != expected_hcore_shape:
-            msg = (
-                f"hcore matrices must have shape {expected_hcore_shape}; "
-                f"got {hcore_kpts.shape}"
-            )
-            raise ValueError(msg)
+        _check_shape(hcore_kpts, (self.nkpts, self.nao, self.nao), label="hcore_kpts")
         dtype = np.result_type(
             self.mo_coeff.dtype, self.veff_kpts.dtype, hcore_kpts.dtype,
         )
@@ -668,11 +640,7 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
             raise ValueError(msg)
         
         for ifrag, (h1fr, ncas) in enumerate(zip(h1eff, self.ncas_sub)):
-            expected_h1_shape = (self.nroots, 2, ncas, ncas)
-            if np.shape(h1fr) != expected_h1_shape:
-                msg = (f"h1eff[{ifrag}] must have shape {expected_h1_shape}; "
-                       f"got {np.shape(h1fr)}")
-                raise ValueError(msg)
+            _check_shape(h1fr, (self.nroots, 2, ncas, ncas), label=f"h1fr_{ifrag}")
 
         self.h1frs = h1eff
         self.eri_cas = h2eff
@@ -706,15 +674,10 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
                 self.las._scf, self.kmesh, mo_act_kpts,
             )[-1]
         self.mo_phase = np.asarray(mo_phase)
-        expected_phase_shape = (
-            self.nkpts, self.ncas, self.ncastot,
+        _check_shape(
+            self.mo_phase, (self.nkpts, self.ncas, self.ncastot),
+            label="mo_phase"
         )
-        if self.mo_phase.shape != expected_phase_shape:
-            msg = (
-                f"mo_phase must have shape {expected_phase_shape}; "
-                f"got {self.mo_phase.shape}"
-            )
-            raise ValueError(msg)
 
         dtype = np.result_type(
             self.h1s.dtype, self.dm1s.dtype, self.cascm2.dtype,
@@ -738,15 +701,11 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
                 self.cascm2, self.mo_phase, (k1, k2, k3, k4),
             )
             paaa_kpts = self.eri_paaa(k1, k2, k3)
-            expected_paaa_shape = (
-                self.nmo, self.ncas, self.ncas, self.ncas,
+            _check_shape(
+                paaa_kpts,
+                (self.nmo, self.ncas, self.ncas, self.ncas),
+                label='paaa_kpts'
             )
-            if np.shape(paaa_kpts) != expected_paaa_shape:
-                msg = (
-                    f"eris.paaa({k1}, {k2}, {k3}) must have shape "
-                    f"{expected_paaa_shape}; got {np.shape(paaa_kpts)}"
-                )
-                raise ValueError(msg)
             self.fock1[k1][:, active] += np.tensordot(
                 paaa_kpts, cascm2_kpts,
                 axes=((1, 2, 3), (1, 2, 3)),
@@ -839,12 +798,11 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
         For each output cell, its own transition-density contribution is
         subtracted, leaving the different-cell CI response.
         """
-        expected_shape = (self.nroots, 2, self.ncastot, self.ncastot)
         tdm1rs = np.asarray(tdm1rs)
-        if tdm1rs.shape != expected_shape:
-            msg = (f"tdm1rs must have shape {expected_shape}; "
-                   f"got {tdm1rs.shape}")
-            raise ValueError(msg)
+        _check_shape(
+            tdm1rs, (self.nroots, 2, self.ncastot, self.ncastot),
+            label="tdm1rs"
+        )
 
         eri = self.eri_cas
         v1rs = np.tensordot(
@@ -1149,11 +1107,7 @@ class KLASSCF_TransSymmHessianOperator(KLASSCF_HessianOperator):
         phase_per_frag = np.asarray(
             phase_per_frag, dtype=np.result_type(phase_per_frag, np.complex128),
         )
-        if phase_per_frag.shape != (ncell,):
-            raise ValueError(
-                f"phase_per_frag must have shape ({ncell},); "
-                f"got {phase_per_frag.shape}"
-            )
+        _check_shape(phase_per_frag, (ncell,), label="phase_per_frag")
         magnitudes = np.abs(phase_per_frag)
         if np.any(~np.isfinite(magnitudes)) or np.any(magnitudes == 0):
             raise ValueError(
@@ -1192,10 +1146,7 @@ class KLASSCF_TransSymmHessianOperator(KLASSCF_HessianOperator):
             ref_shape = np.shape(ci[self.ref_cell][iroot])
             translated = []
             for phase, ci_r in zip(self.phase_per_frag, ci):
-                if np.shape(ci_r[iroot]) != ref_shape:
-                    raise ValueError(
-                        "translated CI vectors have inconsistent shapes"
-                    )
+                _check_shape(ci_r[iroot], ref_shape, label=f"ci_r[{iroot}]")
                 translated.append(
                     phase.conjugate() * np.asarray(ci_r[iroot])
                 )
@@ -1381,12 +1332,11 @@ class KLASSCF_TransSymmHessianOperator(KLASSCF_HessianOperator):
 
     def get_h1eff_response(self, tdm1rs):
         """Build one translated effective-Hamiltonian response and copy it."""
-        expected_shape = (self.nroots, 2, self.ncastot, self.ncastot)
         tdm1rs = np.asarray(tdm1rs)
-        if tdm1rs.shape != expected_shape:
-            raise ValueError(
-                f"tdm1rs must have shape {expected_shape}; got {tdm1rs.shape}"
-            )
+        _check_shape(
+            tdm1rs, (self.nroots, 2, self.ncastot, self.ncastot),
+            label="tdm1rs"
+        )
 
         eri = self.eri_cas
         v1rs = np.tensordot(tdm1rs, eri, axes=((2, 3), (0, 1)))
