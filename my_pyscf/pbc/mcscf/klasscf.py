@@ -938,8 +938,8 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
 
     @property
     def shape(self):
-        """Shape of the temporary CI-only Hessian operator."""
-        return self.nvar_ci, self.nvar_ci
+        """Shape of the combined orbital/CI Hessian operator."""
+        return self.ugg.nvar_tot, self.ugg.nvar_tot
 
     def _unpack_ci_vector(self, x):
         """Transform a packed complex CSF step to determinant arrays."""
@@ -996,29 +996,81 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
             return np.empty(0, dtype=np.complex128)
         return np.concatenate(vectors)
 
-    def _matvec(self, x):
-        """Apply the CI-only Hessian to a flat trial CI vector.
-
-        ``x`` contains packed CSF amplitudes for every non-frozen cell and
-        root. Hamiltonian and RDM operations are evaluated in the determinant
-        representation before the response is transformed back to CSFs.
-        """
-        ci1 = self._unpack_ci_vector(x)
-
+    def _ci_hessian_response(self, ci1):
+        """Apply the implemented CI-CI Hessian block to determinant vectors."""
         tdm1rs = self.make_tdm1s_sub(ci1)
         h1frs_response = self.get_h1eff_response(tdm1rs)
         ci2_diag = self.ci_response_diag(ci1)
         ci2_offdiag = self.ci_response_offdiag(h1frs_response)
 
-        ci2 = []
-        for diag_r, offdiag_r, ci1_r in zip(
-                ci2_diag, ci2_offdiag, ci1):
-            ci2.append([
-                diag + offdiag + self.level_shift * trial
-                for diag, offdiag, trial in zip(diag_r, offdiag_r, ci1_r)
-            ])
+        return [
+            [
+                diag + offdiag
+                for diag, offdiag in zip(diag_r, offdiag_r)
+            ]
+            for diag_r, offdiag_r in zip(ci2_diag, ci2_offdiag)
+        ]
 
-        return self._flatten_ci_vector(ci2)
+    def _orbital_hessian_response(self, kappa1):
+        """Apply the orbital-input Hessian blocks.
+
+        Dispatch reaches this method only when the packed trial vector has a
+        nonzero orbital component.  The periodic orbital-response contraction
+        is the next implementation step; raising here prevents an incomplete
+        zero orbital Hessian from being used silently.
+        """
+        raise NotImplementedError(
+            "the k-LASSCF orbital Hessian response is not implemented"
+        )
+
+    def _zero_ci_step(self, dtype):
+        """Return zero determinant vectors with the reference CI layout."""
+        return [
+            [
+                np.zeros_like(c0, dtype=np.result_type(c0, dtype))
+                for c0 in ci0_r
+            ]
+            for ci0_r in self.ci
+        ]
+
+    @staticmethod
+    def _ci_step_is_zero(ci1):
+        """Return whether every determinant coefficient in ``ci1`` is zero."""
+        return not any(np.any(c1) for ci1_r in ci1 for c1 in ci1_r)
+
+    def _matvec(self, x):
+        """Dispatch a combined packed orbital/CI Hessian-vector product.
+
+        The UGG owns the external vector layout.  The existing CI-CI action
+        is evaluated only for a nonzero CI component; a nonzero orbital
+        component is routed to :meth:`_orbital_hessian_response`.
+        """
+        kappa1, ci1 = self.ugg.unpack(x)
+        dtype = np.result_type(np.asarray(x).dtype, kappa1.dtype)
+
+        if np.any(kappa1):
+            kappa2 = np.asarray(self._orbital_hessian_response(kappa1))
+            _check_shape(kappa2, np.shape(kappa1), label="kappa2")
+        else:
+            kappa2 = np.zeros_like(kappa1, dtype=dtype)
+
+        if self._ci_step_is_zero(ci1):
+            ci2 = self._zero_ci_step(dtype)
+        else:
+            ci2 = self._ci_hessian_response(ci1)
+
+        kappa2 = kappa2 + self.level_shift * kappa1
+        ci2 = [
+            [
+                response + self.level_shift * trial
+                for response, trial in zip(response_r, trial_r)
+            ]
+            for response_r, trial_r in zip(ci2, ci1)
+        ]
+
+        return self.ugg.pack(kappa2 / 2.0, ci2)
+
+    _rmatvec = _matvec
 
 
 class KLASSCF_TransSymmHessianOperator(KLASSCF_HessianOperator):
@@ -1411,17 +1463,15 @@ class KLASSCF_TransSymmHessianOperator(KLASSCF_HessianOperator):
         ]
         return self._unpack_cif(response_ref)
 
-    def _matvec(self, x):
-        """Project a full CI vector onto the translation-adapted subspace."""
-        ci1 = self._unpack_ci_vector(x)
+    def _ci_hessian_response(self, ci1):
+        """Project the CI step before applying the CI-CI Hessian block."""
         ci1 = self._unpack_cif(self._pack_ci(ci1))
-        x_trans = self._flatten_ci_vector(ci1)
-        return KLASSCF_HessianOperator._matvec(self, x_trans)
+        return KLASSCF_HessianOperator._ci_hessian_response(self, ci1)
 
 
 # Register the complex orbital/CI parameterization and total gradient on both
-# periodic LAS variants. The Hessian constructor has orbital intermediates,
-# but the Hessian action itself remains CI-only for now.
+# periodic LAS variants. Orbital inputs are now dispatched separately; their
+# periodic response contraction remains the next implementation step.
 PBCLASCINoSymm.get_grad_orb = get_grad_orb
 PBCLASCINoSymm._klasscf_eris = _ERIS
 PBCLASCINoSymm._ugg = KLASSCF_UnitaryGroupGenerators
