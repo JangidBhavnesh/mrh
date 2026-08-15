@@ -1018,7 +1018,7 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
             (self.nroots, 2, self.ncastot, self.ncastot), dtype=dtype,
         )
         if with_cumulant:
-            tcm2_one_sided = np.zeros(
+            tdm2_one_sided = np.zeros(
                 (self.ncastot,) * 4, dtype=dtype,
             )
 
@@ -1082,7 +1082,7 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
                     )
                     tdm2 = sum(np.asarray(block) for block in dm2s)
                     tdm2 = (tdm2 - overlap * dm2_ref) / 2.0
-                    tcm2_one_sided[i:j, i:j, i:j, i:j] += (
+                    tdm2_one_sided[i:j, i:j, i:j, i:j] += (
                         self.weights[iroot] * tdm2
                     )
 
@@ -1093,6 +1093,33 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
         if not with_cumulant:
             return tdm1rs, None
 
+        tcm2 = self._make_effective_transition_cumulant(
+            tdm1rs_one_sided, tdm2_one_sided,
+        )
+        return tdm1rs, tcm2
+
+    def _make_effective_transition_cumulant(
+            self, tdm1rs_one_sided, tdm2_one_sided):
+        """Construct the complex state-averaged effective CI cumulant.
+
+        Both inputs are the one-sided ``<c1|...|c0>`` quantities after
+        reference-overlap subtraction.  ``tdm2_one_sided`` contains the
+        explicitly correlated same-fragment transition blocks.  Combining it
+        with the mean-field products built from the stored state-averaged
+        ``self.casdm1s`` gives the effective cumulant that complements one JK
+        response in the orbital-CI Hessian action.
+        """
+        tdm1rs_one_sided = np.asarray(tdm1rs_one_sided)
+        tdm2_one_sided = np.asarray(tdm2_one_sided)
+        _check_shape(
+            tdm1rs_one_sided,
+            (self.nroots, 2, self.ncastot, self.ncastot),
+            label="one_sided_transition_dm1rs",
+        )
+        _check_shape(
+            tdm2_one_sided, (self.ncastot,) * 4,
+            label="one_sided_transition_dm2",
+        )
         _check_shape(
             self.casdm1s, (2, self.ncastot, self.ncastot),
             label="casdm1s",
@@ -1103,7 +1130,7 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
         )
         casdm1 = self.casdm1s.sum(axis=0)
         tdm1 = tdm1s_one_sided.sum(axis=0)
-        tcm2 = np.array(tcm2_one_sided, copy=True)
+        tcm2 = np.array(tdm2_one_sided, copy=True)
         tcm2 -= np.multiply.outer(tdm1, casdm1)
         for spin in range(2):
             tcm2 += np.multiply.outer(
@@ -1120,7 +1147,7 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
             label="transition_cumulant",
         )
 
-        return tdm1rs, tcm2
+        return tcm2
 
     def get_h1eff_response(self, tdm1rs):
         """Build the effective one-electron response from other cells.
