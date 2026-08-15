@@ -1149,6 +1149,48 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
 
         return tcm2
 
+    def _transition_dm1s_to_block(self, tdm1rs):
+        """Transform the state-averaged CI transition 1-RDM to block MOs.
+
+        ``tdm1rs`` is root resolved in the complete Wannier active space.
+        The returned density has shape ``(2, nkpts, nmo, nmo)`` and is zero
+        outside its active-active blocks.  This routine performs only state
+        averaging and basis transformation; the factor-of-two convention of
+        the orbital-CI Hessian action is applied by its eventual caller.
+        """
+        tdm1rs = np.asarray(tdm1rs)
+        _check_shape(
+            tdm1rs,
+            (self.nroots, 2, self.ncastot, self.ncastot),
+            label="transition_dm1rs",
+        )
+        _check_shape(
+            self.weights, (self.nroots,), label="state_average_weights",
+        )
+        _check_shape(
+            self.mo_phase,
+            (self.nkpts, self.ncas, self.ncastot),
+            label="mo_phase",
+        )
+
+        tdm1s_wannier = np.einsum(
+            "r,rspq->spq", self.weights, tdm1rs, optimize=True,
+        )
+        tdm1s_active_block = np.einsum(
+            "kap,spq,kbq->skab",
+            self.mo_phase, tdm1s_wannier, self.mo_phase.conj(),
+            optimize=True,
+        )
+        dtype = np.result_type(
+            tdm1rs.dtype, self.mo_phase.dtype, self.weights.dtype,
+        )
+        tdm1s_block = np.zeros(
+            (2, self.nkpts, self.nmo, self.nmo), dtype=dtype,
+        )
+        active = slice(self.ncore, self.nocc)
+        tdm1s_block[:, :, active, active] = tdm1s_active_block
+        return tdm1s_block
+
     def get_h1eff_response(self, tdm1rs):
         """Build the effective one-electron response from other cells.
 
