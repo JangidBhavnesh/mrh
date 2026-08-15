@@ -1104,10 +1104,12 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
 
         Both inputs are the one-sided ``<c1|...|c0>`` quantities after
         reference-overlap subtraction.  ``tdm2_one_sided`` contains the
-        explicitly correlated same-fragment transition blocks.  Combining it
-        with the mean-field products built from the stored state-averaged
-        ``self.casdm1s`` gives the effective cumulant that complements one JK
-        response in the orbital-CI Hessian action.
+        explicitly correlated same-fragment transition blocks.  The
+        inter-fragment product-state Coulomb and same-spin exchange blocks
+        are differentiated explicitly before the cumulant decomposition.
+        The latter uses the stored state-averaged ``self.casdm1s`` as its
+        reference density and complements one JK response in the orbital-CI
+        Hessian action.
         """
         tdm1rs_one_sided = np.asarray(tdm1rs_one_sided)
         tdm2_one_sided = np.asarray(tdm2_one_sided)
@@ -1124,24 +1126,92 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
             self.casdm1s, (2, self.ncastot, self.ncastot),
             label="casdm1s",
         )
-        tdm1s_one_sided = np.einsum(
-            "r,rspq->spq", self.weights, tdm1rs_one_sided,
-            optimize=True,
+        weights = np.asarray(self.weights)
+        _check_shape(weights, (self.nroots,), label="state_average_weights")
+        tdm1rs = (
+            tdm1rs_one_sided
+            + tdm1rs_one_sided.conj().transpose(0, 1, 3, 2)
+        )
+
+        # Complete the same-fragment transition 2-RDM blocks.  Starting from
+        # half of <c1|Gamma|c0>, the first operation supplies its Hermitian
+        # partner and the second supplies electron-pair exchange for both.
+        tdm2 = np.array(tdm2_one_sided, copy=True)
+        tdm2 += tdm2.conj().transpose(1, 0, 3, 2)
+        tdm2 += tdm2.transpose(2, 3, 0, 1)
+
+        # Differentiate the off-diagonal product-state blocks constructed by
+        # LASCI.make_casdm2.  These terms vanish from the reference cumulant,
+        # but their 2-RDM derivatives are required to cancel the corresponding
+        # derivative of the mean-field products below.
+        offsets = np.cumsum(np.concatenate(([0], self.ncas_sub))).astype(int)
+        for ifrag in range(len(self.ncas_sub)):
+            i, j = offsets[ifrag:ifrag + 2]
+            tdm1s_i = tdm1rs[:, :, i:j, i:j]
+            dm1s_i = np.asarray(self.casdm1frs[ifrag])
+            _check_shape(
+                dm1s_i,
+                (self.nroots, 2, j - i, j - i),
+                label=f"casdm1frs[{ifrag}]",
+            )
+            for jfrag in range(ifrag + 1, len(self.ncas_sub)):
+                k, l = offsets[jfrag:jfrag + 2]
+                tdm1s_j = tdm1rs[:, :, k:l, k:l]
+                dm1s_j = np.asarray(self.casdm1frs[jfrag])
+                _check_shape(
+                    dm1s_j,
+                    (self.nroots, 2, l - k, l - k),
+                    label=f"casdm1frs[{jfrag}]",
+                )
+
+                coulomb = np.einsum(
+                    "r,rij,rkl->ijkl",
+                    weights, tdm1s_i.sum(axis=1), dm1s_j.sum(axis=1),
+                    optimize=True,
+                )
+                coulomb += np.einsum(
+                    "r,rij,rkl->ijkl",
+                    weights, dm1s_i.sum(axis=1), tdm1s_j.sum(axis=1),
+                    optimize=True,
+                )
+                tdm2[i:j, i:j, k:l, k:l] = coulomb
+                tdm2[k:l, k:l, i:j, i:j] = coulomb.transpose(2, 3, 0, 1)
+
+                exchange = np.zeros(
+                    (j - i, l - k, l - k, j - i),
+                    dtype=np.result_type(tdm2.dtype, dm1s_i.dtype, dm1s_j.dtype),
+                )
+                for spin in range(2):
+                    exchange += np.einsum(
+                        "r,rij,rkl->ilkj",
+                        weights, tdm1s_i[:, spin], dm1s_j[:, spin],
+                        optimize=True,
+                    )
+                    exchange += np.einsum(
+                        "r,rij,rkl->ilkj",
+                        weights, dm1s_i[:, spin], tdm1s_j[:, spin],
+                        optimize=True,
+                    )
+                tdm2[i:j, k:l, k:l, i:j] = -exchange
+                tdm2[k:l, i:j, i:j, k:l] = (
+                    -exchange.conj().transpose(1, 0, 3, 2)
+                )
+
+        tdm1s = np.einsum(
+            "r,rspq->spq", weights, tdm1rs, optimize=True,
         )
         casdm1 = self.casdm1s.sum(axis=0)
-        tdm1 = tdm1s_one_sided.sum(axis=0)
-        tcm2 = np.array(tdm2_one_sided, copy=True)
+        tdm1 = tdm1s.sum(axis=0)
+        tcm2 = np.array(tdm2, copy=True)
         tcm2 -= np.multiply.outer(tdm1, casdm1)
+        tcm2 -= np.multiply.outer(casdm1, tdm1)
         for spin in range(2):
             tcm2 += np.multiply.outer(
-                tdm1s_one_sided[spin], self.casdm1s[spin],
+                tdm1s[spin], self.casdm1s[spin],
             ).transpose(0, 3, 2, 1)
-
-        # Complete the one-sided <c1|...|c0> tensors with their Hermitian
-        # and electron-pair partners.  The first completion must conjugate
-        # for complex CI vectors; the pair exchange does not.
-        tcm2 += tcm2.conj().transpose(1, 0, 3, 2)
-        tcm2 += tcm2.transpose(2, 3, 0, 1)
+            tcm2 += np.multiply.outer(
+                self.casdm1s[spin], tdm1s[spin],
+            ).transpose(0, 3, 2, 1)
         _check_shape(
             tcm2, (self.ncastot,) * 4,
             label="transition_cumulant",
@@ -1159,13 +1229,14 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
         the orbital-CI Hessian action is applied by its eventual caller.
         """
         tdm1rs = np.asarray(tdm1rs)
+        weights = np.asarray(self.weights)
         _check_shape(
             tdm1rs,
             (self.nroots, 2, self.ncastot, self.ncastot),
             label="transition_dm1rs",
         )
         _check_shape(
-            self.weights, (self.nroots,), label="state_average_weights",
+            weights, (self.nroots,), label="state_average_weights",
         )
         _check_shape(
             self.mo_phase,
@@ -1174,7 +1245,7 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
         )
 
         tdm1s_wannier = np.einsum(
-            "r,rspq->spq", self.weights, tdm1rs, optimize=True,
+            "r,rspq->spq", weights, tdm1rs, optimize=True,
         )
         tdm1s_active_block = np.einsum(
             "kap,spq,kbq->skab",
@@ -1182,7 +1253,7 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
             optimize=True,
         )
         dtype = np.result_type(
-            tdm1rs.dtype, self.mo_phase.dtype, self.weights.dtype,
+            tdm1rs.dtype, self.mo_phase.dtype, weights.dtype,
         )
         tdm1s_block = np.zeros(
             (2, self.nkpts, self.nmo, self.nmo), dtype=dtype,
@@ -1739,6 +1810,192 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
         return 2.0 * (
             fock_ci - fock_ci.conj().transpose(0, 2, 1)
         )
+
+    def _orbital_hamiltonian_response(self, kappa):
+        """Differentiate the fragment CI Hamiltonians with the orbitals.
+
+        External rotations are evaluated with the momentum-resolved
+        block-MO intermediates and then transformed to the complete Wannier
+        active space.  Projected active-active rotations are evaluated
+        directly in that Wannier space, where the LAS fragment partition is
+        defined.  The returned one- and two-electron operators are the full
+        Hermitian first derivatives used by the CI gradient response.
+        """
+        kappa = np.asarray(kappa)
+        _check_shape(
+            kappa, (self.nkpts, self.nmo, self.nmo), label="kappa",
+        )
+        active = slice(self.ncore, self.nocc)
+        dtype = np.result_type(
+            kappa.dtype, self.h1s.dtype, self.eri_cas.dtype,
+            self.mo_phase.dtype, np.complex128,
+        )
+        h1s_prime = np.zeros(
+            (2, self.ncastot, self.ncastot), dtype=dtype,
+        )
+        h2_prime = np.zeros((self.ncastot,) * 4, dtype=dtype)
+
+        kappa_external = np.array(kappa, copy=True)
+        kappa_external[:, active, active] = 0.0
+        if np.any(kappa_external):
+            odm1s = -np.einsum(
+                "skpr,krq->skpq",
+                self.dm1s, kappa_external, optimize=True,
+            )
+            veff_prime = self._get_veff_response(odm1s)
+            h1s_block_prime = np.empty(
+                (2, self.nkpts, self.ncas, self.ncas), dtype=dtype,
+            )
+            for spin in range(2):
+                for k in range(self.nkpts):
+                    h1s_block_prime[spin, k] = (
+                        kappa_external[k].conj().T @ self.h1s[spin, k]
+                        + self.h1s[spin, k] @ kappa_external[k]
+                        + veff_prime[spin, k]
+                    )[active, active]
+            h1s_prime += np.einsum(
+                "kaP,skab,kbQ->sPQ",
+                self.mo_phase.conj(), h1s_block_prime, self.mo_phase,
+                optimize=True,
+            )
+
+            kconserv = kpts_helper.get_kconserv(
+                self.las._scf.cell, self.kpts,
+            )
+            for k1, k2, k3 in kpts_helper.loop_kkk(self.nkpts):
+                k4 = kconserv[k1, k2, k3]
+                ppaa = self.eris.ppaa(k1, k2, k3)
+                papa = self.eris.papa(k1, k2, k3)
+                paap = self.eris.paap(k1, k2, k3)
+                _check_shape(
+                    ppaa,
+                    (self.nmo, self.nmo, self.ncas, self.ncas),
+                    label=f"ppaa[{k1},{k2},{k3}]",
+                )
+                _check_shape(
+                    papa,
+                    (self.nmo, self.ncas, self.nmo, self.ncas),
+                    label=f"papa[{k1},{k2},{k3}]",
+                )
+                _check_shape(
+                    paap,
+                    (self.nmo, self.ncas, self.ncas, self.nmo),
+                    label=f"paap[{k1},{k2},{k3}]",
+                )
+
+                eri_block_prime = np.einsum(
+                    "pa,pbcd->abcd",
+                    kappa_external[k1, :, active].conj(),
+                    ppaa[:, active], optimize=True,
+                )
+                eri_block_prime += np.einsum(
+                    "pb,apcd->abcd",
+                    kappa_external[k2, :, active],
+                    ppaa[active], optimize=True,
+                )
+                eri_block_prime += np.einsum(
+                    "pc,abpd->abcd",
+                    kappa_external[k3, :, active].conj(),
+                    papa[active], optimize=True,
+                )
+                eri_block_prime += np.einsum(
+                    "pd,abcp->abcd",
+                    kappa_external[k4, :, active],
+                    paap[active], optimize=True,
+                )
+                h2_prime += np.einsum(
+                    "aP,bQ,abcd,cR,dS->PQRS",
+                    self.mo_phase[k1].conj(), self.mo_phase[k2],
+                    eri_block_prime,
+                    self.mo_phase[k3].conj(), self.mo_phase[k4],
+                    optimize=True,
+                )
+
+        kappa_active = kappa[:, active, active]
+        if np.any(kappa_active):
+            rotation_map = self.ugg.active_active_map
+            kappa_wannier = rotation_map.block_to_wannier(kappa_active)
+            h1_wannier = self._active_wannier_intermediates()[0]
+            h1_prime = (
+                kappa_wannier.conj().T @ h1_wannier
+                + h1_wannier @ kappa_wannier
+            )
+            eri = self.eri_cas
+            eri_prime = np.einsum(
+                "ap,aqrs->pqrs", kappa_wannier.conj(), eri,
+                optimize=True,
+            )
+            eri_prime += np.einsum(
+                "bq,pbrs->pqrs", kappa_wannier, eri,
+                optimize=True,
+            )
+            eri_prime += np.einsum(
+                "cr,pqcs->pqrs", kappa_wannier.conj(), eri,
+                optimize=True,
+            )
+            eri_prime += np.einsum(
+                "ds,pqrd->pqrs", kappa_wannier, eri,
+                optimize=True,
+            )
+            coulomb_prime = np.tensordot(
+                self.casdm1s, eri_prime, axes=((1, 2), (2, 3)),
+            )
+            exchange_prime = np.tensordot(
+                self.casdm1s, eri_prime, axes=((1, 2), (2, 1)),
+            )
+            h1s_prime += (
+                h1_prime[None] + coulomb_prime
+                + coulomb_prime[::-1] - exchange_prime
+            )
+            h2_prime += eri_prime
+
+        # Differentiate the same state- and fragment-resolved mean-field
+        # construction used by pbc.klasci.h1e_for_las.
+        h1rs_prime = np.empty(
+            (self.nroots, 2, self.ncastot, self.ncastot), dtype=dtype,
+        )
+        for iroot in range(self.nroots):
+            dm1s = self.casdm1rs[iroot] - self.casdm1s
+            coulomb = np.tensordot(
+                dm1s, h2_prime, axes=((1, 2), (2, 3)),
+            )
+            exchange = np.tensordot(
+                dm1s, h2_prime, axes=((1, 2), (2, 1)),
+            )
+            h1rs_prime[iroot] = (
+                h1s_prime + coulomb + coulomb[::-1] - exchange
+            )
+
+        h1frs_prime = []
+        offsets = np.cumsum(np.concatenate(([0], self.ncas_sub))).astype(int)
+        for ifrag in range(len(self.ncas_sub)):
+            i, j = offsets[ifrag:ifrag + 2]
+            dm1s = np.asarray(self.casdm1frs[ifrag])
+            h2_fragment = h2_prime[i:j, i:j, i:j, i:j]
+            coulomb = np.tensordot(
+                dm1s, h2_fragment, axes=((2, 3), (2, 3)),
+            )
+            exchange = np.tensordot(
+                dm1s, h2_fragment, axes=((2, 3), (2, 1)),
+            )
+            h1frs_prime.append(
+                h1rs_prime[:, :, i:j, i:j]
+                - coulomb - coulomb[:, ::-1] + exchange
+            )
+
+        return h1frs_prime, h2_prime
+
+    def _ci_orbital_hessian_response(self, kappa):
+        """Apply the CI-output/orbital-input Hessian block."""
+        h1frs_prime, h2_prime = self._orbital_hamiltonian_response(kappa)
+        hc = self.Hci_all(None, h1frs_prime, h2_prime, self.ci)
+        return [
+            [
+                2.0 * (hc0 - np.vdot(c0, hc0) * c0)
+                for hc0, c0 in zip(hc_r, ci0_r)
+            ]
+            for hc_r, ci0_r in zip(hc, self.ci)
+        ]
 
     def _orbital_hessian_response_block(self, kappa1):
         """Apply the block-MO response contractions without AA correction."""
@@ -2316,8 +2573,9 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
 
         The UGG owns the external vector layout.  The existing CI-CI action
         is evaluated only for a nonzero CI component.  A nonzero orbital
-        component is routed to :meth:`_orbital_hessian_response`, after which
-        the orbital-output/CI-input response is added when needed.
+        component is routed to both the orbital-orbital and CI-output/orbital-
+        input responses, after which the reciprocal orbital-output/CI-input
+        and CI-CI responses are added when needed.
         """
         kappa1, ci1 = self.ugg.unpack(x)
         dtype = np.result_type(np.asarray(x).dtype, kappa1.dtype)
@@ -2325,17 +2583,26 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
         if np.any(kappa1):
             kappa2 = np.asarray(self._orbital_hessian_response(kappa1))
             _check_shape(kappa2, np.shape(kappa1), label="kappa2")
+            ci2 = self._ci_orbital_hessian_response(kappa1)
         else:
             kappa2 = np.zeros_like(kappa1, dtype=dtype)
-
-        if self._ci_step_is_zero(ci1):
             ci2 = self._zero_ci_step(dtype)
-        else:
+
+        if not self._ci_step_is_zero(ci1):
             tdm1rs, tcm2 = self.make_tdm1s2c_sub(ci1)
             kappa2 = kappa2 + self._orbital_ci_hessian_response(
                 tdm1rs, tcm2,
             )
-            ci2 = self._ci_hessian_response(ci1, tdm1rs=tdm1rs)
+            ci2_ci = self._ci_hessian_response(ci1, tdm1rs=tdm1rs)
+            ci2 = [
+                [
+                    orbital_response + ci_response
+                    for orbital_response, ci_response in zip(
+                        orbital_response_r, ci_response_r,
+                    )
+                ]
+                for orbital_response_r, ci_response_r in zip(ci2, ci2_ci)
+            ]
 
         kappa2 = kappa2 + self.level_shift * kappa1
         ci2 = [
