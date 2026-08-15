@@ -989,10 +989,38 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
         its Hermitian conjugate after removing the component parallel to the
         current CI vector.
         """
+        return self._make_tdm1s2c_sub(ci1, with_cumulant=False)[0]
+
+    def make_tdm1s2c_sub(self, ci1):
+        """Build complex CI transition 1-RDMs and the effective cumulant.
+
+        The root-resolved spin 1-RDMs and the state-averaged cumulant use the
+        complete Wannier active space.  ``self.casdm1frs`` supplies the
+        root/fragment reference densities needed for overlap removal, while
+        ``self.casdm1s`` is used directly as the stored state-averaged full
+        Wannier 1-RDM in the cumulant decomposition.
+
+        Returns
+        -------
+        tdm1rs : ndarray
+            Hermitian transition 1-RDMs with shape
+            ``(nroots, 2, ncastot, ncastot)``.
+        tcm2 : ndarray
+            State-averaged effective transition cumulant with shape
+            ``(ncastot, ncastot, ncastot, ncastot)``.
+        """
+        return self._make_tdm1s2c_sub(ci1, with_cumulant=True)
+
+    def _make_tdm1s2c_sub(self, ci1, with_cumulant):
+        """Implementation shared by the one- and two-body CI builders."""
         dtype = np.result_type(self.eri_cas.dtype, np.complex128)
-        tdm1rs = np.zeros(
+        tdm1rs_one_sided = np.zeros(
             (self.nroots, 2, self.ncastot, self.ncastot), dtype=dtype,
         )
+        if with_cumulant:
+            tcm2_one_sided = np.zeros(
+                (self.ncastot,) * 4, dtype=dtype,
+            )
 
         for ifrag, (fcibox, norb, nelec, c1_r, c0_r) in enumerate(zip(
                 self.fciboxes, self.ncas_sub, self.nelecas_sub,
@@ -1013,33 +1041,86 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
                 solver_arg(nelec_by_solver),
             )
             collect_kwargs = {"link_index": solver_arg(linkstr)}
+            contraction = "trans_rdm12s" if with_cumulant else "trans_rdm1s"
             try:
-                dm1_r = list(fcibox._collect(
-                    "trans_rdm1s", *collect_args, **collect_kwargs,
+                transition_rdm_r = list(fcibox._collect(
+                    contraction, *collect_args, **collect_kwargs,
                 ))
             except AttributeError as err:
                 # Some existing builds predate the compiled complex
                 # transition-RDM symbols. Use the equivalent complex Python
                 # implementation in that case.
-                if "FCItrans_rdm1" not in str(err):
+                missing_symbol = str(err)
+                if not any(name in missing_symbol for name in (
+                        "FCItrans_rdm1", "FCItdm12")):
                     raise
-                dm1_r = list(fcibox._collect(
-                    "trans_rdm1s_py", *collect_args, **collect_kwargs,
+                transition_rdm_r = list(fcibox._collect(
+                    contraction + "_py", *collect_args, **collect_kwargs,
                 ))
 
-            if len(dm1_r) != self.nroots:
-                msg = (f"fragment {ifrag} produced {len(dm1_r)} transition "
+            if len(transition_rdm_r) != self.nroots:
+                msg = (f"fragment {ifrag} produced {len(transition_rdm_r)} transition "
                        f"densities for {self.nroots} roots")
                 raise ValueError(msg)
 
-            for iroot, (dm1s, c1, c0, dm1s_ref) in enumerate(zip(
-                    dm1_r, c1_r, c0_r, self.casdm1frs[ifrag])):
+            for iroot, (transition_rdm, c1, c0, dm1s_ref) in enumerate(zip(
+                    transition_rdm_r, c1_r, c0_r,
+                    self.casdm1frs[ifrag])):
+                if with_cumulant:
+                    dm1s, dm2s = transition_rdm
+                else:
+                    dm1s = transition_rdm
                 overlap = np.vdot(c1, c0)
                 tdm1s = np.stack(dm1s, axis=0) - overlap * dm1s_ref
-                tdm1s = tdm1s + tdm1s.swapaxes(-1, -2).conj()
-                tdm1rs[iroot, :, i:j, i:j] = tdm1s
+                tdm1rs_one_sided[iroot, :, i:j, i:j] = tdm1s
 
-        return tdm1rs
+                if with_cumulant:
+                    dm2_ref = np.asarray(self.casdm2fr[ifrag][iroot])
+                    _check_shape(
+                        dm2_ref, (norb,) * 4,
+                        label=f"casdm2fr[{ifrag}][{iroot}]",
+                    )
+                    tdm2 = sum(np.asarray(block) for block in dm2s)
+                    tdm2 = (tdm2 - overlap * dm2_ref) / 2.0
+                    tcm2_one_sided[i:j, i:j, i:j, i:j] += (
+                        self.weights[iroot] * tdm2
+                    )
+
+        tdm1rs = (
+            tdm1rs_one_sided
+            + tdm1rs_one_sided.swapaxes(-1, -2).conj()
+        )
+        if not with_cumulant:
+            return tdm1rs, None
+
+        _check_shape(
+            self.casdm1s, (2, self.ncastot, self.ncastot),
+            label="casdm1s",
+        )
+        tdm1s_one_sided = np.einsum(
+            "r,rspq->spq", self.weights, tdm1rs_one_sided,
+            optimize=True,
+        )
+        casdm1 = self.casdm1s.sum(axis=0)
+        tdm1 = tdm1s_one_sided.sum(axis=0)
+        tcm2 = np.array(tcm2_one_sided, copy=True)
+        tcm2 -= np.multiply.outer(tdm1, casdm1)
+        for spin in range(2):
+            tcm2 += np.multiply.outer(
+                tdm1s_one_sided[spin], self.casdm1s[spin],
+            ).transpose(0, 3, 2, 1)
+
+        # Complete the one-sided <c1|...|c0> tensors with their Hermitian
+        # and electron-pair partners.  The first completion must conjugate
+        # for complex CI vectors; the pair exchange does not.
+        tcm2 += tcm2.conj().transpose(1, 0, 3, 2)
+        tcm2 += tcm2.transpose(2, 3, 0, 1)
+        _check_shape(
+            tcm2, (self.ncastot,) * 4,
+            label="transition_cumulant",
+        )
+
+        return tdm1rs, tcm2
 
     def get_h1eff_response(self, tdm1rs):
         """Build the effective one-electron response from other cells.
