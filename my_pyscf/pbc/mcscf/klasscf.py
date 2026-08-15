@@ -1686,9 +1686,10 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
             return np.empty(0, dtype=np.complex128)
         return np.concatenate(vectors)
 
-    def _ci_hessian_response(self, ci1):
+    def _ci_hessian_response(self, ci1, tdm1rs=None):
         """Apply the implemented CI-CI Hessian block to determinant vectors."""
-        tdm1rs = self.make_tdm1s_sub(ci1)
+        if tdm1rs is None:
+            tdm1rs = self.make_tdm1s_sub(ci1)
         h1frs_response = self.get_h1eff_response(tdm1rs)
         ci2_diag = self.ci_response_diag(ci1)
         ci2_offdiag = self.ci_response_offdiag(h1frs_response)
@@ -1700,6 +1701,44 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
             ]
             for diag_r, offdiag_r in zip(ci2_diag, ci2_offdiag)
         ]
+
+    def _orbital_ci_hessian_response(self, tdm1rs, tcm2):
+        """Apply the orbital-output/CI-input Hessian block.
+
+        The transition densities supplied here are already Hermitian
+        completed.  The three terms are the one-electron response,
+        CI-induced JK response acting on the reference density, and the
+        transition-cumulant contraction.  The factor of two belongs here:
+        :meth:`_matvec` divides the unpacked orbital response by two when it
+        packs the combined Hessian vector, matching the molecular LASSCF
+        convention.
+        """
+        tdm1s_block = self._transition_dm1s_to_block(tdm1rs)
+        veff_ci = self._get_ci_veff_response(tdm1s_block)
+        cumulant_fock = self._transition_cumulant_to_block_fock(tcm2)
+        _check_shape(
+            cumulant_fock,
+            (self.nkpts, self.nmo, self.nmo),
+            label="transition_cumulant_fock",
+        )
+
+        dtype = np.result_type(
+            tdm1s_block.dtype, veff_ci.dtype, cumulant_fock.dtype,
+            self.h1s.dtype, self.dm1s.dtype,
+        )
+        fock_ci = np.array(cumulant_fock, dtype=dtype, copy=True)
+        for k in range(self.nkpts):
+            for spin in range(2):
+                fock_ci[k] += (
+                    self.h1s[spin, k] @ tdm1s_block[spin, k]
+                )
+                fock_ci[k] += (
+                    veff_ci[spin, k] @ self.dm1s[spin, k]
+                )
+
+        return 2.0 * (
+            fock_ci - fock_ci.conj().transpose(0, 2, 1)
+        )
 
     def _orbital_hessian_response_block(self, kappa1):
         """Apply the block-MO response contractions without AA correction."""
@@ -2276,8 +2315,9 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
         """Dispatch a combined packed orbital/CI Hessian-vector product.
 
         The UGG owns the external vector layout.  The existing CI-CI action
-        is evaluated only for a nonzero CI component; a nonzero orbital
-        component is routed to :meth:`_orbital_hessian_response`.
+        is evaluated only for a nonzero CI component.  A nonzero orbital
+        component is routed to :meth:`_orbital_hessian_response`, after which
+        the orbital-output/CI-input response is added when needed.
         """
         kappa1, ci1 = self.ugg.unpack(x)
         dtype = np.result_type(np.asarray(x).dtype, kappa1.dtype)
@@ -2291,7 +2331,11 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
         if self._ci_step_is_zero(ci1):
             ci2 = self._zero_ci_step(dtype)
         else:
-            ci2 = self._ci_hessian_response(ci1)
+            tdm1rs, tcm2 = self.make_tdm1s2c_sub(ci1)
+            kappa2 = kappa2 + self._orbital_ci_hessian_response(
+                tdm1rs, tcm2,
+            )
+            ci2 = self._ci_hessian_response(ci1, tdm1rs=tdm1rs)
 
         kappa2 = kappa2 + self.level_shift * kappa1
         ci2 = [
