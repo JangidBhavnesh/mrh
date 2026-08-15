@@ -1463,15 +1463,9 @@ class KLASSCF_TransSymmHessianOperator(KLASSCF_HessianOperator):
         ]
         return self._unpack_cif(response_ref)
 
-    def _ci_hessian_response(self, ci1):
-        """Project the CI step before applying the CI-CI Hessian block."""
-        ci1 = self._unpack_cif(self._pack_ci(ci1))
-        return KLASSCF_HessianOperator._ci_hessian_response(self, ci1)
-
-
 # Register the complex orbital/CI parameterization and total gradient on both
-# periodic LAS variants. Orbital inputs are now dispatched separately; their
-# periodic response contraction remains the next implementation step.
+# periodic LAS variants. Hessian dispatch is currently developed only for the
+# general k-LASSCF operator; no translation-specific dispatch is applied.
 PBCLASCINoSymm.get_grad_orb = get_grad_orb
 PBCLASCINoSymm._klasscf_eris = _ERIS
 PBCLASCINoSymm._ugg = KLASSCF_UnitaryGroupGenerators
