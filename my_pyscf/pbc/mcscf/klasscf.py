@@ -747,6 +747,9 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
         self._init_orb_(mo_phase)
         self._init_ci_()
         self._Horb_diag_matvec_cache = None
+        self._Horb_active_active_cache = None
+        self._active_wannier_intermediates_cache = None
+        self._Horb_external_active_cross_cache = None
 
     def _init_dms_(self, casdm1frs, casdm2fr=None, dm1s_kpts=None):
         """Initialize reference density matrices in their natural bases.
@@ -1200,10 +1203,22 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
     def _get_Horb_diag(self):
         """Return the orbital diagonal in packed UGG ordering.
 
-        This dispatches to the exact matvec-based reference until the analytic
-        orbital diagonal is implemented.
+        External rotations still use the exact matvec-built reference.  The
+        projected active-active slice is replaced by the analytic Wannier
+        Hessian diagonal.  Keeping the full reference cache makes this hybrid
+        result directly auditable while the external analytic formula is
+        implemented separately.
         """
-        return self._get_Horb_diag_matvec()
+        diagonal = self._get_Horb_diag_matvec()
+        nvar_active = getattr(self.ugg, "nvar_orb_active_active", 0)
+        if nvar_active:
+            hessian, hessian_conj = self._get_Horb_active_active()
+            active_start = self.ugg.nvar_orb_external
+            active_stop = active_start + nvar_active
+            diagonal[active_start:active_stop] = np.diag(
+                hessian + hessian_conj
+            )
+        return diagonal
 
     def _get_Hdiag(self):
         """Return the full orbital-plus-CI diagonal in packed UGG ordering."""
@@ -1331,13 +1346,302 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
             for diag_r, offdiag_r in zip(ci2_diag, ci2_offdiag)
         ]
 
-    def _orbital_hessian_response(self, kappa1):
-        """Apply the orbital-orbital Hessian block to ``kappa1``."""
+    def _orbital_hessian_response_block(self, kappa1):
+        """Apply the block-MO response contractions without AA correction."""
         odm1s, ocm2 = self._make_orbital_response_dm(kappa1)
         veff_prime = self._get_veff_response(odm1s)
         return self.orbital_response(
             kappa1, odm1s, ocm2, veff_prime,
         )
+
+    def _orbital_hessian_response(self, kappa1):
+        """Apply the orbital-orbital Hessian block to ``kappa1``.
+
+        The general block-MO contractions are retained for all external
+        sectors.  The contribution from a projected active-active input to
+        the active-active output is evaluated by the exact complex Wannier
+        formula and replaces the real-orbital one-sided completion in that
+        block.
+        """
+        response = self._orbital_hessian_response_block(kappa1)
+        active = slice(self.ncore, self.nocc)
+        kappa_active = np.asarray(kappa1)[:, active, active]
+        if not np.any(kappa_active):
+            return response
+
+        rotation_map = self.ugg.active_active_map
+        kappa_wannier = rotation_map.block_to_wannier(kappa_active)
+        response_wannier = (
+            self._orbital_hessian_response_active_active_wannier(
+                kappa_wannier,
+            )
+        )
+        response_active = rotation_map.wannier_to_block(response_wannier)
+
+        kappa_external = np.array(kappa1, copy=True)
+        kappa_external[:, active, active] = 0.0
+        if np.any(kappa_external):
+            response_external = self._orbital_hessian_response_block(
+                kappa_external,
+            )
+        else:
+            response_external = np.zeros_like(response)
+        response_active += response_external[:, active, active]
+
+        active_coordinates = rotation_map.pack(kappa_active)
+        response_cross = self._apply_Horb_active_external_cross(
+            active_coordinates,
+        )
+        x_cross = np.zeros(self.ugg.nvar_orb, dtype=response_cross.dtype)
+        x_cross[:self.ugg.nvar_orb_external] = response_cross
+        response = response_external + 2.0 * self.ugg.unpack_orb(x_cross)
+        response[:, active, active] = response_active
+        return response
+
+    def _get_Horb_external_active_cross(self):
+        """Return the AA-input/external-output real-coordinate Hessian.
+
+        Complex orbital Hessians are real-linear.  The established block-MO
+        response is finite-difference verified for external inputs, including
+        its projected active output.  This routine builds that reciprocal
+        external-to-active block in real coordinates and transposes it to
+        obtain the active-to-external block required for complex AA inputs.
+        """
+        cached = getattr(self, "_Horb_external_active_cross_cache", None)
+        if cached is not None:
+            return np.array(cached, copy=True)
+
+        nvar_external = self.ugg.nvar_orb_external
+        nvar_active = self.ugg.nvar_orb_active_active
+        active_start = nvar_external
+        active_stop = active_start + nvar_active
+        external_to_active = np.empty(
+            (2 * nvar_active, 2 * nvar_external), dtype=float,
+        )
+        unit = np.zeros(self.ugg.nvar_orb, dtype=np.complex128)
+        for index in range(nvar_external):
+            unit[index] = 1.0
+            kappa = self.ugg.unpack_orb(unit)
+            response = self._orbital_hessian_response_block(kappa)
+            active_response = self.ugg.pack_orb(
+                response / 2.0,
+            )[active_start:active_stop]
+            external_to_active[:nvar_active, index] = active_response.real
+            external_to_active[nvar_active:, index] = active_response.imag
+
+            unit[index] = 1.0j
+            kappa = self.ugg.unpack_orb(unit)
+            response = self._orbital_hessian_response_block(kappa)
+            active_response = self.ugg.pack_orb(
+                response / 2.0,
+            )[active_start:active_stop]
+            column = nvar_external + index
+            external_to_active[:nvar_active, column] = active_response.real
+            external_to_active[nvar_active:, column] = active_response.imag
+            unit[index] = 0.0
+
+        active_to_external = external_to_active.T
+        self._Horb_external_active_cross_cache = np.array(
+            active_to_external, copy=True,
+        )
+        return active_to_external
+
+    def _apply_Horb_active_external_cross(self, coordinates):
+        """Apply the symmetric AA-input/external-output cross block."""
+        coordinates = np.asarray(coordinates).reshape(-1)
+        nvar_active = self.ugg.nvar_orb_active_active
+        if coordinates.size != nvar_active:
+            msg = (
+                f"active-active vector has size {coordinates.size}; "
+                f"expected {nvar_active}"
+            )
+            raise ValueError(msg)
+        real_coordinates = np.concatenate((
+            coordinates.real, coordinates.imag,
+        ))
+        response = self._get_Horb_external_active_cross() @ real_coordinates
+        nvar_external = self.ugg.nvar_orb_external
+        return response[:nvar_external] + 1.0j * response[nvar_external:]
+
+    def _active_wannier_intermediates(self):
+        """Return active-only Hessian intermediates in the Wannier basis."""
+        cached = getattr(self, "_active_wannier_intermediates_cache", None)
+        if cached is not None:
+            return tuple(np.array(item, copy=True) for item in cached)
+
+        rotation_map = self.ugg.active_active_map
+        if not np.allclose(
+                rotation_map.mo_phase, self.mo_phase,
+                atol=1e-10, rtol=1e-10):
+            raise ValueError(
+                "UGG and Hessian operator use different Wannier/block maps"
+            )
+
+        h1_wannier = np.asarray(self.las.h1e_for_cas(
+            mo_coeff=self.mo_coeff, ncas=self.ncas, ncore=self.ncore,
+        )[0])
+        _check_shape(
+            h1_wannier, (self.ncastot, self.ncastot),
+            label="h1_wannier",
+        )
+        coulomb = np.tensordot(
+            self.casdm1s, self.eri_cas, axes=((1, 2), (2, 3)),
+        )
+        exchange = np.tensordot(
+            self.casdm1s, self.eri_cas, axes=((1, 2), (2, 1)),
+        )
+        h1s_wannier = h1_wannier[None] + coulomb + coulomb[::-1] - exchange
+
+        active = slice(self.ncore, self.nocc)
+        h1s_block_wannier = np.asarray([
+            rotation_map.block_to_wannier(self.h1s[spin, :, active, active])
+            for spin in range(2)
+        ])
+        if not np.allclose(
+                h1s_wannier, h1s_block_wannier,
+                atol=2e-8, rtol=2e-8):
+            error = np.max(np.abs(h1s_wannier - h1s_block_wannier))
+            raise ValueError(
+                "Wannier and block active one-electron intermediates differ; "
+                f"maximum error is {error:.3e}"
+            )
+
+        fock1_wannier = sum(
+            h1s_wannier[spin] @ self.casdm1s[spin]
+            for spin in range(2)
+        )
+        fock1_wannier += np.tensordot(
+            self.eri_cas, self.cascm2,
+            axes=((1, 2, 3), (1, 2, 3)),
+        )
+        self._active_wannier_intermediates_cache = (
+            np.array(h1_wannier, copy=True),
+            np.array(fock1_wannier, copy=True),
+        )
+        return h1_wannier, fock1_wannier
+
+    def _orbital_hessian_response_active_active_wannier(
+            self, kappa_wannier):
+        """Apply the analytic active-active Hessian in Wannier form.
+
+        This is the active-only specialization of the molecular LASSCF OO
+        response.  All RDMs and two-electron integrals remain in the complete
+        Wannier active space.  The response includes the covariant
+        half-commutator used by :meth:`_orbital_hessian_response`.
+        """
+        kappa_wannier = np.asarray(kappa_wannier)
+        _check_shape(
+            kappa_wannier, (self.ncastot, self.ncastot),
+            label="kappa_wannier",
+        )
+        h1_wannier, fock1_wannier = (
+            self._active_wannier_intermediates()
+        )
+
+        # Differentiate U^dagger h U and the four orbital coefficients of
+        # (pq|rs) directly.  This is valid for a general complex
+        # anti-Hermitian kappa and avoids real-orbital transpose shortcuts.
+        h1_prime = (
+            h1_wannier @ kappa_wannier
+            - kappa_wannier @ h1_wannier
+        )
+        eri = self.eri_cas
+        eri_prime = np.einsum(
+            "ap,aqrs->pqrs", kappa_wannier.conj(), eri,
+            optimize=True,
+        )
+        eri_prime += np.einsum(
+            "bq,pbrs->pqrs", kappa_wannier, eri,
+            optimize=True,
+        )
+        eri_prime += np.einsum(
+            "cr,pqcs->pqrs", kappa_wannier.conj(), eri,
+            optimize=True,
+        )
+        eri_prime += np.einsum(
+            "ds,pqrd->pqrs", kappa_wannier, eri,
+            optimize=True,
+        )
+
+        coulomb_prime = np.tensordot(
+            self.casdm1s, eri_prime, axes=((1, 2), (2, 3)),
+        )
+        exchange_prime = np.tensordot(
+            self.casdm1s, eri_prime, axes=((1, 2), (2, 1)),
+        )
+        h1s_prime = (
+            h1_prime[None] + coulomb_prime + coulomb_prime[::-1]
+            - exchange_prime
+        )
+        fock1_prime = sum(
+            h1s_prime[spin] @ self.casdm1s[spin]
+            for spin in range(2)
+        )
+        fock1_prime += np.tensordot(
+            eri_prime, self.cascm2,
+            axes=((1, 2, 3), (1, 2, 3)),
+        )
+
+        gradient_prime = fock1_prime - fock1_prime.conj().T
+        connection = (
+            fock1_wannier @ kappa_wannier
+            - kappa_wannier @ fock1_wannier
+        ) / 2.0
+        connection -= connection.conj().T
+        return gradient_prime - connection
+
+    def _apply_Horb_active_active(self, coordinates):
+        """Apply the analytic Wannier AA Hessian in projected coordinates."""
+        rotation_map = self.ugg.active_active_map
+        coordinates = np.asarray(coordinates).reshape(-1)
+        if coordinates.size != rotation_map.nvar:
+            msg = (
+                f"active-active vector has size {coordinates.size}; "
+                f"expected {rotation_map.nvar}"
+            )
+            raise ValueError(msg)
+        kappa_block = rotation_map.unpack(coordinates)
+        kappa_wannier = rotation_map.block_to_wannier(kappa_block)
+        response_wannier = (
+            self._orbital_hessian_response_active_active_wannier(
+                kappa_wannier,
+            )
+        )
+        response_block = rotation_map.wannier_to_block(response_wannier)
+        return rotation_map.pack(response_block / 2.0)
+
+    def _get_Horb_active_active(self):
+        """Return the projected complex active-active Hessian blocks.
+
+        For complex orbital coordinates the OO response is real-linear rather
+        than complex-linear.  The returned pair ``(H, H_conj)`` represents
+        ``Hx = H @ x + H_conj @ x.conj()`` exactly.  Both blocks are evaluated
+        analytically in the Wannier active space and then projected through
+        the UGG block-coordinate basis.
+        """
+        cached = getattr(self, "_Horb_active_active_cache", None)
+        if cached is not None:
+            return tuple(np.array(block, copy=True) for block in cached)
+
+        nvar = self.ugg.nvar_orb_active_active
+        dtype = np.result_type(self.mo_coeff.dtype, np.complex128)
+        response_real = np.empty((nvar, nvar), dtype=dtype)
+        response_imag = np.empty((nvar, nvar), dtype=dtype)
+        unit = np.zeros(nvar, dtype=dtype)
+        for index in range(nvar):
+            unit[index] = 1.0
+            response_real[:, index] = self._apply_Horb_active_active(unit)
+            unit[index] = 1.0j
+            response_imag[:, index] = self._apply_Horb_active_active(unit)
+            unit[index] = 0.0
+
+        hessian = (response_real - 1.0j * response_imag) / 2.0
+        hessian_conj = (response_real + 1.0j * response_imag) / 2.0
+        self._Horb_active_active_cache = (
+            np.array(hessian, copy=True),
+            np.array(hessian_conj, copy=True),
+        )
+        return hessian, hessian_conj
 
     def _make_orbital_response_dm(self, kappa):
         """Build one-sided 1-RDM and cumulant responses.
