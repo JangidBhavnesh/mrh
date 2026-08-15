@@ -500,7 +500,7 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
         self._init_eri_(eris)
         self._init_orb_(mo_phase)
         self._init_ci_()
-        self._Horb_diag_cache = None
+        self._Horb_diag_matvec_cache = None
 
     def _init_dms_(self, casdm1frs, casdm2fr=None, dm1s_kpts=None):
         """Initialize reference density matrices in their natural bases.
@@ -907,8 +907,8 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
 
         return hci_diag
 
-    def _get_Horb_diag(self):
-        """Return the exact orbital diagonal in packed UGG ordering.
+    def _get_Horb_diag_matvec(self):
+        """Return the reference orbital diagonal from Hessian matvecs.
 
         The periodic OO response is complex and uses disk-backed level-2 ERIs.
         Reconstructing its diagonal from unit orbital directions keeps the
@@ -918,7 +918,7 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
         result is cached because all Hessian intermediates are immutable for
         the lifetime of this operator.
         """
-        cached = getattr(self, "_Horb_diag_cache", None)
+        cached = getattr(self, "_Horb_diag_matvec_cache", None)
         if cached is not None:
             return np.array(cached, copy=True)
 
@@ -948,8 +948,16 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
                 diagonal[index] = packed_response[index]
                 unit[index] = 0.0
 
-        self._Horb_diag_cache = np.array(diagonal, copy=True)
+        self._Horb_diag_matvec_cache = np.array(diagonal, copy=True)
         return diagonal
+
+    def _get_Horb_diag(self):
+        """Return the orbital diagonal in packed UGG ordering.
+
+        This dispatches to the exact matvec-based reference until the analytic
+        orbital diagonal is implemented.
+        """
+        return self._get_Horb_diag_matvec()
 
     def _get_Hdiag(self):
         """Return the full orbital-plus-CI diagonal in packed UGG ordering."""
