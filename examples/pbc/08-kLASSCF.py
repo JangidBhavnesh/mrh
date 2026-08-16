@@ -28,7 +28,7 @@ cell.ke_cutoff = 20
 cell.verbose = lib.logger.INFO
 cell.build()
 
-kmesh = (10, 1, 1)
+kmesh = (8, 1, 1)
 kpts = cell.make_kpts(kmesh, wrap_around=True)
 
 # k-LAS currently requires Gaussian density fitting.
@@ -62,7 +62,7 @@ mo_guess = las.localize_init_guess(active_labels, mo_coeff=mo_avas)
 
 # Each macroiteration builds a new orbital/CI Hessian.  MINRES performs the
 # real-coordinate Newton microiterations inside that fixed Hessian keyframe.
-las.conv_tol_grad = 1e-5
+# las.conv_tol_grad = 1e-5
 las.max_cycle_macro = 50
 las.max_cycle_micro = 5
 las.trust_radius = np.pi
