@@ -3549,10 +3549,14 @@ def kernel(
         )
         # Do not use the packed complex Hdiag as a preconditioner here.  The
         # real and imaginary optimizer directions need separate diagonals.
-        solver = solver_class(
-            metric_hessian, rtol=micro_rtol, maxiter=max_micro,
-            callback=micro_callback,
-        )
+        solver_kwargs = {
+            "rtol": micro_rtol,
+            "maxiter": max_micro,
+            "callback": micro_callback,
+        }
+        if getattr(klas, "micro_solver_compute_residual", False):
+            solver_kwargs["compute_residual"] = True
+        solver = solver_class(metric_hessian, **solver_kwargs)
         step, info = solver(weighted_gradient)
         if info:
             solver_name = getattr(solver_class, "__name__", "micro solver")
@@ -3640,6 +3644,7 @@ class PBCLASSCFNoSymm(PBCLASCINoSymm):
     _hop = KLASSCF_HessianOperator
     _kern = kernel
     micro_solver = SolveScipyMINRESForCplx
+    micro_solver_compute_residual = False
     get_hop = get_hop
     kernel = _klasscf_kernel_method
 
@@ -3652,6 +3657,7 @@ class PBCLASSCFTransSymm(PBCLASCITransSymm):
     _hop = KLASSCF_HessianOperator
     _kern = kernel
     micro_solver = SolveScipyMINRESForCplx
+    micro_solver_compute_residual = False
     get_hop = get_hop
     kernel = _klasscf_kernel_method
 
