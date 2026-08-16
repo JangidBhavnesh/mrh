@@ -3,6 +3,7 @@
 import numpy as np
 from scipy import linalg
 
+from pyscf import lib
 from pyscf.pbc.lib import kpts_helper
 
 from mrh.my_pyscf.mcscf.lasscf_sync_o0 import (
@@ -14,6 +15,11 @@ from mrh.my_pyscf.pbc.mcscf.klas_ao2mo import _ERIS
 from mrh.my_pyscf.pbc.mcscf.klasci import (
     PBCLASCINoSymm,
     PBCLASCITransSymm,
+    kLASCI,
+    kernel as klasci_kernel,
+)
+from mrh.my_pyscf.pbc.mcscf.real_linear_solvers import (
+    SolveScipyMINRESForCplx,
 )
 from mrh.my_pyscf.pbc.util.wannier import get_wannier_orbs
 
@@ -3145,6 +3151,286 @@ class KLASSCF_TransSymmHessianOperator(KLASSCF_HessianOperator):
             for hc, c0 in zip(hc_ref, ci0_ref)
         ]
         return self._unpack_cif(response_ref)
+
+
+def get_hop(klas, mo_coeff=None, ci=None, ugg=None, **kwargs):
+    """Build the periodic orbital/CI Hessian at the current keyframe."""
+    if mo_coeff is None:
+        mo_coeff = klas.mo_coeff
+    if ci is None:
+        ci = klas.ci
+    if ugg is None:
+        ugg = klas.get_ugg(mo_coeff=mo_coeff, ci=ci)
+    hop = getattr(klas, "_hop", KLASSCF_HessianOperator)
+    return hop(klas, ugg, mo_coeff=mo_coeff, ci=ci, **kwargs)
+
+
+def _optimizer_metric(klas, ugg):
+    """Return the metric for the supported single-state optimizer."""
+    weights = np.asarray(klas.weights, dtype=float).reshape(-1)
+    if weights.size != int(klas.nroots):
+        raise ValueError(
+            f"weights has size {weights.size}; expected {klas.nroots}"
+        )
+    if weights.size != 1 or not np.allclose(weights, 1.0):
+        raise NotImplementedError(
+            "state-averaged k-LASSCF needs the CI weights in the real "
+            "optimizer metric"
+        )
+    return np.ones(ugg.nvar_tot, dtype=float)
+
+
+def _run_ci_cycle(klas, mo_coeff, ci, verbose):
+    """Optimize the LAS product-state CI vectors for fixed orbitals."""
+    return klasci_kernel(
+        klas, mo_coeff=mo_coeff, ci0=ci, verbose=verbose,
+    )
+
+
+def _get_mo_energy(hop):
+    """Return diagonal state-averaged Fock values for each k-point."""
+    h1s = getattr(hop, "h1s", None)
+    if h1s is None:
+        return None
+    fock = np.asarray(h1s).sum(axis=0) / 2.0
+    return np.diagonal(fock, axis1=-2, axis2=-1).real.copy()
+
+
+def kernel(
+        klas, mo_coeff=None, ci0=None, conv_tol_grad=None, verbose=None):
+    """Run the k-LASSCF macro/micro optimization.
+
+    A macroiteration first optimizes the product-state CI vectors at fixed
+    orbitals.  It then builds one orbital/CI Hessian keyframe.  MINRES solves
+    the Newton equation in doubled real coordinates for at most
+    ``max_cycle_micro`` iterations.  The resulting complex step is retracted
+    into new orbitals and normalized CI vectors before the next keyframe is
+    built.
+
+    State-averaged optimization is not enabled yet because its CI weights
+    must be included in the real optimizer metric.
+
+    Returns
+    -------
+    converged, e_tot, e_states, mo_energy, mo_coeff, e_cas, e_lexc, ci,
+    h2eff, veff
+        Final convergence flag, energies, orbitals, CI vectors, active-space
+        integrals, and spin-resolved periodic effective potential.
+    """
+    if mo_coeff is None:
+        mo_coeff = klas.mo_coeff
+    else:
+        mo_coeff = np.asarray(mo_coeff)
+    if ci0 is None:
+        ci = klas.ci
+    else:
+        ci = ci0
+    if conv_tol_grad is None:
+        conv_tol_grad = klas.conv_tol_grad
+    if verbose is None:
+        verbose = klas.verbose
+
+    conv_tol_grad = float(conv_tol_grad)
+    if not np.isfinite(conv_tol_grad) or conv_tol_grad < 0.0:
+        raise ValueError("conv_tol_grad must be finite and nonnegative")
+    max_macro = int(klas.max_cycle_macro)
+    max_micro = int(klas.max_cycle_micro)
+    min_macro = int(klas.min_cycle_macro)
+    if max_macro < 0 or max_micro < 0 or min_macro < 0:
+        raise ValueError("macro and micro cycle counts must be nonnegative")
+    trust_radius = float(klas.trust_radius)
+    if not np.isfinite(trust_radius) or trust_radius <= 0.0:
+        raise ValueError("trust_radius must be finite and positive")
+
+    log = lib.logger.new_logger(klas, verbose)
+    log.debug("Start k-LASSCF")
+    t0 = (lib.logger.process_clock(), lib.logger.perf_counter())
+    converged = False
+    final_hop = None
+    e_tot = e_states = e_cas = e_lexc = None
+    ci_converged = []
+    norm_gorb = norm_gci = 0.0
+
+    # The extra keyframe evaluates the gradient after the last allowed step.
+    for imacro in range(max_macro + 1):
+        (
+            ci_converged, e_tot, e_states, e_cas, e_lexc, ci,
+        ) = _run_ci_cycle(klas, mo_coeff, ci, log)
+
+        ugg = klas.get_ugg(mo_coeff=mo_coeff, ci=ci)
+        metric = _optimizer_metric(klas, ugg)
+        final_hop = klas.get_hop(
+            mo_coeff=mo_coeff, ci=ci, ugg=ugg,
+        )
+        gradient = np.asarray(final_hop.get_grad()).reshape(-1)
+        if gradient.size != ugg.nvar_tot:
+            raise ValueError(
+                f"gradient has size {gradient.size}; expected {ugg.nvar_tot}"
+            )
+
+        norm_gorb = float(np.linalg.norm(gradient[:ugg.nvar_orb]))
+        norm_gci = float(np.linalg.norm(gradient[ugg.nvar_orb:]))
+        log.info(
+            "k-LASSCF macro %d : E = %.15g ; |g_orb| = %.6g ; "
+            "|g_ci| = %.6g",
+            imacro, np.real(e_tot), norm_gorb, norm_gci,
+        )
+
+        ci_is_converged = bool(np.all(ci_converged))
+        gradient_is_converged = (
+            norm_gorb < conv_tol_grad and norm_gci < conv_tol_grad
+        )
+        if (
+                gradient_is_converged and ci_is_converged
+                and imacro >= min_macro):
+            converged = True
+            break
+        if imacro == max_macro or max_micro == 0 or gradient.size == 0:
+            break
+
+        def metric_hessian(vector):
+            return metric * np.asarray(final_hop._matvec(vector))
+
+        weighted_gradient = metric * gradient
+        rhs_norm = float(np.linalg.norm(weighted_gradient))
+        micro_rtol = min(
+            0.5,
+            max(1e-12, conv_tol_grad / max(rhs_norm, 1e-30)),
+        )
+        micro_count = [0]
+
+        def micro_callback(step):
+            micro_count[0] += 1
+            log.debug(
+                "k-LASSCF micro %d : |x_orb| = %.6g ; |x_ci| = %.6g",
+                micro_count[0],
+                np.linalg.norm(step[:ugg.nvar_orb]),
+                np.linalg.norm(step[ugg.nvar_orb:]),
+            )
+
+        solver_class = getattr(
+            klas, "micro_solver", SolveScipyMINRESForCplx,
+        )
+        # Do not use the packed complex Hdiag as a preconditioner here.  The
+        # real and imaginary optimizer directions need separate diagonals.
+        solver = solver_class(
+            metric_hessian, rtol=micro_rtol, maxiter=max_micro,
+            callback=micro_callback,
+        )
+        step, info = solver(weighted_gradient)
+        if info:
+            log.warn(
+                "k-LASSCF MINRES stopped with info=%s after %d "
+                "microiterations",
+                info, micro_count[0],
+            )
+
+        step_norm = float(np.linalg.norm(step))
+        max_coordinate = float(np.max(np.abs(step), initial=0.0))
+        scale = 1.0
+        if step_norm > trust_radius:
+            scale = min(scale, trust_radius / step_norm)
+        if max_coordinate > np.pi / 2.0:
+            scale = min(scale, (np.pi / 2.0) / max_coordinate)
+        if scale < 1.0:
+            log.info("Scaling k-LASSCF step by %.6g", scale)
+            step = step * scale
+
+        mo_coeff, ci = final_hop.update_mo_ci(step)
+
+    if final_hop is None:
+        raise RuntimeError("k-LASSCF failed to build a Hessian keyframe")
+
+    mo_energy = _get_mo_energy(final_hop)
+    h2eff = final_hop.eri_cas
+    veff = final_hop.veff_kpts
+    log.info(
+        "k-LASSCF %s after %d macro keyframes",
+        "converged" if converged else "not converged", imacro + 1,
+    )
+    log.info(
+        "k-LASSCF E = %.15g ; |g_orb| = %.6g ; |g_ci| = %.6g",
+        np.real(e_tot), norm_gorb, norm_gci,
+    )
+    log.timer("k-LASSCF kernel", *t0)
+    return (
+        converged, e_tot, e_states, mo_energy, mo_coeff, e_cas, e_lexc,
+        ci, h2eff, veff,
+    )
+
+
+def _klasscf_kernel_method(
+        self, mo_coeff=None, ci0=None, conv_tol_grad=None, verbose=None,
+        _kern=None):
+    """Run k-LASSCF and store the final result on this object."""
+    if mo_coeff is None:
+        mo_coeff = self.mo_coeff
+    else:
+        self.mo_coeff = mo_coeff
+    if ci0 is None:
+        ci0 = self.ci
+    if verbose is None:
+        verbose = self.verbose
+    if conv_tol_grad is None:
+        conv_tol_grad = self.conv_tol_grad
+    if _kern is None:
+        _kern = self._kern
+
+    if self.verbose >= lib.logger.WARN:
+        self.check_sanity()
+    self.dump_flags(verbose)
+
+    result = _kern(
+        mo_coeff=mo_coeff, ci0=ci0, conv_tol_grad=conv_tol_grad,
+        verbose=verbose,
+    )
+    (
+        self.converged, self.e_tot, self.e_states, self.mo_energy,
+        self.mo_coeff, self.e_cas, self.e_lexc, self.ci, h2eff, veff,
+    ) = result
+    self._finalize(method="LASSCF")
+    return (
+        self.e_tot, self.e_cas, self.ci, self.mo_coeff, self.mo_energy,
+        h2eff, veff,
+    )
+
+
+class PBCLASSCFNoSymm(PBCLASCINoSymm):
+    """Periodic LASSCF object without translation-adapted CI packing."""
+
+    _hop = KLASSCF_HessianOperator
+    _kern = kernel
+    micro_solver = SolveScipyMINRESForCplx
+    get_hop = get_hop
+    kernel = _klasscf_kernel_method
+
+
+class PBCLASSCFTransSymm(PBCLASCITransSymm):
+    """Periodic LASSCF object with translation-symmetry checks."""
+
+    # The general Hessian is used until translation-packed optimizer
+    # coordinates are enabled and tested.
+    _hop = KLASSCF_HessianOperator
+    _kern = kernel
+    micro_solver = SolveScipyMINRESForCplx
+    get_hop = get_hop
+    kernel = _klasscf_kernel_method
+
+
+def kLASSCF(
+        kmf, ncas, nelecas, ncore=None, spin_mult=None, kmesh=None,
+        kpts=None, trans_sym=False, ref_cell=0):
+    """Create a periodic LASSCF object with a macro/micro optimizer."""
+    klas = kLASCI(
+        kmf, ncas, nelecas, ncore=ncore, spin_mult=spin_mult,
+        kmesh=kmesh, kpts=kpts, trans_sym=trans_sym,
+        ref_cell=ref_cell,
+    )
+    target_class = (
+        PBCLASSCFTransSymm if trans_sym else PBCLASSCFNoSymm
+    )
+    klas.__class__ = target_class
+    return klas
 
 # Register the complex orbital/CI parameterization and total gradient on both
 # periodic LAS variants. Hessian dispatch is currently developed only for the
