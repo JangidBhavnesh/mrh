@@ -2160,11 +2160,10 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
         formula and replaces the real-orbital one-sided completion in that
         block.
         """
-        response = self._orbital_hessian_response_block(kappa1)
         active = slice(self.ncore, self.nocc)
         kappa_active = np.asarray(kappa1)[:, active, active]
         if not np.any(kappa_active):
-            return response
+            return self._orbital_hessian_response_block(kappa1)
 
         rotation_map = self.ugg.active_active_map
         kappa_wannier = rotation_map.block_to_wannier(kappa_active)
@@ -2182,7 +2181,7 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
                 kappa_external,
             )
         else:
-            response_external = np.zeros_like(response)
+            response_external = np.zeros_like(kappa1)
         response_active += response_external[:, active, active]
 
         active_coordinates = rotation_map.pack(kappa_active)
@@ -2243,8 +2242,8 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
         )
         return active_to_external
 
-    def _apply_Horb_active_external_cross(self, coordinates):
-        """Apply the symmetric AA-input/external-output cross block."""
+    def _apply_Horb_active_external_cross_reference(self, coordinates):
+        """Apply the column-built AA-input/external-output reference."""
         coordinates = np.asarray(coordinates).reshape(-1)
         nvar_active = self.ugg.nvar_orb_active_active
         if coordinates.size != nvar_active:
@@ -2259,6 +2258,114 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
         response = self._get_Horb_external_active_cross() @ real_coordinates
         nvar_external = self.ugg.nvar_orb_external
         return response[:nvar_external] + 1.0j * response[nvar_external:]
+
+    def _apply_Horb_active_external_cross(self, coordinates):
+        """Apply the AA-input/external-output cross block directly.
+
+        The validated forward map takes one block-MO external rotation to a
+        projected active-active response.  This routine applies its adjoint
+        to the supplied active coordinates without constructing that map one
+        external column at a time.  The adjoint is taken with the doubled-real
+        optimizer metric; it is not a complex conjugate transpose.
+
+        All two-electron tensors retain bra-ket-bra-ket order.  An ERI block
+        requested as ``(k1, k2, k3)`` therefore has fourth momentum
+        ``k4 = kconserv[k1, k2, k3]`` and obeys
+        ``k1 - k2 + k3 - k4 = G``.  The three reverse contractions accumulate
+        the response at ``k2``, ``k3``, and ``k4``, respectively.
+        """
+        coordinates = np.asarray(coordinates).reshape(-1)
+        rotation_map = self.ugg.active_active_map
+        nvar_active = self.ugg.nvar_orb_active_active
+        if coordinates.size != nvar_active:
+            msg = (
+                f"active-active vector has size {coordinates.size}; "
+                f"expected {nvar_active}"
+            )
+            raise ValueError(msg)
+
+        active = slice(self.ncore, self.nocc)
+        dtype = np.result_type(
+            coordinates.dtype, rotation_map.basis.dtype, self.fock1.dtype,
+        )
+        dual = np.zeros(
+            (self.nkpts, self.nmo, self.nmo), dtype=dtype,
+        )
+        # Orbital Hessian responses are packed as kappa2/2.  Supplying half
+        # the unpacked active direction is therefore the correct adjoint seed
+        # for the full anti-Hermitian response matrix.
+        dual[:, active, active] = rotation_map.unpack(coordinates) / 2.0
+        adjoint = np.zeros_like(dual)
+
+        # Adjoint of the one-body and JK response.  The periodic Coulomb and
+        # exchange map is self-adjoint in the uniform k-point trace metric, so
+        # its reverse action is another call to the same spin-resolved map.
+        potential_seed = np.empty(
+            (2, self.nkpts, self.nmo, self.nmo), dtype=dtype,
+        )
+        dm1s_h = self.dm1s.conj().transpose(0, 1, 3, 2)
+        for spin in range(2):
+            seed = dual @ dm1s_h[spin]
+            potential_seed[spin] = (
+                seed + seed.conj().transpose(0, 2, 1)
+            ) / 2.0
+        veff_adjoint = self._get_veff_from_block_dm1s(potential_seed)
+
+        for spin in range(2):
+            density_seed = (
+                self.h1s[spin].conj().transpose(0, 2, 1) @ dual
+                + veff_adjoint[spin]
+            )
+            adjoint += density_seed @ dm1s_h[spin]
+            adjoint -= dm1s_h[spin] @ density_seed
+
+        fock1_h = self.fock1.conj().transpose(0, 2, 1)
+        adjoint += (fock1_h @ dual - dual @ fock1_h) / 2.0
+
+        fock1_one_body = sum(
+            self.h1s[spin] @ self.dm1s[spin] for spin in range(2)
+        )
+        fock1_cumulant_h = (
+            self.fock1 - fock1_one_body
+        ).conj().transpose(0, 2, 1)
+        adjoint -= fock1_cumulant_h @ dual
+
+        kconserv = kpts_helper.get_kconserv(
+            self.las._scf.cell, self.kpts,
+        )
+        for k1, k2, k3 in kpts_helper.loop_kkk(self.nkpts):
+            k4 = kconserv[k1, k2, k3]
+            cascm2_kpts = _get_casdm2_kpts(
+                self.cascm2, self.mo_phase, (k1, k2, k3, k4),
+            )
+            ppaa = self.eris.ppaa(k1, k2, k3)
+            papa = self.eris.papa(k1, k2, k3)
+            paap = self.eris.paap(k1, k2, k3)
+            dual_active = dual[k1][:, active]
+
+            # Adjoint of ppaa[p,x,s,t] kappa[k2,x,r] L[q,r,s,t].
+            adjoint[k2][:, active] += np.einsum(
+                "pq,pxst,qrst->xr",
+                dual_active, ppaa.conj(), cascm2_kpts.conj(),
+                optimize=True,
+            )
+            # Adjoint of -kappa[k3,s,x] papa[p,r,x,t] L[q,r,s,t].
+            adjoint[k3][active, :] -= np.einsum(
+                "pq,prxt,qrst->sx",
+                dual_active, papa.conj(), cascm2_kpts.conj(),
+                optimize=True,
+            )
+            # Adjoint of paap[p,r,s,x] kappa[k4,x,t] L[q,r,s,t].
+            adjoint[k4][:, active] += np.einsum(
+                "pq,prsx,qrst->xt",
+                dual_active, paap.conj(), cascm2_kpts.conj(),
+                optimize=True,
+            )
+
+        response = adjoint - adjoint.conj().transpose(0, 2, 1)
+        packed = np.asarray(self.ugg.pack_orb(response)).reshape(-1)
+        nvar_external = self.ugg.nvar_orb_external
+        return packed[:nvar_external]
 
     def _active_wannier_intermediates(self):
         """Return active-only Hessian intermediates in the Wannier basis."""
