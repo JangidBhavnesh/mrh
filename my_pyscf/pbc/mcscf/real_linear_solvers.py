@@ -55,6 +55,10 @@ class SolveScipyCGForCplx:
         Convergence settings passed to ``scipy.sparse.linalg.cg``.
     callback : callable, optional
         Called after each CG iteration with the current complex vector.
+    compute_residual : bool
+        Evaluate ``||H*x + g||`` after SciPy returns.  This requires one
+        additional Hessian action, so it is disabled by default.  When it is
+        disabled, ``residual_norm`` remains ``None``.
     diagonal_floor : float
         Small values in ``real_hdiag`` are replaced by this value before the
         diagonal is inverted.
@@ -68,13 +72,15 @@ class SolveScipyCGForCplx:
 
     def __init__(
             self, hessian, real_hdiag=None, *, rtol=1e-5, atol=0.0,
-            maxiter=None, callback=None, diagonal_floor=1e-8):
+            maxiter=None, callback=None, compute_residual=False,
+            diagonal_floor=1e-8):
         self.hessian = hessian
         self.real_hdiag = real_hdiag
         self.rtol = float(rtol)
         self.atol = float(atol)
         self.maxiter = maxiter
         self.callback = callback
+        self.compute_residual = bool(compute_residual)
         self.diagonal_floor = float(diagonal_floor)
 
         if self.rtol < 0.0 or self.atol < 0.0:
@@ -211,8 +217,10 @@ class SolveScipyCGForCplx:
 
     def _finish_solve(self, real_solution, gradient):
         self.solution = self.pack_real(real_solution)
-        residual = self._complex_matvec(self.solution) + gradient
-        self.residual_norm = float(np.linalg.norm(residual))
+        self.residual_norm = None
+        if self.compute_residual:
+            residual = self._complex_matvec(self.solution) + gradient
+            self.residual_norm = float(np.linalg.norm(residual))
         return np.array(self.solution, copy=True), self.info
 
     def run(self, gradient, x0=None):
