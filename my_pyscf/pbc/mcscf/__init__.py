@@ -14,6 +14,9 @@ from mrh.my_pyscf.pbc.mcscf.klasscf import (
     KLASSCF_UnitaryGroupGenerators,
     KLASSCF_HessianOperator,
     KLASSCF_TransSymmHessianOperator,
+    PBCLASSCFNoSymm,
+    PBCLASSCFTransSymm,
+    kLASSCF,
 )
 from mrh.my_pyscf.pbc.mcscf.real_linear_solvers import (
     SolveScipyCGForCplx,
@@ -44,4 +47,5 @@ def CASSCF(kmf, ncas, nelecas, ncore=None):
     return kmc
 
 KLASCI = kLASCI
+KLASSCF = kLASSCF
 # The kLASCI call function should be added here instead of defining it in kasci.py
