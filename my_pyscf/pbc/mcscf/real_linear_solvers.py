@@ -7,9 +7,10 @@ from scipy.sparse import linalg as sparse_linalg
 
 
 """
-Wrapper for SciPy's real conjugate-gradient solver that works with complex vectors.
-SciPy expects complex linearity, but the Hessian may be real-linear. This wrapper
-exposes the real-linear Hessian to SciPy as a doubled-size real problem.
+Wrappers for SciPy's real iterative solvers that work with complex vectors.
+SciPy expects complex linearity for a complex problem, but the Hessian may be
+real-linear. These wrappers expose the real-linear Hessian to SciPy as a
+doubled-size real problem.
 
 Complex vector = a + 1j*b
 
@@ -21,10 +22,11 @@ for a real number ``a``, but it may fail to obey
 
     H(1j*x) = 1j*H(x).
 
-This is called real-linear rather than complex-linear. SciPy's complex CG
-solver expects complex linearity, so it cannot be used directly. I wrote this
-wrapper to bridge the gap. Basically, the solver below keeps the step vectors
-complex but gives SciPy the same problem as a real vector with twice as many entries.
+This is called real-linear rather than complex-linear. SciPy's complex
+iterative solvers expect complex linearity, so they cannot be used directly.
+I wrote these wrappers to bridge the gap. Basically, the solvers below keep
+the step vectors complex but give SciPy the same problem as a real vector with
+twice as many entries.
 """
 
 
@@ -173,8 +175,7 @@ class SolveScipyCGForCplx:
             dtype=float,
         )
 
-    def run(self, gradient, x0=None):
-        """Build the real problem, solve it, and return a complex step."""
+    def _prepare_solve(self, gradient, x0):
         gradient = np.asarray(gradient).reshape(-1)
         if gradient.size == 0:
             raise ValueError("gradient must contain at least one entry")
@@ -203,6 +204,20 @@ class SolveScipyCGForCplx:
                 self.pack_real(vector)
             )
 
+        return gradient, rhs, real_x0, real_callback
+
+    def _finish_solve(self, real_solution, gradient):
+        self.solution = self.pack_real(real_solution)
+        residual = self._complex_matvec(self.solution) + gradient
+        self.residual_norm = float(np.linalg.norm(residual))
+        return np.array(self.solution, copy=True), self.info
+
+    def run(self, gradient, x0=None):
+        """Build the real problem, solve it with CG, and return a complex step."""
+        gradient, rhs, real_x0, real_callback = self._prepare_solve(
+            gradient, x0,
+        )
+
         real_solution, self.info = sparse_linalg.cg(
             self.real_operator,
             rhs,
@@ -213,7 +228,33 @@ class SolveScipyCGForCplx:
             M=self.real_preconditioner,
             callback=real_callback,
         )
-        self.solution = self.pack_real(real_solution)
-        residual = self._complex_matvec(self.solution) + gradient
-        self.residual_norm = float(np.linalg.norm(residual))
-        return np.array(self.solution, copy=True), self.info
+        return self._finish_solve(real_solution, gradient)
+
+
+class SolveScipyMINRESForCplx(SolveScipyCGForCplx):
+    """Solve ``Hx = -g`` with SciPy MINRES and complex vector storage.
+
+    MINRES uses the same doubled-size real problem as the parent CG class.
+    Unlike CG, MINRES can solve a symmetric Hessian that is not positive
+    definite. The optional preconditioner must still be positive definite.
+
+    ``atol`` is accepted through the parent constructor so that both solver
+    classes have the same interface, but SciPy MINRES uses only ``rtol``.
+    """
+
+    def run(self, gradient, x0=None):
+        """Build the real problem, solve it with MINRES, and return the step."""
+        gradient, rhs, real_x0, real_callback = self._prepare_solve(
+            gradient, x0,
+        )
+
+        real_solution, self.info = sparse_linalg.minres(
+            self.real_operator,
+            rhs,
+            x0=real_x0,
+            rtol=self.rtol,
+            maxiter=self.maxiter,
+            M=self.real_preconditioner,
+            callback=real_callback,
+        )
+        return self._finish_solve(real_solution, gradient)
