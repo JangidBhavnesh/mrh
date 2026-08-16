@@ -15,6 +15,7 @@ from mrh.my_pyscf.pbc.mcscf.klasscf import (
     KLASSCF_HessianOperator,
     KLASSCF_TransSymmHessianOperator,
 )
+from mrh.my_pyscf.pbc.mcscf.real_linear_solvers import SolveScipyCGForCplx
 
 def CASCI(kmf, ncas, nelecas, ncore=None):
     assert isinstance(kmf, scf.hf.SCF),  "CASCI only works with periodic SCF objects"
