@@ -5,6 +5,9 @@ from scipy.sparse import linalg as sparse_linalg
 
 # Author: Bhavnesh Jangid
 
+# TODO: Include the state-average CI weights in the real optimizer metric
+# before enabling state-averaged k-LASSCF macroiterations.
+
 
 """
 Wrappers for SciPy's real iterative solvers that work with complex vectors.
