@@ -16,7 +16,9 @@ from mrh.my_pyscf.pbc.mcscf.klasci import (
     PBCLASCINoSymm,
     PBCLASCITransSymm,
     kLASCI,
-    kernel as klasci_kernel,
+)
+from mrh.my_pyscf.pbc.mcscf.productstate import (
+    ImpureProductStateFCISolver,
 )
 from mrh.my_pyscf.pbc.mcscf.real_linear_solvers import (
     SolveScipyMINRESForCplx,
@@ -3180,11 +3182,102 @@ def _optimizer_metric(klas, ugg):
     return np.ones(ugg.nvar_tot, dtype=float)
 
 
-def _run_ci_cycle(klas, mo_coeff, ci, verbose):
-    """Optimize the LAS product-state CI vectors for fixed orbitals."""
-    return klasci_kernel(
-        klas, mo_coeff=mo_coeff, ci0=ci, verbose=verbose,
+def _ci_guess_is_missing(ci):
+    """Return whether a nested fragment/root CI guess is incomplete."""
+    if ci is None:
+        return True
+    return any(
+        roots is None or any(c is None for c in roots)
+        for roots in ci
     )
+
+
+def _make_keyframe_densities(klas, mo_coeff, ci):
+    """Build the CI and AO densities and the periodic effective potential."""
+    casdm1frs = klas.states_make_casdm1s_sub(ci=ci)
+    casdm1s_sub = klas.make_casdm1s_sub(
+        ci=ci, casdm1frs=casdm1frs,
+    )
+    dm1s_kpts = klas.make_rdm1s(
+        mo_coeff=mo_coeff, ci=ci, casdm1s_sub=casdm1s_sub,
+    )
+    veff_kpts = klas.get_veff(
+        klas._scf.cell, dm_kpts=dm1s_kpts,
+    )
+    return casdm1frs, casdm1s_sub, dm1s_kpts, veff_kpts
+
+
+def ci_cycle(
+        klas, mo_coeff, ci0, veff_kpts, h2eff, casdm1frs, log):
+    """Solve every local CI problem once in the current LAS environment.
+
+    This follows the molecular synchronous LASSCF CI cycle.  Each fragment
+    Hamiltonian is built from the densities at the start of the keyframe, and
+    each ``fcibox`` is diagonalized once.  It does not run the outer
+    product-state fixed-point solver used by the standalone k-LASCI kernel.
+    """
+    h1eff = klas.h1e_for_las(
+        mo_coeff=mo_coeff,
+        ci=ci0,
+        veff=veff_kpts,
+        eri_cas=h2eff,
+        casdm1frs=casdm1frs,
+    )
+    frozen_ci = set(getattr(klas, "frozen_ci", None) or [])
+    e_sub = []
+    ci1 = []
+    offset = 0
+    for ifrag, (fcibox, norb, nelec, h1e, c0) in enumerate(zip(
+            klas.fciboxes, klas.ncas_sub, klas.nelecas_sub, h1eff, ci0)):
+        stop = offset + int(norb)
+        h2frag = h2eff[
+            offset:stop, offset:stop, offset:stop, offset:stop
+        ]
+        if ifrag in frozen_ci:
+            energy = 0.0
+            c1 = c0
+        else:
+            max_memory = max(
+                400, klas.max_memory - lib.current_memory()[0],
+            )
+            energy, c1 = fcibox.kernel(
+                h1e, h2frag, norb, nelec,
+                ci0=c0, verbose=log, max_memory=max_memory,
+            )
+        e_sub.append(energy)
+        ci1.append(c1)
+        offset = stop
+    return e_sub, ci1
+
+
+def _fixed_ci_energies(klas, mo_coeff, ci, h2eff):
+    """Evaluate root energies without optimizing the product-state CI."""
+    h1eff, energy_core = klas.h1e_for_cas(
+        mo_coeff=mo_coeff, ncas=klas.ncas, ncore=klas.ncore,
+    )
+    dtype = np.result_type(h1eff, h2eff, energy_core)
+    e_cas = np.empty(klas.nroots, dtype=dtype)
+    e_states = np.empty(klas.nroots, dtype=dtype)
+    for iroot in range(klas.nroots):
+        fcisolvers = [box.fcisolvers[iroot] for box in klas.fciboxes]
+        solver = ImpureProductStateFCISolver(
+            fcisolvers,
+            lweights=[[1.0] for _ in fcisolvers],
+            stdout=klas.stdout,
+            verbose=lib.logger.QUIET,
+        )
+        energy_active = solver.energy_elec(
+            h1eff, h2eff, [roots[iroot] for roots in ci],
+            klas.ncas_sub, klas.nelecas_sub, ecore=0,
+        )
+        e_cas[iroot] = energy_active / klas.nkpts
+        e_states[iroot] = (energy_active + energy_core) / klas.nkpts
+    e_tot = np.dot(klas.weights, e_states)
+    e_lexc = [
+        [np.zeros(1, dtype=dtype) for _ in range(klas.nroots)]
+        for _ in range(klas.nfrags)
+    ]
+    return e_tot, e_states, e_cas, e_lexc
 
 
 def _get_mo_energy(hop):
@@ -3200,12 +3293,13 @@ def kernel(
         klas, mo_coeff=None, ci0=None, conv_tol_grad=None, verbose=None):
     """Run the k-LASSCF macro/micro optimization.
 
-    A macroiteration first optimizes the product-state CI vectors at fixed
-    orbitals.  It then builds one orbital/CI Hessian keyframe.  MINRES solves
-    the Newton equation in doubled real coordinates for at most
+    A macroiteration first solves every local CI problem once in the current
+    LAS environment.  It then builds one orbital/CI Hessian keyframe.  MINRES
+    solves the Newton equation in doubled real coordinates for at most
     ``max_cycle_micro`` iterations.  The resulting complex step is retracted
     into new orbitals and normalized CI vectors before the next keyframe is
-    built.
+    built.  Active integrals, densities, and the effective potential are
+    carried from one keyframe to the next.
 
     State-averaged optimization is not enabled yet because its CI weights
     must be included in the real optimizer metric.
@@ -3248,19 +3342,41 @@ def kernel(
     converged = False
     final_hop = None
     e_tot = e_states = e_cas = e_lexc = None
-    ci_converged = []
     norm_gorb = norm_gci = 0.0
+
+    h2eff = klas.get_h2cas(mo_coeff)
+    if _ci_guess_is_missing(ci):
+        ci = klas.get_init_guess_ci(
+            mo_coeff, ci0=ci, eri_cas=h2eff,
+        )
+    if _ci_guess_is_missing(ci):
+        raise RuntimeError("failed to populate the initial CI vectors")
+    (
+        casdm1frs, casdm1s_sub, dm1s_kpts, veff_kpts,
+    ) = _make_keyframe_densities(klas, mo_coeff, ci)
 
     # The extra keyframe evaluates the gradient after the last allowed step.
     for imacro in range(max_macro + 1):
+        e_sub, ci = ci_cycle(
+            klas, mo_coeff, ci, veff_kpts, h2eff, casdm1frs, log,
+        )
+        log.info("k-LASSCF subspace CI energies: %s", e_sub)
         (
-            ci_converged, e_tot, e_states, e_cas, e_lexc, ci,
-        ) = _run_ci_cycle(klas, mo_coeff, ci, log)
+            casdm1frs, casdm1s_sub, dm1s_kpts, veff_kpts,
+        ) = _make_keyframe_densities(klas, mo_coeff, ci)
+        e_tot, e_states, e_cas, e_lexc = _fixed_ci_energies(
+            klas, mo_coeff, ci, h2eff,
+        )
 
+        # The active-active rotation map depends on the current Wannier
+        # transformation, so periodic optimizer coordinates are rebuilt at
+        # every Hessian keyframe.
         ugg = klas.get_ugg(mo_coeff=mo_coeff, ci=ci)
         metric = _optimizer_metric(klas, ugg)
         final_hop = klas.get_hop(
             mo_coeff=mo_coeff, ci=ci, ugg=ugg,
+            casdm1frs=casdm1frs, h2eff=h2eff,
+            veff_kpts=veff_kpts, dm1s_kpts=dm1s_kpts,
         )
         gradient = np.asarray(final_hop.get_grad()).reshape(-1)
         if gradient.size != ugg.nvar_tot:
@@ -3276,13 +3392,10 @@ def kernel(
             imacro, np.real(e_tot), norm_gorb, norm_gci,
         )
 
-        ci_is_converged = bool(np.all(ci_converged))
         gradient_is_converged = (
             norm_gorb < conv_tol_grad and norm_gci < conv_tol_grad
         )
-        if (
-                gradient_is_converged and ci_is_converged
-                and imacro >= min_macro):
+        if gradient_is_converged and imacro >= min_macro:
             converged = True
             break
         if imacro == max_macro or max_micro == 0 or gradient.size == 0:
@@ -3301,12 +3414,28 @@ def kernel(
 
         def micro_callback(step):
             micro_count[0] += 1
-            log.debug(
-                "k-LASSCF micro %d : |x_orb| = %.6g ; |x_ci| = %.6g",
-                micro_count[0],
-                np.linalg.norm(step[:ugg.nvar_orb]),
-                np.linalg.norm(step[ugg.nvar_orb:]),
-            )
+            norm_xorb = np.linalg.norm(step[:ugg.nvar_orb])
+            norm_xci = np.linalg.norm(step[ugg.nvar_orb:])
+            if log.verbose > lib.logger.INFO:
+                hessian_step = np.asarray(final_hop._matvec(step))
+                residual = gradient + hessian_step
+                model_energy = e_tot + np.real(np.vdot(
+                    step,
+                    metric * (gradient + 0.5 * hessian_step),
+                ))
+                log.info(
+                    "k-LASSCF micro %d : E = %.15g ; |r_orb| = %.6g ; "
+                    "|r_ci| = %.6g ; |x_orb| = %.6g ; |x_ci| = %.6g",
+                    micro_count[0], np.real(model_energy),
+                    np.linalg.norm(residual[:ugg.nvar_orb]),
+                    np.linalg.norm(residual[ugg.nvar_orb:]),
+                    norm_xorb, norm_xci,
+                )
+            else:
+                log.info(
+                    "k-LASSCF micro %d : |x_orb| = %.6g ; |x_ci| = %.6g",
+                    micro_count[0], norm_xorb, norm_xci,
+                )
 
         solver_class = getattr(
             klas, "micro_solver", SolveScipyMINRESForCplx,
@@ -3319,10 +3448,11 @@ def kernel(
         )
         step, info = solver(weighted_gradient)
         if info:
+            solver_name = getattr(solver_class, "__name__", "micro solver")
             log.warn(
-                "k-LASSCF MINRES stopped with info=%s after %d "
+                "k-LASSCF %s stopped with info=%s after %d "
                 "microiterations",
-                info, micro_count[0],
+                solver_name, info, micro_count[0],
             )
 
         step_norm = float(np.linalg.norm(step))
@@ -3336,14 +3466,16 @@ def kernel(
             log.info("Scaling k-LASSCF step by %.6g", scale)
             step = step * scale
 
-        mo_coeff, ci = final_hop.update_mo_ci(step)
+        mo_coeff, ci, h2eff = final_hop.update_mo_ci_eri(step, h2eff)
+        (
+            casdm1frs, casdm1s_sub, dm1s_kpts, veff_kpts,
+        ) = _make_keyframe_densities(klas, mo_coeff, ci)
 
     if final_hop is None:
         raise RuntimeError("k-LASSCF failed to build a Hessian keyframe")
 
     mo_energy = _get_mo_energy(final_hop)
-    h2eff = final_hop.eri_cas
-    veff = final_hop.veff_kpts
+    veff = veff_kpts
     log.info(
         "k-LASSCF %s after %d macro keyframes",
         "converged" if converged else "not converged", imacro + 1,
