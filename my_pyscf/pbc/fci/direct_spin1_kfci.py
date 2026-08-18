@@ -3,11 +3,13 @@
 """Momentum-sector FCI contractions for periodic systems."""
 
 import ctypes
+import types
 import warnings
 
 import numpy as np
 
 from pyscf import lib
+from pyscf.fci import cistring
 from pyscf.fci.addons import _unpack_nelec
 
 from mrh.lib.helper import load_library
@@ -33,6 +35,15 @@ logger = lib.logger
 HDIAG_IMAG_TOL = 1e-3
 libpbcfci_k = None
 libpbckfci_hdiag = None
+_UINT8_POPCOUNT = np.asarray(
+    [bin(value).count("1") for value in range(256)], dtype=np.uint8)
+
+
+def _popcount_uint64(values):
+    """Count set bits in uint64 values without ``int.bit_count``."""
+    values = np.ascontiguousarray(values, dtype=np.uint64)
+    byte_values = values.view(np.uint8).reshape(values.shape + (8,))
+    return _UINT8_POPCOUNT[byte_values].sum(axis=-1, dtype=np.uint16)
 
 
 def _timer_start():
@@ -1185,6 +1196,82 @@ def spin_square(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
         **kwargs)
 
 
+def _get_spin_penalty(fcivec, norb, nelec, nkpts, target_k=0,
+                      link_index=None, spin=None, ss_value=None,
+                      ss_penalty=0.1, log_obj=None, contract_map=None,
+                      kmom=None, kconserv=None):
+    """Apply the configured spin-penalty operator in one momentum sector."""
+    t0 = _timer_start()
+    nelec = _unpack_nelec(nelec, spin)
+    sz = abs(nelec[0] - nelec[1]) * 0.5
+    ss = sz * (sz + 1) if ss_value is None else ss_value
+    fcivec = np.asarray(fcivec)
+
+    if ss < sz * (sz + 1) + 0.1:
+        # Shift all states except the lowest-spin state with (S^2 - ss).
+        ci1 = contract_ss(
+            fcivec, norb, nelec, nkpts, target_k=target_k,
+            link_index=link_index, spin=spin, contract_map=contract_map,
+            kmom=kmom, kconserv=kconserv).reshape(fcivec.shape)
+        ci1 -= ss * fcivec
+        t0 = _timer_debug1(log_obj, "k-FCI spin penalty contract_ss", t0)
+    else:
+        # Select a specified spin with (S^2 - ss)^2.
+        residual = contract_ss(
+            fcivec, norb, nelec, nkpts, target_k=target_k,
+            link_index=link_index, spin=spin, contract_map=contract_map,
+            kmom=kmom, kconserv=kconserv).reshape(fcivec.shape)
+        residual -= ss * fcivec
+        t0 = _timer_debug1(
+            log_obj, "k-FCI spin penalty first contract_ss", t0)
+        ci1 = contract_ss(
+            residual, norb, nelec, nkpts, target_k=target_k,
+            link_index=link_index, spin=spin, contract_map=contract_map,
+            kmom=kmom, kconserv=kconserv).reshape(fcivec.shape)
+        ci1 -= ss * residual
+        t0 = _timer_debug1(
+            log_obj, "k-FCI spin penalty second contract_ss", t0)
+
+    ci1 *= ss_penalty
+    _timer_debug1(log_obj, "k-FCI spin penalty scale", t0)
+    return ci1
+
+
+def _spin_square_diag_k(norb, nelec, nkpts, target_k=0, link_index=None,
+                        contract_map=None, kmom=None):
+    """Build the diagonal of spin-squared in a packed momentum sector."""
+    nelec = _unpack_nelec(nelec)
+    contract_map = _as_contract_map(
+        norb, nelec, nkpts, target_k, link_index=link_index,
+        contract_map=contract_map, kmom=kmom)
+    strs_a = np.asarray(
+        cistring.make_strings(range(norb), nelec[0]), dtype=np.uint64)
+    strs_b = np.asarray(
+        cistring.make_strings(range(norb), nelec[1]), dtype=np.uint64)
+
+    sz = 0.5 * (nelec[0] - nelec[1])
+    diag0 = sz * sz + 0.5 * sum(nelec)
+    hdiag = np.empty(contract_map.sector_size, dtype=np.float64)
+
+    for block in contract_map.blocks:
+        ka, kb, nstra, nstrb, offset, size = map(int, block)
+        a0 = int(contract_map.stra_offsets[ka])
+        a1 = int(contract_map.stra_offsets[ka + 1])
+        b0 = int(contract_map.strb_offsets[kb])
+        b1 = int(contract_map.strb_offsets[kb + 1])
+        astrs = strs_a[contract_map.stra_ids[a0:a1]]
+        bstrs = strs_b[contract_map.strb_ids[b0:b1]]
+        assert astrs.size == nstra
+        assert bstrs.size == nstrb
+
+        hblk = hdiag[offset:offset + size].reshape(nstra, nstrb)
+        for ia, astr in enumerate(astrs):
+            common = np.bitwise_and(astr, bstrs)
+            hblk[ia] = diag0 - _popcount_uint64(common)
+
+    return hdiag
+
+
 def _make_diag_precond(hdiag, level_shift=1e-3):
     '''
     Diagonal preconditioner for the Davidson solver.
@@ -1341,3 +1428,108 @@ def kernel_ms1(fci, h1e, eri, norb, nelec, nkpts, target_k=0, ci0=None,
                        **kwargs)
     log.timer_debug1("k-FCI kernel Davidson eig", *t0)
     return e + ecore, c
+
+
+class SpinPenaltyFCISolver:
+    """Mixin that adds a spin-penalty operator to a k-FCI solver."""
+
+    __name_mixin__ = "SpinPenalty"
+    _keys = {"ss_value", "ss_penalty", "base"}
+
+    def __init__(self, fcibase, shift, ss_value):
+        self.base = fcibase.copy()
+        self.__dict__.update(fcibase.__dict__)
+        self.ss_value = ss_value
+        self.ss_penalty = shift
+        self.davidson_only = self.base.davidson_only = True
+
+    def undo_fix_spin(self):
+        """Remove the spin-penalty mixin and restore the base solver view."""
+        obj = lib.view(self, lib.drop_class(self.__class__,
+                                            SpinPenaltyFCISolver))
+        del obj.base
+        del obj.ss_value
+        del obj.ss_penalty
+        return obj
+
+    def contract_2e(self, eri, fcivec, norb, nelec, nkpts=None,
+                    target_k=None, link_index=None, contract_map=None):
+        """Add the spin penalty to the base two-electron contraction."""
+        if nkpts is None:
+            nkpts = self.nkpts
+        if target_k is None:
+            target_k = self.target_k
+        kmom = self.get_kmom(nkpts) if hasattr(self, "get_kmom") else None
+        nelec = _unpack_nelec(nelec, self.spin)
+        ci0 = super().contract_2e(
+            eri, fcivec, norb, nelec, nkpts=nkpts, target_k=target_k,
+            link_index=link_index, contract_map=contract_map)
+        if contract_map is not None:
+            link_index = contract_map.link_index
+            kmom = contract_map.kmom
+        ci1 = _get_spin_penalty(
+            fcivec, norb, nelec, nkpts, target_k=target_k,
+            link_index=link_index, spin=self.spin, ss_value=self.ss_value,
+            ss_penalty=self.ss_penalty, log_obj=self,
+            contract_map=contract_map, kmom=kmom)
+        ci1 += ci0.reshape(fcivec.shape)
+        return ci1
+
+    def make_hdiag(self, h1e, eri, norb, nelec, nkpts=None, target_k=None,
+                   link_index=None, compress=False, contract_map=None):
+        """Add the spin-penalty diagonal to the Hamiltonian diagonal."""
+        if nkpts is None:
+            nkpts = self.nkpts
+        if target_k is None:
+            target_k = self.target_k
+        kmom = self.get_kmom(nkpts) if hasattr(self, "get_kmom") else None
+        nelec = _unpack_nelec(nelec, self.spin)
+        link_index = _unpack(
+            norb, nelec, link_index, nkpts, spin=self.spin, kmom=kmom)
+        contract_map = _as_contract_map(
+            norb, nelec, nkpts, target_k, link_index=link_index,
+            contract_map=contract_map, log_obj=self, kmom=kmom)
+        link_index = contract_map.link_index
+        kmom = contract_map.kmom
+
+        hdiag = super().make_hdiag(
+            h1e, eri, norb, nelec, nkpts=nkpts, target_k=target_k,
+            link_index=link_index, compress=compress,
+            contract_map=contract_map)
+
+        sz = abs(nelec[0] - nelec[1]) * 0.5
+        ss = sz * (sz + 1) if self.ss_value is None else self.ss_value
+        diag_ss = _spin_square_diag_k(
+            norb, nelec, nkpts, target_k=target_k,
+            link_index=link_index, contract_map=contract_map, kmom=kmom)
+        if ss < sz * (sz + 1) + 0.1:
+            hdiag = hdiag + self.ss_penalty * (diag_ss - ss)
+        else:
+            # This is a preconditioner diagonal; the contraction still uses
+            # the complete squared spin-penalty operator.
+            hdiag = hdiag + self.ss_penalty * (diag_ss - ss) ** 2
+        return hdiag
+
+
+def fix_spin(fciobj, shift=0.1, ss=None, **kwargs):
+    """Return a k-FCI solver with a spin-penalty mixin."""
+    if isinstance(fciobj, types.ModuleType):
+        raise DeprecationWarning("fix_spin should be applied to an FCI object")
+
+    ss_value = kwargs.get("ss_value", ss)
+    if isinstance(fciobj, SpinPenaltyFCISolver):
+        fciobj.ss_penalty = shift
+        fciobj.ss_value = ss_value
+        return fciobj
+
+    spin_solver = SpinPenaltyFCISolver(fciobj, shift, ss_value)
+    return lib.set_class(
+        spin_solver, (SpinPenaltyFCISolver, fciobj.__class__))
+
+
+def fix_spin_(fciobj, shift=0.1, ss=None, **kwargs):
+    """Apply the k-FCI spin-penalty mixin in place."""
+    spin_solver = fix_spin(fciobj, shift=shift, ss=ss, **kwargs)
+    fciobj.__class__ = spin_solver.__class__
+    fciobj.__dict__ = spin_solver.__dict__
+    return fciobj
