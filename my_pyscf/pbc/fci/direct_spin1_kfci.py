@@ -1034,6 +1034,38 @@ def make_hdiag(h1e, eri, norb, nelec, nkpts, target_k=0, link_index=None,
     return hdiag
 
 
+def get_init_guess_k(norb, nelec, nkpts, target_k, nroots, hdiag,
+                     log_obj=None):
+    '''
+    Get initial guess vectors for k-FCI in a fixed total momentum sector.
+    The guesses are determinant basis vectors corresponding to the lowest
+    diagonal Hamiltonian elements.
+    '''
+    t0 = _timer_start()
+    hdiag = np.asarray(hdiag)
+    ndet = hdiag.size
+    nroots = min(int(nroots), ndet)
+    dtype = hdiag.dtype
+
+    if nroots == 0:
+        return []
+
+    try:
+        addr = np.argpartition(hdiag.real, nroots - 1)[:nroots]
+        addr = addr[np.argsort(hdiag.real[addr], kind="stable")]
+    except AttributeError:
+        addr = np.argsort(hdiag.real, kind="stable")[:nroots]
+    t0 = _timer_debug1(log_obj, "k-FCI get_init_guess sort hdiag", t0)
+
+    ci0 = []
+    for i in range(nroots):
+        x = np.zeros(ndet, dtype=dtype)
+        x[int(addr[i])] = 1.0
+        ci0.append(x)
+    _timer_debug1(log_obj, "k-FCI get_init_guess vectors", t0)
+    return ci0
+
+
 def make_hamiltonian_k(h1e, eri, norb, nelec, nkpts, target_k=0,
                        link_index=None, contract_map=None, log_obj=None,
                        kmom=None, contract_fn=None):
@@ -1072,3 +1104,28 @@ def make_hamiltonian_k(h1e, eri, norb, nelec, nkpts, target_k=0,
 
     _timer_debug1(log_obj, "k-FCI make_hamiltonian columns", t0)
     return hmat
+
+
+def energy(h1e, eri, fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
+           contract_map=None, log_obj=None, kmom=None, contract_fn=None):
+    '''
+    Compute the k-FCI electronic energy for a CI vector.
+    The one-electron and two-electron Hamiltonian contractions are evaluated
+    separately; h1e is not absorbed into eri.
+    '''
+    t0 = _timer_start()
+    ci0 = np.asarray(fcivec)
+    if contract_fn is None:
+        sigma = contract_ham_k(
+            h1e, eri, ci0, norb, nelec, nkpts, target_k,
+            link_index=link_index, contract_map=contract_map,
+            log_obj=log_obj, kmom=kmom)
+    else:
+        sigma = contract_fn(
+            h1e, eri, ci0, norb, nelec, nkpts=nkpts,
+            target_k=target_k, link_index=link_index,
+            contract_map=contract_map)
+    t0 = _timer_debug1(log_obj, "k-FCI energy contract_ham", t0)
+    e = np.vdot(ci0, sigma)
+    _timer_debug1(log_obj, "k-FCI energy dot", t0)
+    return e
