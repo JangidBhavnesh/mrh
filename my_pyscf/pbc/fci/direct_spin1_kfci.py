@@ -11,7 +11,7 @@ from pyscf import lib
 from pyscf.fci.addons import _unpack_nelec
 
 from mrh.lib.helper import load_library
-from mrh.my_pyscf.pbc.fci import kfci_helper, kcistrings
+from mrh.my_pyscf.pbc.fci import kfci_helper, kcistrings, krdm_helper
 from mrh.my_pyscf.pbc.fci.kcistrings import (
     gen_k_sector_linkstr_info,
     gen_k_sector_maps,
@@ -1131,6 +1131,58 @@ def energy(h1e, eri, fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
     e = np.vdot(ci0, sigma)
     _timer_debug1(log_obj, "k-FCI energy dot", t0)
     return e
+
+
+def make_rdm1s(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
+               spin=None, kmom=None, kconserv=None):
+    """Build spin-separated one-particle RDMs for a k-FCI vector."""
+    return krdm_helper.make_rdm1s(
+        fcivec, norb, nelec, nkpts, target_k=target_k,
+        link_index=link_index, spin=spin, kmom=kmom, kconserv=kconserv)
+
+
+def make_rdm1(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
+              spin=None, kmom=None, kconserv=None):
+    """Build the spin-summed one-particle RDM for a k-FCI vector."""
+    return krdm_helper.make_rdm1(
+        fcivec, norb, nelec, nkpts, target_k=target_k,
+        link_index=link_index, spin=spin, kmom=kmom, kconserv=kconserv)
+
+
+def make_rdm12s(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
+                reorder=True, spin=None, kmom=None, kconserv=None):
+    """Build spin-separated one- and two-particle RDMs."""
+    return krdm_helper.make_rdm12s(
+        fcivec, norb, nelec, nkpts, target_k=target_k,
+        link_index=link_index, reorder=reorder, spin=spin, kmom=kmom,
+        kconserv=kconserv)
+
+
+def make_rdm12(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
+               reorder=True, spin=None, kmom=None, kconserv=None):
+    """Build spin-summed one- and two-particle RDMs."""
+    return krdm_helper.make_rdm12(
+        fcivec, norb, nelec, nkpts, target_k=target_k,
+        link_index=link_index, reorder=reorder, spin=spin, kmom=kmom,
+        kconserv=kconserv)
+
+
+def contract_ss(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
+                spin=None, contract_map=None, kmom=None, kconserv=None):
+    """Apply the spin-squared operator to a k-FCI vector."""
+    return krdm_helper.contract_ss(
+        fcivec, norb, nelec, nkpts, target_k=target_k,
+        link_index=link_index, spin=spin, contract_map=contract_map,
+        kmom=kmom, kconserv=kconserv)
+
+
+def spin_square(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
+                spin=None, kmom=None, kconserv=None, **kwargs):
+    """Evaluate spin-squared for a k-FCI vector."""
+    return krdm_helper.spin_square(
+        fcivec, norb, nelec, nkpts, target_k=target_k,
+        link_index=link_index, spin=spin, kmom=kmom, kconserv=kconserv,
+        **kwargs)
 
 
 def _make_diag_precond(hdiag, level_shift=1e-3):
