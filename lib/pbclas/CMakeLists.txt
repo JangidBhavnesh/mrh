@@ -34,3 +34,12 @@ set_target_properties (clib_mrh_cplx_csf PROPERTIES
     CLEAN_DIRECT_OUTPUT 1
     LIBRARY_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}
     OUTPUT_NAME "cplx_csf")
+
+set (PBC_FCI_KCISTRING_SOURCE_FILES "pbc_kcistring.c")
+add_library (clib_mrh_pbc_kcistring SHARED ${PBC_FCI_KCISTRING_SOURCE_FILES})
+target_link_libraries(clib_mrh_pbc_kcistring ${FCI_LIBRARY} ${LAPACK_LIBRARIES})
+set_target_properties (clib_mrh_pbc_kcistring PROPERTIES
+      LINKER_LANGUAGE C
+      CLEAN_DIRECT_OUTPUT 1
+      LIBRARY_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}
+      OUTPUT_NAME "pbc_kcistring")
