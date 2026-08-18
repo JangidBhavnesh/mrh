@@ -43,3 +43,21 @@ set_target_properties (clib_mrh_pbc_kcistring PROPERTIES
       CLEAN_DIRECT_OUTPUT 1
       LIBRARY_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}
       OUTPUT_NAME "pbc_kcistring")
+
+set (PBC_FCI_CONTRACT_K_SOURCE_FILES "pbc_fci_contract_k.c")
+add_library (clib_mrh_pbc_fci_contract_k SHARED ${PBC_FCI_CONTRACT_K_SOURCE_FILES})
+target_link_libraries(clib_mrh_pbc_fci_contract_k ${FCI_LIBRARY} ${LAPACK_LIBRARIES})
+set_target_properties (clib_mrh_pbc_fci_contract_k PROPERTIES
+      LINKER_LANGUAGE C
+      CLEAN_DIRECT_OUTPUT 1
+      LIBRARY_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}
+      OUTPUT_NAME "pbc_fci_contract_k")
+
+set (PBC_KFCI_HDIAG_SOURCE_FILES "pbc_kfci_hdiag.c")
+add_library (clib_mrh_pbc_kfci_hdiag SHARED ${PBC_KFCI_HDIAG_SOURCE_FILES})
+target_link_libraries(clib_mrh_pbc_kfci_hdiag ${FCI_LIBRARY} ${LAPACK_LIBRARIES})
+set_target_properties (clib_mrh_pbc_kfci_hdiag PROPERTIES
+      LINKER_LANGUAGE C
+      CLEAN_DIRECT_OUTPUT 1
+      LIBRARY_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}
+      OUTPUT_NAME "pbc_kfci_hdiag")
