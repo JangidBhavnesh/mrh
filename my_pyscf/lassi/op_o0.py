@@ -955,6 +955,63 @@ def roots_make_rdm12s (las, ci_fr, nelec_frs, si, orbsym=None, wfnsym=None, **kw
         rdm2s.append (d2)
     return np.stack (rdm1s, axis=0), np.stack (rdm2s, axis=0)
 
+def _make_rdm3s_spinless_pair (ci_bra, ci_ket, norb, nelec_bra, nelec_ket):
+    """Build a spin-separated transition 3-RDM from full-CAS CI vectors."""
+    from pyscf.fci.direct_spin1 import civec_spinless_repr
+    if sum (nelec_bra) != sum (nelec_ket):
+        return np.zeros ((4,) + (norb,) * 6)
+    nelec = sum (nelec_bra)
+    ci_bra_sl = civec_spinless_repr ([ci_bra], norb, [nelec_bra])
+    ci_ket_sl = civec_spinless_repr ([ci_ket], norb, [nelec_ket])
+    dm1, dm2, dm3 = fci.rdm.make_dm123 (
+        'FCI3pdm_kern_sf', ci_bra_sl, ci_ket_sl, 2*norb, (nelec, 0))
+    dm3 = fci.rdm.reorder_dm123 (dm1, dm2, dm3)[2]
+    n = norb
+    return np.stack ((
+        dm3[:n, :n, :n, :n, :n, :n],
+        dm3[:n, :n, :n, :n, n:, n:],
+        dm3[:n, :n, n:, n:, n:, n:],
+        dm3[n:, n:, n:, n:, n:, n:],
+    ), axis=0)
+
+def root_make_rdm3s (las, ci_fr, nelec_frs, si, ix, **kwargs):
+    """Build the spin-separated 3-RDM of one LASSI eigenstate."""
+    norb = sum (las.ncas_sub)
+    ci_r, nelec_r = ci_outer_product (ci_fr, las.ncas_sub, nelec_frs)
+    if len ({sum (nelec) for nelec in nelec_r}) != 1:
+        raise NotImplementedError ('States with different particle numbers')
+    coeffs = si[:len (nelec_r), ix]
+    dtype = np.result_type (si.dtype, ci_fr[-1][0].dtype)
+
+    # Within an LASSI symmetry block all product states normally have the same
+    # global (Nalpha,Nbeta). Build the weighted full-CAS CI vector first and
+    # evaluate its 3-RDM once. This is algebraically identical to the double
+    # transition-density sum below, but avoids O(nproduct**2) calls to the FCI
+    # 3-RDM kernel for mLAS states.
+    if len ({tuple (nelec) for nelec in nelec_r}) == 1:
+        ci_lsi = np.zeros_like (ci_r[0], dtype=dtype)
+        for weight, ci_state in zip (coeffs, ci_r):
+            ci_lsi += weight * ci_state
+        return _make_rdm3s_spinless_pair (
+            ci_lsi, ci_lsi, norb, nelec_r[0], nelec_r[0])
+
+    # General fallback for blocks containing more than one spin-projection
+    # sector. Cross-sector matrix elements vanish.
+    rdm3s = np.zeros ((4,) + (norb,) * 6, dtype=dtype)
+    for i, ci_bra in enumerate (ci_r):
+        for j, ci_ket in enumerate (ci_r):
+            weight = coeffs[i].conj () * coeffs[j]
+            if abs (weight) < 1e-14 or nelec_r[i] != nelec_r[j]:
+                continue
+            rdm3s += weight * _make_rdm3s_spinless_pair (
+                ci_bra, ci_ket, norb, nelec_r[i], nelec_r[j])
+    return rdm3s
+
+def roots_make_rdm3s (las, ci_fr, nelec_frs, si, **kwargs):
+    """Build spin-separated 3-RDMs for all columns of an LASSI SI vector."""
+    return np.stack ([root_make_rdm3s (las, ci_fr, nelec_frs, si, ix, **kwargs)
+                      for ix in range (si.shape[1])], axis=0)
+
 def roots_trans_rdm12s (las, ci_fr, nelec_frs, si_bra, si_ket, orbsym=None, wfnsym=None, **kwargs):
     '''Build LAS state interaction reduced transition density matrices for final
     LASSI eigenstates.
@@ -1055,5 +1112,3 @@ if __name__ == '__main__':
     print (las.converged, e_states - (e0 + np.diag (ham_eff)))
 
 gen_contract_op_si_hdiag = functools.partial (citools._fake_gen_contract_op_si_hdiag, ham)
-
-

@@ -113,93 +113,43 @@ def kLASCI(kmf, ncas, nelecas, ncore=None, spin_mult=None, kmesh=None,
 
     return klas
 
-@lib.with_doc(casci.h1e_for_cas.__doc__)
+@lib.with_doc(casci.h1e_for_cas.__doc__ + """
+
+    Notes:
+        Unlike k-CASCI, k-LASCI returns the active-space one-electron
+        Hamiltonian in the Wannier basis. The frozen-core contribution and
+        k-point AO-to-MO projection are shared with k-CASCI; only the final
+        representation change is different.
+""")
 def h1e_for_cas(mc, mo_coeff=None, ncas=None, ncore=None):
-    # The difference between this function and one defined in pbc.mcscf.casci is that here 
-    # we are constructing the h1e in the Wannier basis, which is different from the k-space MO basis 
-    # used in standard PBCASCI.
-    if mo_coeff is None: mo_coeff = mc.mo_coeff
-    if ncas is None: ncas = mc.ncas
-    if ncore is None: ncore = mc.ncore
-    
-    cell = mc.cell
-    nao = cell.nao_nr()
-    kpts = mc._scf.kpts
-    kmesh = mc.kmesh
-    dtype = mo_coeff[0].dtype
-    nkpts = mc.nkpts
+    h1e_kpts, ecore = mc.h1e_kpts_for_cas(
+        mo_coeff=mo_coeff, ncas=ncas, ncore=ncore,
+    )
+    h1eff_wann = _convert_h1e_mo_k_to_wann(
+        mc._scf, mc.kmesh, h1e_kpts,
+    )
+    return h1eff_wann, ecore
 
-    mo_core_kpts = [mo[:, :ncore] for mo in mo_coeff]
-    mo_act_kpts = [mo[:, ncore:ncore+ncas] for mo in mo_coeff]
+@lib.with_doc(casci.PBCCASCI.get_h2eff.__doc__ + """
 
-    h1ao_k = mc.get_hcore().astype(dtype)
+    Notes:
+        This k-LASCI implementation returns the two-electron integrals in the
+        Wannier basis. It first transforms the integrals to the k-point active
+        MO basis and then applies the k-to-Wannier transformation.
 
-    # Remember, I am multiplying by nkpts here because total energy would be divided by nkpts later.
-    ecore = mc.energy_nuc() * nkpts
-    if ncore == 0:
-        corevhf_kpts = 0
-    else:
-        coredm_kpts = np.asarray([2.0 * (mo_core_kpts[k] @ mo_core_kpts[k].conj().T) 
-                                  for k in range(nkpts)], dtype=dtype)
-        # corevhf_kpts = mc._scf.get_veff(cell, coredm_kpts, hermi=1)
-        corevhf_kpts = mc.get_veff(cell, coredm_kpts, hermi=1, kpts=mc._scf.kpts)
-        fock = h1ao_k + 0.5 * corevhf_kpts
-        ecore += sum(np.einsum('ij,ji', coredm_kpts[k], fock[k]) for k in range(nkpts))
-        fock = None  # Free memory
+    Args:
+        mc : PBCCASCI
+            Periodic CASCI object.
+        mo_coeff : list or ndarray of shape (nkpts, nao, nmo)
+            MO coefficients at each k-point. If not provided, ``mc.mo_coeff``
+            is used.
 
-    h1ao_k += corevhf_kpts
-
-    # Fourier transform h1ao_k to real space to get h1ao_R, which is the one we will use 
-    # for constructing the effective 1e Hamiltonian in the Wannier basis.
-    ts = TranslationSymm(cell, kmesh)
-    R_indices = ts.R_indices
-    R_cart = np.array([ts.lattice_cart(R) for R in R_indices])
-    ncell = len(R_indices)
-
-    assert nkpts == ncell
-    assert np.prod(kmesh) == nkpts
-
-    # h1ao_R = np.zeros((ncell, nao, ncell, nao), dtype=dtype)
-    # for ik, k in enumerate(kpts):
-    #     hk = h1ao_k[ik]
-    #     for iR, Rv in enumerate(R_cart):
-    #         for iS, Sv in enumerate(R_cart):
-    #             phase = np.exp(1j * np.dot(k, Rv - Sv))
-    #             h1ao_R[iR, :, iS, :] += phase * hk
-    # h1ao_R /= nkpts
-    phase_kR = np.exp(1j * np.einsum('kx,Rx->kR', kpts, R_cart))
-    h1ao_R = np.einsum('kR,kS,kij->RiSj',
-                       phase_kR, phase_kR.conj(), h1ao_k,
-                       optimize=True,) / nkpts
-    h1ao_R = h1ao_R.reshape(nkpts*nao, nkpts*nao)
-
-    wannier_orb, R_indices_check = get_wannier_orbs(mc._scf, kmesh, mo_act_kpts)[:2]
-    wannier_orb = wannier_orb.reshape(nkpts*nao, nkpts*ncas)
-
-    # Sanity check to make sure that the R indices from TranslationSymm and get_wannier_orbs match.
-    assert np.array_equal(R_indices, R_indices_check), "Something is wrong."
-    
-    # Transform h1ao_R to the Wannier basis.
-    h1eff_R = reduce(np.dot, (wannier_orb.conj().T, h1ao_R, wannier_orb))
-    return h1eff_R, ecore
-
-@lib.with_doc(casci.PBCCASCI.get_h2eff.__doc__)
+    Returns:
+        h2eff_R : ndarray
+            Two-electron integrals in the Wannier basis with shape
+            ``(nkpts*ncas, nkpts*ncas, nkpts*ncas, nkpts*ncas)``.
+""")
 def h2e_for_cas(mc, mo_coeff=None):
-    '''
-    AO2MO Transformation of the 2e integrals in the Wannier basis for k-LASCI.
-    The way we do this is by first transforming the 2e integrals from k-space MO basis to 
-    real space MO basis, and then transforming it to the Wannier basis using the wannier 
-    orbital coefficients.
-    args:
-        mc: PBCCASCI object
-            periodic CASCI object
-        mo_coeff: list/np.ndarray (nkpts, nao, nmo)
-            MO coefficients for each k-point. If None, it will be taken from the 
-            PBCCASCI object.
-    returns:
-        h2eff_R: ndarray (nkpts*ncas, nkpts*ncas, nkpts*ncas, nkpts*ncas)
-            2e integrals in the Wannier basis in real space.
-    '''
     kmf = mc._scf
     cell = kmf.cell
     ncore = mc.ncore
@@ -235,7 +185,7 @@ def h2e_for_cas(mc, mo_coeff=None):
     assert eris.shape == (nkpts*ncas, nkpts*ncas, nkpts*ncas, nkpts*ncas)
     return eris
 
-def convert_h1e_mo_k_to_wann(kmf, kmesh, h1e_mo_k):
+def _convert_h1e_mo_k_to_wann(kmf, kmesh, h1e_mo_k):
     '''
     Convert h1e from k-space localized/block MO basis to Wannier basis.
     args:
@@ -287,7 +237,13 @@ def convert_h1e_mo_k_to_wann(kmf, kmesh, h1e_mo_k):
     h1eff_R = h1eff_R.reshape(ncell * norb, ncell * norb)
     return h1eff_R
 
-@lib.with_doc(mollasci.h1e_for_las.__doc__)
+@lib.with_doc(mollasci.h1e_for_las.__doc__ + """
+
+    Notes:
+        In the periodic implementation, ``mo_coeff`` has shape
+        ``(nkpts, nao, nmo)`` and the active-space Hamiltonian and density
+        matrices are represented in the Wannier basis.
+""")
 def h1e_for_las (las, mo_coeff=None, ncas=None, ncore=None, nelecas=None, 
                  ci=None, ncas_sub=None,
                  nelecas_sub=None, veff=None, h2eff_sub=None, casdm1s_sub=None, casdm1frs=None,
@@ -323,7 +279,7 @@ def h1e_for_las (las, mo_coeff=None, ncas=None, ncore=None, nelecas=None,
         moH_cas = mo_cas.conj ().T
         h1e_k[:, k] = moH_cas @ (hcore_k[k][None,:,:] + veff[:, k, :, :]) @ mo_cas
 
-    h1e_mo_wann = np.array([convert_h1e_mo_k_to_wann(las._scf, las.kmesh, h1e_k[s]) 
+    h1e_mo_wann = np.array([_convert_h1e_mo_k_to_wann(las._scf, las.kmesh, h1e_k[s]) 
                             for s in range(2)])
     h1e_k = hcore_k = None
 
@@ -357,7 +313,13 @@ def h1e_for_las (las, mo_coeff=None, ncas=None, ncore=None, nelecas=None,
 
     return h1e_fr
 
-@lib.with_doc(mollasci.kernel.__doc__)
+@lib.with_doc(mollasci.kernel.__doc__ + """
+
+    Notes:
+        This is the periodic k-LASCI kernel. The orbital coefficients carry a
+        leading k-point dimension, and the reported total and CAS energies are
+        normalized by the number of k-points.
+""")
 def kernel (las, mo_coeff=None, ci0=None, lroots=None, lweights=None, verbose=0,
                assert_no_dupes=False, _dry_run=False):
     if assert_no_dupes: mollasci.assert_no_duplicates (las)
@@ -460,7 +422,7 @@ def kernel (las, mo_coeff=None, ci0=None, lroots=None, lweights=None, verbose=0,
     return converged, e_tot, e_states, e_cas, e_lexc, ci1
 
 
-def convert_dmao_R_to_dmao_k(kmf, kmesh, dm_R):
+def _convert_dmao_R_to_dmao_k(kmf, kmesh, dm_R):
     '''
     Convert the density matrix from real space to k-space.
     '''
@@ -614,7 +576,12 @@ class PBCLASCINoSymm(casci.PBCCASCI, LASCINoSymm):
     get_h2cas = h2e_for_cas = h2e_for_cas 
     localize_init_guess = klasci_guess.localize_init_guess
     
-    @lib.with_doc(kernel.__doc__)
+    @lib.with_doc(kernel.__doc__ + """
+
+        Notes:
+            This method stores the results returned by the module-level
+            periodic k-LASCI kernel on the current object.
+    """)
     def kernel (self, mo_coeff=None, ci0=None, lroots=None, lweights=None, verbose=None,
                assert_no_dupes=False, _dry_run=False):
         nkpts = len(self.kpts)
@@ -668,7 +635,12 @@ class PBCLASCINoSymm(casci.PBCCASCI, LASCINoSymm):
         mo = mo[:,:self.ncas_sub[idx]]
         return mo
     
-    @lib.with_doc(mollasci.LASCINoSymm.make_rdm1s.__doc__)
+    @lib.with_doc(mollasci.LASCINoSymm.make_casdm1s_sub.__doc__ + """
+
+        Notes:
+            The returned fragment density matrices are expressed in the
+            Wannier active-orbital basis.
+    """)
     def make_casdm1s_sub (self, ci=None, ncas_sub=None, nelecas_sub=None,
             casdm1frs=None, w=None, **kwargs):
         if casdm1frs is None:
@@ -710,7 +682,7 @@ class PBCLASCINoSymm(casci.PBCCASCI, LASCINoSymm):
             f"Shape mismatch: {rdm1s_ao_wann.shape} != (2, {nkpts*nao}, {nkpts*nao})"
         
         rdm1s_ao_k = np.array([
-            convert_dmao_R_to_dmao_k(self._scf, self.kmesh, rdm1s_ao_wann[s]) 
+            _convert_dmao_R_to_dmao_k(self._scf, self.kmesh, rdm1s_ao_wann[s]) 
             for s in range(2)])
         
         assert rdm1s_ao_k.shape == (2, nkpts, nao, nao), \
