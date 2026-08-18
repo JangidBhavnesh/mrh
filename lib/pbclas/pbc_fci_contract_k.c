@@ -1,6 +1,7 @@
 #include <complex.h>
 #include <omp.h>
 #include <stdlib.h>
+#include "pbc_kfci_common.h"
 #include "vhf/fblas.h"
 
 /*
@@ -22,26 +23,9 @@ Author: Bhavnesh Jangid
  * - Block lookup tables, task tables, group-key tables, prefixes, locks, and
  *   contraction work buffers are temporary and freed by their allocating
  *   routine.
- * - make_block_tables and build_ab_tasks transfer their allocated arrays to
- *   the caller on success and free them locally on failure.
+ * - pbc_kfci_make_block_tables and build_ab_tasks transfer their allocated
+ *   arrays to the caller on success and free them locally on failure.
  */
-
-#define BLOCK_KA      0
-#define BLOCK_KB      1
-#define BLOCK_NA      2
-#define BLOCK_NB      3
-#define BLOCK_OFFSET  4
-#define BLOCK_SIZE    5
-
-#define LINK_CRE    0
-#define LINK_DES    1
-#define LINK_TARGET 2
-#define LINK_SIGN   3
-#define LINK_K0     4
-#define LINK_K_CRE  5
-#define LINK_K_DES  6
-#define LINK_DK     7
-#define NLINK_FIELDS 8
 
 #define AB_TASK_CHUNK 1048576
 
@@ -50,36 +34,6 @@ typedef struct {
         int *indices;
         int nlinks_total;
 } LinkOrderK;
-
-/** Return x modulo n in the range [0, n - 1]. */
-static inline int mod_pos(int x, int n)
-{
-        int r = x % n;
-        return (r < 0) ? r + n : r;
-}
-
-/** Flatten k-point and active-orbital indices into the ERI storage index. */
-static inline long long eri_index_k(int kp, int kq, int kr,
-                                    int p, int q, int r, int s,
-                                    int nkpts, int ncas)
-{
-        long long idx = kp;
-        idx = idx * nkpts + kq;
-        idx = idx * nkpts + kr;
-        idx = idx * ncas + p;
-        idx = idx * ncas + q;
-        idx = idx * ncas + r;
-        idx = idx * ncas + s;
-        return idx;
-}
-
-/** Set n complex values to zero. */
-static void zset0(double complex *x, size_t n)
-{
-        for (size_t i = 0; i < n; i++) {
-                x[i] = 0.0 + 0.0 * I;
-        }
-}
 
 /** Add n complex values from in to out. */
 static void zadd(double complex *out, double complex *in, size_t n)
@@ -236,64 +190,6 @@ static int make_link_order_target_k(int *link_index, int nstr, int nlink,
 }
 
 /**
- * Build lookup arrays for packed CI momentum blocks.
- * @param nkpts Number of k-points.
- * @param nblocks Number of packed CI blocks.
- * @param blocks Input block records.
- * @param p_block_offset Output block offsets; caller owns the array.
- * @param p_block_na Output alpha dimensions; caller owns the array.
- * @param p_block_nb Output beta dimensions; caller owns the array.
- * @param p_ndet Output total packed CI-vector size.
- * @return 0 on success; 1 on allocation failure.
- */
-static int make_block_tables(int nkpts, int nblocks, int *blocks,
-                             int **p_block_offset,
-                             int **p_block_na,
-                             int **p_block_nb,
-                             int *p_ndet)
-{
-        int table_size = nkpts * nkpts;
-        int ndet = 0;
-        int *block_offset = malloc(sizeof(int) * (size_t)table_size);
-        int *block_na = malloc(sizeof(int) * (size_t)table_size);
-        int *block_nb = malloc(sizeof(int) * (size_t)table_size);
-
-        if (block_offset == NULL || block_na == NULL || block_nb == NULL) {
-                free(block_offset);
-                free(block_na);
-                free(block_nb);
-                return 1;
-        }
-
-        for (int i = 0; i < table_size; i++) {
-                block_offset[i] = -1;
-                block_na[i] = 0;
-                block_nb[i] = 0;
-        }
-
-        for (int iblk = 0; iblk < nblocks; iblk++) {
-                int *blk = blocks + iblk * 6;
-                int ka = blk[BLOCK_KA];
-                int kb = blk[BLOCK_KB];
-                int offset = blk[BLOCK_OFFSET];
-                int size = blk[BLOCK_SIZE];
-                int key = ka * nkpts + kb;
-                block_offset[key] = offset;
-                block_na[key] = blk[BLOCK_NA];
-                block_nb[key] = blk[BLOCK_NB];
-                if (offset + size > ndet) {
-                        ndet = offset + size;
-                }
-        }
-
-        *p_block_offset = block_offset;
-        *p_block_na = block_na;
-        *p_block_nb = block_nb;
-        *p_ndet = ndet;
-        return 0;
-}
-
-/**
  * Apply the one-electron Hamiltonian to a packed k-sector CI vector.
  * @param h1e One-electron integrals arranged by k-point.
  * @param ci0 Input packed CI vector.
@@ -340,7 +236,7 @@ void FCIcontract_1e_k(double complex *h1e,
                 }
         }
 
-        zset0(ci1, (size_t)ndet);
+        pbc_kfci_zset0(ci1, (size_t)ndet);
 
         int *alpha_prefix = malloc(sizeof(int) * (size_t)(nblocks + 1));
         int *beta_prefix = malloc(sizeof(int) * (size_t)(nblocks + 1));
@@ -517,7 +413,7 @@ void FCIcontract_ss_k(double complex *ci0,
         int *block_na = NULL;
         int *block_nb = NULL;
 
-        if (make_block_tables(nkpts, nblocks, blocks,
+        if (pbc_kfci_make_block_tables(nkpts, nblocks, blocks,
                               &block_offset, &block_na, &block_nb,
                               &ndet) != 0) {
                 return;
@@ -712,7 +608,7 @@ void FCIcontract_2e_k_stream_ab_old(double complex *eri,
         order_b.indices = NULL;
         order_b.nlinks_total = 0;
 
-        if (make_block_tables(nkpts, nblocks, blocks,
+        if (pbc_kfci_make_block_tables(nkpts, nblocks, blocks,
                               &block_offset, &block_na, &block_nb,
                               &ndet) != 0) {
                 return;
@@ -897,7 +793,7 @@ void FCIcontract_2e_k_stream_ab(double complex *eri,
         order_b.indices = NULL;
         order_b.nlinks_total = 0;
 
-        if (make_block_tables(nkpts, nblocks, blocks,
+        if (pbc_kfci_make_block_tables(nkpts, nblocks, blocks,
                               &block_offset, &block_na, &block_nb,
                               &ndet) != 0) {
                 return;
@@ -1228,7 +1124,7 @@ static void contract_ab_sparse_task(double complex *ci0,
                                     long long *ab_eri_idx_ab,
                                     long long *ab_eri_idx_ba)
 {
-        zset0(ab_buf, (size_t)dst_size);
+        pbc_kfci_zset0(ab_buf, (size_t)dst_size);
         for (int i = entry0; i < entry1; i++) {
                 double complex coef =
                         (eri[ab_eri_idx_ab[i]] +
@@ -1274,7 +1170,7 @@ static void contract_aa_zgemm_struct(double complex *eri,
                 int entry0 = group[2];
                 int entry1 = group[3];
 
-                zset0(amat, (size_t)dst_na * na);
+                pbc_kfci_zset0(amat, (size_t)dst_na * na);
                 for (int i = entry0; i < entry1; i++) {
                         amat[aa_dst_addr[i] * (size_t)na + aa_src_addr[i]] +=
                                 eri[aa_eri_idx[i]] * (double)aa_sign[i];
@@ -1312,7 +1208,7 @@ static void contract_aa_zgemm_group(double complex *eri,
                 return;
         }
 
-        zset0(amat, (size_t)dst_na * na);
+        pbc_kfci_zset0(amat, (size_t)dst_na * na);
         for (int i = entry0; i < entry1; i++) {
                 amat[aa_dst_addr[i] * (size_t)na + aa_src_addr[i]] +=
                         eri[aa_eri_idx[i]] * (double)aa_sign[i];
@@ -1358,7 +1254,7 @@ static void contract_bb_zgemm_struct(double complex *eri,
                 int entry0 = group[2];
                 int entry1 = group[3];
 
-                zset0(bmat, (size_t)nb * dst_nb);
+                pbc_kfci_zset0(bmat, (size_t)nb * dst_nb);
                 for (int i = entry0; i < entry1; i++) {
                         bmat[bb_src_addr[i] * (size_t)dst_nb +
                              bb_dst_addr[i]] +=
@@ -1397,7 +1293,7 @@ static void contract_bb_zgemm_group(double complex *eri,
                 return;
         }
 
-        zset0(bmat, (size_t)nb * dst_nb);
+        pbc_kfci_zset0(bmat, (size_t)nb * dst_nb);
         for (int i = entry0; i < entry1; i++) {
                 bmat[bb_src_addr[i] * (size_t)dst_nb + bb_dst_addr[i]] +=
                         eri[bb_eri_idx[i]] * (double)bb_sign[i];
@@ -1475,7 +1371,7 @@ void FCIcontract_2e_k(double complex *eri,
         int *block_na = NULL;
         int *block_nb = NULL;
 
-        if (make_block_tables(nkpts, nblocks, blocks,
+        if (pbc_kfci_make_block_tables(nkpts, nblocks, blocks,
                               &block_offset, &block_na, &block_nb,
                               &ndet) != 0) {
                 return;
@@ -1525,7 +1421,7 @@ void FCIcontract_2e_k(double complex *eri,
         size_t aa_group_size = (size_t)(aa_ngroups > 0 ? aa_ngroups : 1);
         size_t bb_group_size = (size_t)(bb_ngroups > 0 ? bb_ngroups : 1);
 
-        zset0(ci1, (size_t)ndet);
+        pbc_kfci_zset0(ci1, (size_t)ndet);
         int status = 0;
         int ab_ntasks = 0;
         int *ab_task_group = NULL;
@@ -1674,7 +1570,7 @@ void FCIcontract_2e_k(double complex *eri,
                         return;
                 }
 
-                zset0(ci1, ndet_size);
+                pbc_kfci_zset0(ci1, ndet_size);
                 for (int iblk = 0; iblk < nblocks; iblk++) {
                         int *blk = blocks + iblk * 6;
                         int ka = blk[BLOCK_KA];
