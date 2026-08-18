@@ -7,9 +7,10 @@ import types
 import warnings
 
 import numpy as np
+import scipy.linalg
 
 from pyscf import lib
-from pyscf.fci import cistring
+from pyscf.fci import cistring, direct_spin1
 from pyscf.fci.addons import _unpack_nelec
 
 from mrh.lib.helper import load_library
@@ -33,6 +34,7 @@ from mrh.my_pyscf.pbc.fci.kfci_helper import (
 
 logger = lib.logger
 HDIAG_IMAG_TOL = 1e-3
+HERMI_THRESH = 1e-8
 libpbcfci_k = None
 libpbckfci_hdiag = None
 _UINT8_POPCOUNT = np.asarray(
@@ -1533,3 +1535,270 @@ def fix_spin_(fciobj, shift=0.1, ss=None, **kwargs):
     fciobj.__class__ = spin_solver.__class__
     fciobj.__dict__ = spin_solver.__dict__
     return fciobj
+
+
+class FCISolver(direct_spin1.FCISolver):
+    """FCI solver restricted to one total-momentum sector."""
+
+    _keys = direct_spin1.FCISolver._keys | {
+        "nkpts", "target_k", "kpts", "kmesh", "kconserv", "kmom"
+    }
+
+    def __init__(self, *args, **kwargs):
+        nkpts = kwargs.pop("nkpts", None)
+        target_k = kwargs.pop("target_k", 0)
+        kpts = kwargs.pop("kpts", None)
+        kmesh = kwargs.pop("kmesh", None)
+        kconserv = kwargs.pop("kconserv", None)
+        super().__init__(*args, **kwargs)
+        self.nkpts = nkpts
+        self.target_k = target_k
+        self.kpts = kpts
+        self.kmesh = kmesh
+        self.kconserv = kconserv
+        self.kmom = None
+        self.davidson_only = False
+
+    def _resolve_sector(self, nkpts=None, target_k=None):
+        """Resolve optional sector arguments against the solver defaults."""
+        if nkpts is None:
+            nkpts = self.nkpts
+        if nkpts is None:
+            raise ValueError("nkpts must be supplied or set on the solver")
+        if target_k is None:
+            target_k = self.target_k
+        return int(nkpts), int(target_k) % int(nkpts)
+
+    def get_kmom(self, nkpts=None):
+        """Return cached table-driven k-point arithmetic."""
+        nkpts, _ = self._resolve_sector(nkpts)
+        if self.kmom is not None and self.kmom.nkpts == nkpts:
+            return self.kmom
+        cell = getattr(self, "cell", None)
+        if cell is None:
+            cell = getattr(self, "mol", None)
+        self.kmom = kcistrings.make_kpoint_momentum(
+            nkpts, cell=cell, kpts=self.kpts, kmesh=self.kmesh,
+            kconserv=self.kconserv)
+        self.kconserv = self.kmom.kconserv
+        return self.kmom
+
+    def contract_1e(self, h1e, fcivec, norb, nelec, nkpts=None,
+                    target_k=None, link_index=None, contract_map=None):
+        """Contract the one-electron Hamiltonian with a sector CI vector."""
+        nkpts, target_k = self._resolve_sector(nkpts, target_k)
+        t0 = _timer_start()
+        ci1 = contract_1e_k(
+            h1e, fcivec, norb, nelec, nkpts, target_k,
+            link_index=link_index, contract_map=contract_map, log_obj=self,
+            kmom=self.get_kmom(nkpts))
+        _timer_debug1(self, "k-FCI contract_1e", t0)
+        return ci1
+
+    def contract_2e(self, eri, fcivec, norb, nelec, nkpts=None,
+                    target_k=None, link_index=None, contract_map=None):
+        """Contract the two-electron Hamiltonian with a sector CI vector."""
+        nkpts, target_k = self._resolve_sector(nkpts, target_k)
+        t0 = _timer_start()
+        ci1 = contract_2e_k(
+            eri, fcivec, norb, nelec, nkpts, target_k,
+            link_index=link_index, contract_map=contract_map, log_obj=self,
+            kmom=self.get_kmom(nkpts))
+        _timer_debug1(self, "k-FCI contract_2e", t0)
+        return ci1
+
+    def contract_ham(self, h1e, eri, fcivec, norb, nelec, nkpts=None,
+                     target_k=None, link_index=None, contract_map=None):
+        """Contract the complete electronic Hamiltonian."""
+        nkpts, target_k = self._resolve_sector(nkpts, target_k)
+        t0 = _timer_start()
+        contract_map = _as_contract_map(
+            norb, nelec, nkpts, target_k, link_index=link_index,
+            contract_map=contract_map, log_obj=self,
+            kmom=self.get_kmom(nkpts))
+        link_index = contract_map.link_index
+        ci1 = self.contract_1e(
+            h1e, fcivec, norb, nelec, nkpts=nkpts, target_k=target_k,
+            link_index=link_index, contract_map=contract_map)
+        ci1 += self.contract_2e(
+            eri, fcivec, norb, nelec, nkpts=nkpts, target_k=target_k,
+            link_index=link_index, contract_map=contract_map)
+        _timer_debug1(self, "k-FCI contract_ham", t0)
+        return ci1
+
+    def make_hdiag(self, h1e, eri, norb, nelec, nkpts=None, target_k=None,
+                   link_index=None, compress=False, contract_map=None):
+        """Build the Hamiltonian diagonal for the selected sector."""
+        del compress
+        nkpts, target_k = self._resolve_sector(nkpts, target_k)
+        t0 = _timer_start()
+        nelec = _unpack_nelec(nelec, self.spin)
+        hdiag = make_hdiag(
+            h1e, eri, norb, nelec, nkpts, target_k,
+            link_index=link_index, contract_map=contract_map, log_obj=self,
+            kmom=self.get_kmom(nkpts))
+        _timer_debug1(self, "k-FCI make_hdiag", t0)
+        return hdiag
+
+    def make_hamiltonian(self, h1e, eri, norb, nelec, nkpts=None,
+                         target_k=None, link_index=None, contract_map=None):
+        """Construct the explicit Hamiltonian for the selected sector."""
+        nkpts, target_k = self._resolve_sector(nkpts, target_k)
+        t0 = _timer_start()
+        nelec = _unpack_nelec(nelec, self.spin)
+        hmat = make_hamiltonian_k(
+            h1e, eri, norb, nelec, nkpts, target_k,
+            link_index=link_index, contract_map=contract_map, log_obj=self,
+            kmom=self.get_kmom(nkpts), contract_fn=self.contract_ham)
+        _timer_debug1(self, "k-FCI make_hamiltonian", t0)
+        return hmat
+
+    def energy(self, h1e, eri, fcivec, norb, nelec, nkpts=None,
+               target_k=None, link_index=None, contract_map=None):
+        """Evaluate the electronic energy of a sector CI vector."""
+        nkpts, target_k = self._resolve_sector(nkpts, target_k)
+        t0 = _timer_start()
+        nelec = _unpack_nelec(nelec, self.spin)
+        value = energy(
+            h1e, eri, fcivec, norb, nelec, nkpts, target_k,
+            link_index=link_index, contract_map=contract_map, log_obj=self,
+            kmom=self.get_kmom(nkpts), contract_fn=self.contract_ham)
+        _timer_debug1(self, "k-FCI energy", t0)
+        return value
+
+    def make_rdm1s(self, fcivec, norb, nelec, nkpts=None, target_k=None,
+                   link_index=None):
+        """Build spin-separated one-particle RDMs."""
+        nkpts, target_k = self._resolve_sector(nkpts, target_k)
+        t0 = _timer_start()
+        result = make_rdm1s(
+            fcivec, norb, _unpack_nelec(nelec, self.spin), nkpts,
+            target_k=target_k, link_index=link_index,
+            kmom=self.get_kmom(nkpts))
+        _timer_debug1(self, "k-FCI make_rdm1s", t0)
+        return result
+
+    def make_rdm1(self, fcivec, norb, nelec, nkpts=None, target_k=None,
+                  link_index=None):
+        """Build the spin-summed one-particle RDM."""
+        nkpts, target_k = self._resolve_sector(nkpts, target_k)
+        t0 = _timer_start()
+        result = make_rdm1(
+            fcivec, norb, _unpack_nelec(nelec, self.spin), nkpts,
+            target_k=target_k, link_index=link_index,
+            kmom=self.get_kmom(nkpts))
+        _timer_debug1(self, "k-FCI make_rdm1", t0)
+        return result
+
+    def make_rdm12s(self, fcivec, norb, nelec, nkpts=None, target_k=None,
+                    link_index=None, reorder=True):
+        """Build spin-separated one- and two-particle RDMs."""
+        nkpts, target_k = self._resolve_sector(nkpts, target_k)
+        t0 = _timer_start()
+        result = make_rdm12s(
+            fcivec, norb, _unpack_nelec(nelec, self.spin), nkpts,
+            target_k=target_k, link_index=link_index, reorder=reorder,
+            kmom=self.get_kmom(nkpts))
+        _timer_debug1(self, "k-FCI make_rdm12s", t0)
+        return result
+
+    def make_rdm12(self, fcivec, norb, nelec, nkpts=None, target_k=None,
+                   link_index=None, reorder=True):
+        """Build spin-summed one- and two-particle RDMs."""
+        nkpts, target_k = self._resolve_sector(nkpts, target_k)
+        t0 = _timer_start()
+        result = make_rdm12(
+            fcivec, norb, _unpack_nelec(nelec, self.spin), nkpts,
+            target_k=target_k, link_index=link_index, reorder=reorder,
+            kmom=self.get_kmom(nkpts))
+        _timer_debug1(self, "k-FCI make_rdm12", t0)
+        return result
+
+    def contract_ss(self, fcivec, norb, nelec, nkpts=None, target_k=None,
+                    link_index=None, contract_map=None):
+        """Apply spin-squared to a sector CI vector."""
+        nkpts, target_k = self._resolve_sector(nkpts, target_k)
+        t0 = _timer_start()
+        ci1 = contract_ss(
+            fcivec, norb, _unpack_nelec(nelec, self.spin), nkpts, target_k,
+            link_index=link_index, spin=self.spin,
+            contract_map=contract_map, kmom=self.get_kmom(nkpts))
+        _timer_debug1(self, "k-FCI contract_ss", t0)
+        return ci1
+
+    def spin_square(self, fcivec, norb, nelec, nkpts=None, target_k=None,
+                    link_index=None, **kwargs):
+        """Evaluate spin-squared and the spin multiplicity."""
+        nkpts, target_k = self._resolve_sector(nkpts, target_k)
+        t0 = _timer_start()
+        result = spin_square(
+            fcivec, norb, _unpack_nelec(nelec, self.spin), nkpts, target_k,
+            link_index=link_index, spin=self.spin,
+            kmom=self.get_kmom(nkpts), **kwargs)
+        _timer_debug1(self, "k-FCI spin_square", t0)
+        return result
+
+    def make_precond(self, hdiag, pspaceig=None, pspaceci=None, addr=None):
+        """Construct the diagonal Davidson preconditioner."""
+        return make_diag_precond(
+            hdiag, pspaceig, pspaceci, addr, self.level_shift)
+
+    def get_init_guess(self, norb, nelec, nkpts, target_k, nroots, hdiag):
+        """Construct determinant-basis Davidson initial guesses."""
+        return get_init_guess_k(
+            norb, nelec, nkpts, target_k, nroots, hdiag, log_obj=self)
+
+    def kernel(self, h1e, eri, norb, nelec, ci0=None, nkpts=None,
+               target_k=None, tol=None, lindep=None, max_cycle=None,
+               max_space=None, nroots=None, davidson_only=None,
+               pspace_size=None, orbsym=None, wfnsym=None, ecore=0,
+               **kwargs):
+        """Solve the selected total-momentum sector."""
+        del orbsym, wfnsym
+        if nkpts is None:
+            nkpts = self.nkpts
+        if nkpts is None:
+            nkpts = h1e.shape[0]
+        if target_k is None:
+            target_k = self.target_k
+        self.nkpts = int(nkpts)
+        self.target_k = int(target_k) % self.nkpts
+
+        kmom = self.get_kmom(self.nkpts)
+        link_index = _unpack(
+            norb, nelec, None, self.nkpts, spin=self.spin, kmom=kmom)
+        e, c = kernel_ms1(
+            self, h1e, eri, norb, nelec, self.nkpts, self.target_k,
+            ci0=ci0, link_index=link_index, tol=tol, lindep=lindep,
+            max_cycle=max_cycle, max_space=max_space, nroots=nroots,
+            davidson_only=davidson_only, pspace_size=pspace_size,
+            ecore=ecore, **kwargs)
+        self.eci, self.ci = e, c
+        return e, c
+
+    def fix_spin_(self, shift=0.1, ss=None, **kwargs):
+        """Apply a spin penalty to this solver in place."""
+        return fix_spin_(self, shift=shift, ss=ss, **kwargs)
+
+    fix_spin = fix_spin_
+
+    def eig(self, op, x0=None, precond=None, **kwargs):
+        """Diagonalize an explicit matrix or iterative linear operator."""
+        if isinstance(op, np.ndarray):
+            hermi_err = np.linalg.norm(op - op.conj().T)
+            self.converged = True
+            if hermi_err < HERMI_THRESH:
+                return scipy.linalg.eigh(op)
+            return scipy.linalg.eig(op)
+
+        self.converged, e, ci = lib.davidson1(
+            lambda xs: [op(x) for x in xs], x0, precond,
+            lessio=self.lessio, **kwargs)
+        if kwargs.get("nroots", 1) == 1:
+            self.converged = self.converged[0]
+            e = e[0]
+            ci = ci[0]
+        return e, ci
+
+
+FCI = FCISolver
