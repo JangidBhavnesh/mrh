@@ -30,6 +30,7 @@ from mrh.my_pyscf.pbc.fci.kfci_helper import (
 
 logger = lib.logger
 libpbcfci_k = None
+libpbckfci_hdiag = None
 
 
 def _timer_start():
@@ -129,6 +130,72 @@ def _load_k_contract_lib():
         libpbcfci_k.FCIcontract_2e_k_stream_ab.restype = None
         _timer_debug1(None, "k-FCI load C contract library", t0)
     return libpbcfci_k
+
+
+def _load_k_hdiag_lib():
+    """Load and configure the C library for the k-FCI diagonal."""
+    global libpbckfci_hdiag
+    if libpbckfci_hdiag is None:
+        t0 = _timer_start()
+        libpbckfci_hdiag = load_library("libpbc_kfci_hdiag")
+        libpbckfci_hdiag.FCIhdiag_k.argtypes = [
+            ctypes.c_void_p,  # hdiag
+            ctypes.c_void_p,  # h1e
+            ctypes.c_void_p,  # eri
+            ctypes.c_int,     # nkpts
+            ctypes.c_int,     # ncas
+            ctypes.c_int,     # nblocks
+            ctypes.c_void_p,  # blocks
+            ctypes.c_void_p,  # linka
+            ctypes.c_int,     # nlinka
+            ctypes.c_void_p,  # linkb
+            ctypes.c_int,     # nlinkb
+            ctypes.c_void_p,  # stra_ids
+            ctypes.c_void_p,  # stra_offsets
+            ctypes.c_void_p,  # strb_ids
+            ctypes.c_void_p,  # strb_offsets
+            ctypes.c_int,     # dk_zero
+            ctypes.c_void_p,  # ab_group_tab
+            ctypes.c_void_p,  # ab_group_offsets
+            ctypes.c_void_p,  # ab_src_addr
+            ctypes.c_void_p,  # ab_dst_addr
+            ctypes.c_void_p,  # ab_sign
+            ctypes.c_void_p,  # ab_eri_idx_ab
+            ctypes.c_void_p,  # ab_eri_idx_ba
+            ctypes.c_void_p,  # aa_group_tab
+            ctypes.c_void_p,  # aa_group_offsets
+            ctypes.c_void_p,  # aa_src_addr
+            ctypes.c_void_p,  # aa_dst_addr
+            ctypes.c_void_p,  # aa_sign
+            ctypes.c_void_p,  # aa_eri_idx
+            ctypes.c_void_p,  # bb_group_tab
+            ctypes.c_void_p,  # bb_group_offsets
+            ctypes.c_void_p,  # bb_src_addr
+            ctypes.c_void_p,  # bb_dst_addr
+            ctypes.c_void_p,  # bb_sign
+            ctypes.c_void_p,  # bb_eri_idx
+        ]
+        libpbckfci_hdiag.FCIhdiag_k.restype = None
+        libpbckfci_hdiag.FCIhdiag_k_stream_ab.argtypes = [
+            ctypes.c_void_p,  # hdiag
+            ctypes.c_void_p,  # eri
+            ctypes.c_int,     # nkpts
+            ctypes.c_int,     # ncas
+            ctypes.c_int,     # nblocks
+            ctypes.c_void_p,  # blocks
+            ctypes.c_void_p,  # linka
+            ctypes.c_int,     # nlinka
+            ctypes.c_void_p,  # linkb
+            ctypes.c_int,     # nlinkb
+            ctypes.c_void_p,  # stra_ids
+            ctypes.c_void_p,  # stra_offsets
+            ctypes.c_void_p,  # strb_ids
+            ctypes.c_void_p,  # strb_offsets
+            ctypes.c_int,     # dk_zero
+        ]
+        libpbckfci_hdiag.FCIhdiag_k_stream_ab.restype = None
+        _timer_debug1(None, "k-FCI load C diagonal library", t0)
+    return libpbckfci_hdiag
 
 
 def _as_contract_map(norb, nelec, nkpts, target_k, link_index=None,
@@ -659,3 +726,349 @@ def contract_2e_k(eri, fcivec, norb, nelec, nkpts, target_k,
             )
     _timer_debug1(log_obj, "k-FCI contract_2e C kernel", t0)
     return sigma_ci
+
+
+def contract_ham_k(h1e, eri, fcivec, norb, nelec, nkpts, target_k=0,
+                   link_index=None, contract_map=None, log_obj=None,
+                   kmom=None):
+    '''
+    Contract the k-FCI Hamiltonian with a CI vector.
+    Currently, I am keeping the one-electron and two-electron
+    Hamiltonian contractions separate. I am not absorbing h1e into the
+    two-electron Hamiltonian here.
+
+    args:
+        h1e : ndarray, shape (nkpts, norb_k, norb_k)
+            One-electron Hamiltonian in k-space.
+        eri : ndarray
+            Shape ``(nkpts, nkpts, nkpts, norb_k, norb_k, norb_k,
+            norb_k)``.
+            Two-electron Hamiltonian in k-space and in the same convention as
+            contract_2e_k.
+        fcivec : ndarray, shape (sector_size,)
+            k-FCI vector in the target momentum sector.
+        norb : int
+            Total number of active orbitals across all k-points.
+        nelec : tuple of 2 ints
+            Number of alpha and beta electrons.
+        nkpts : int
+            Number of k-points.
+        target_k : int, optional
+            Total momentum sector.
+        link_index : tuple of 2 ndarrays or None
+            k-aware link indices. If None, they are generated on the fly.
+    returns:
+        sigma_ci : ndarray, shape (sector_size,)
+            Result of applying H to fcivec.
+    '''
+    t0 = _timer_start()
+    dtype = np.result_type(h1e, eri, fcivec)
+    fcivec = np.asarray(fcivec, dtype=dtype, order="C")
+    contract_map = _as_contract_map(
+        norb, nelec, nkpts, target_k, link_index=link_index,
+        contract_map=contract_map, log_obj=log_obj, kmom=kmom)
+    link_index = contract_map.link_index
+    t0 = _timer_debug1(log_obj, "k-FCI contract_ham setup", t0)
+
+    sigma_ci = contract_1e_k(h1e, fcivec, norb, nelec, nkpts, target_k,
+                             link_index=link_index,
+                             contract_map=contract_map, log_obj=log_obj,
+                             kmom=kmom)
+    t0 = _timer_debug1(log_obj, "k-FCI contract_ham 1e", t0)
+    sigma_ci += contract_2e_k(eri, fcivec, norb, nelec, nkpts, target_k,
+                              link_index=link_index,
+                              contract_map=contract_map, log_obj=log_obj,
+                              kmom=kmom)
+    _timer_debug1(log_obj, "k-FCI contract_ham 2e", t0)
+    return sigma_ci
+
+
+def _add_same_spin_hdiag_py(hdiag, eri_flat, blocks, group_tab, group_offsets,
+                            src_addr, dst_addr, sign, eri_idx, nkpts, spin):
+    block_offsets = -np.ones(nkpts * nkpts, dtype=np.int64)
+    block_na = np.zeros(nkpts * nkpts, dtype=np.int64)
+    block_nb = np.zeros(nkpts * nkpts, dtype=np.int64)
+
+    for ka, kb, na, nb, offset, _ in blocks:
+        key = int(ka) * nkpts + int(kb)
+        block_offsets[key] = int(offset)
+        block_na[key] = int(na)
+        block_nb[key] = int(nb)
+
+    for src_key in range(nkpts * nkpts):
+        src_offset = int(block_offsets[src_key])
+        if src_offset < 0:
+            continue
+
+        nb = int(block_nb[src_key])
+        na = int(block_na[src_key])
+        g0 = int(group_offsets[src_key])
+        g1 = int(group_offsets[src_key + 1])
+
+        for ig in range(g0, g1):
+            dst_offset, _, entry0, entry1 = map(int, group_tab[ig])
+            if dst_offset != src_offset:
+                continue
+
+            for itab in range(entry0, entry1):
+                if int(dst_addr[itab]) != int(src_addr[itab]):
+                    continue
+
+                val = sign[itab] * eri_flat[int(eri_idx[itab])]
+                if spin == "a":
+                    ia = int(src_addr[itab])
+                    hdiag[src_offset + ia *
+                          nb:src_offset + (ia + 1) * nb] += val
+                else:
+                    ib = int(src_addr[itab])
+                    hdiag[src_offset + ib:src_offset + na * nb:nb] += val
+
+
+def make_hdiag_py(h1e, eri, norb, nelec, nkpts, target_k=0, link_index=None,
+                  contract_map=None, log_obj=None, kmom=None):
+    '''
+    Diagonal of the k-FCI Hamiltonian in a fixed total momentum sector.
+    The diagonal is assembled from diagonal one-electron links and diagonal
+    entries in the precomputed two-electron contraction structures.
+    '''
+    t0 = _timer_start()
+    contract_map = _as_contract_map(
+        norb, nelec, nkpts, target_k, link_index=link_index,
+        contract_map=contract_map, explicit_ab=True, log_obj=log_obj,
+        kmom=kmom)
+    link_index = contract_map.link_index
+    ndet = contract_map.sector_size
+    dtype = np.result_type(h1e, eri)
+    hdiag = np.zeros(ndet, dtype=dtype)
+    t0 = _timer_debug1(log_obj, "k-FCI make_hdiag_py map setup", t0)
+
+    h1e = np.asarray(h1e, dtype=dtype, order="C")
+    eri = np.asarray(eri, dtype=dtype, order="C")
+    eri_flat = eri.reshape(-1)
+    ncas = int(norb) // int(nkpts)
+    dk_zero = int(contract_map.kmom.zero)
+
+    link_indexa, link_indexb = link_index
+    blocks = np.asarray(contract_map.blocks, dtype=np.int32, order="C")
+    t0 = _timer_debug1(log_obj, "k-FCI make_hdiag_py array setup", t0)
+
+    CRE = 0
+    DES = 1
+    TARGET = 2
+    SIGN = 3
+    K_CRE = 5
+    K_DES = 6
+    DK = 7
+
+    for ka, kb, na, nb, offset, _ in blocks:
+        ka = int(ka)
+        kb = int(kb)
+        na = int(na)
+        nb = int(nb)
+        offset = int(offset)
+
+        hblk = hdiag[offset:offset + na * nb].reshape(na, nb)
+        alpha_ids = contract_map.stra_ids[
+            contract_map.stra_offsets[ka]:contract_map.stra_offsets[ka + 1]]
+        beta_ids = contract_map.strb_ids[
+            contract_map.strb_offsets[kb]:contract_map.strb_offsets[kb + 1]]
+
+        for ia, astr0 in enumerate(alpha_ids):
+            val = 0
+            for link in link_indexa[int(astr0)]:
+                if int(link[SIGN]) == 0:
+                    break
+                if int(link[TARGET]) != int(astr0):
+                    continue
+                k_cre = int(link[K_CRE]) % nkpts
+                if (k_cre != int(link[K_DES]) % nkpts or
+                        int(link[DK]) % nkpts != dk_zero):
+                    continue
+                val += link[SIGN] * h1e[k_cre,
+                                        int(link[CRE]) % ncas,
+                                        int(link[DES]) % ncas]
+            hblk[ia, :] += val
+
+        for ib, bstr0 in enumerate(beta_ids):
+            val = 0
+            for link in link_indexb[int(bstr0)]:
+                if int(link[SIGN]) == 0:
+                    break
+                if int(link[TARGET]) != int(bstr0):
+                    continue
+                k_cre = int(link[K_CRE]) % nkpts
+                if (k_cre != int(link[K_DES]) % nkpts or
+                        int(link[DK]) % nkpts != dk_zero):
+                    continue
+                val += link[SIGN] * h1e[k_cre,
+                                        int(link[CRE]) % ncas,
+                                        int(link[DES]) % ncas]
+            hblk[:, ib] += val
+    t0 = _timer_debug1(log_obj, "k-FCI make_hdiag_py one-electron diag", t0)
+
+    block_offsets = {
+        int(ka) * nkpts + int(kb): int(offset)
+        for ka, kb, _, _, offset, _ in blocks
+    }
+    for src_key in range(nkpts * nkpts):
+        g0 = int(contract_map.ab_group_offsets[src_key])
+        g1 = int(contract_map.ab_group_offsets[src_key + 1])
+        for ig in range(g0, g1):
+            dst_offset, entry0, entry1 = map(
+                int, contract_map.ab_group_tab[ig])
+            src_offset = block_offsets.get(src_key, -1)
+            if src_offset < 0 or dst_offset != src_offset:
+                continue
+
+            for itab in range(entry0, entry1):
+                if (int(contract_map.ab_dst_addr[itab]) !=
+                        int(contract_map.ab_src_addr[itab])):
+                    continue
+                addr = src_offset + int(contract_map.ab_src_addr[itab])
+                hdiag[addr] += contract_map.ab_sign[itab] * (
+                    eri_flat[int(contract_map.ab_eri_idx_ab[itab])] +
+                    eri_flat[int(contract_map.ab_eri_idx_ba[itab])])
+    t0 = _timer_debug1(log_obj, "k-FCI make_hdiag_py alpha-beta diag", t0)
+
+    _add_same_spin_hdiag_py(
+        hdiag, eri_flat, blocks, contract_map.aa_group_tab,
+        contract_map.aa_group_offsets, contract_map.aa_src_addr,
+        contract_map.aa_dst_addr, contract_map.aa_sign,
+        contract_map.aa_eri_idx, nkpts, "a")
+    t0 = _timer_debug1(log_obj, "k-FCI make_hdiag_py alpha-alpha diag", t0)
+    _add_same_spin_hdiag_py(
+        hdiag, eri_flat, blocks, contract_map.bb_group_tab,
+        contract_map.bb_group_offsets, contract_map.bb_src_addr,
+        contract_map.bb_dst_addr, contract_map.bb_sign,
+        contract_map.bb_eri_idx, nkpts, "b")
+    _timer_debug1(log_obj, "k-FCI make_hdiag_py beta-beta diag", t0)
+
+    return hdiag
+
+
+def make_hdiag(h1e, eri, norb, nelec, nkpts, target_k=0, link_index=None,
+               contract_map=None, log_obj=None, kmom=None):
+    '''
+    C implementation of the diagonal of the k-FCI Hamiltonian in a fixed total
+    momentum sector.  The result is returned as complex128 to match the C
+    kernels used for the k-FCI Hamiltonian contractions.
+    '''
+    t0 = _timer_start()
+    nkpts = int(nkpts)
+    ncas = int(norb) // nkpts
+    assert ncas * nkpts == int(norb)
+
+    contract_map = _as_contract_map(
+        norb, nelec, nkpts, target_k, link_index=link_index,
+        contract_map=contract_map, log_obj=log_obj, kmom=kmom)
+    ndet = contract_map.sector_size
+    t0 = _timer_debug1(log_obj, "k-FCI make_hdiag map setup", t0)
+
+    h1e = np.asarray(h1e, dtype=np.complex128, order="C")
+    eri = np.asarray(eri, dtype=np.complex128, order="C")
+    hdiag = np.empty(ndet, dtype=np.complex128, order="C")
+    assert h1e.shape == (nkpts, ncas, ncas)
+    assert eri.shape == (nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas)
+    t0 = _timer_debug1(log_obj, "k-FCI make_hdiag array setup", t0)
+
+    link_indexa, link_indexb = contract_map.link_index
+    libpbcfci = _load_k_hdiag_lib()
+    t0 = _timer_debug1(log_obj, "k-FCI make_hdiag library setup", t0)
+    with lib.with_omp_threads(lib.num_threads()):
+        libpbcfci.FCIhdiag_k(
+            hdiag.ctypes.data_as(ctypes.c_void_p),
+            h1e.ctypes.data_as(ctypes.c_void_p),
+            eri.ctypes.data_as(ctypes.c_void_p),
+            ctypes.c_int(nkpts),
+            ctypes.c_int(ncas),
+            ctypes.c_int(contract_map.blocks.shape[0]),
+            contract_map.blocks.ctypes.data_as(ctypes.c_void_p),
+            link_indexa.ctypes.data_as(ctypes.c_void_p),
+            ctypes.c_int(link_indexa.shape[1]),
+            link_indexb.ctypes.data_as(ctypes.c_void_p),
+            ctypes.c_int(link_indexb.shape[1]),
+            contract_map.stra_ids.ctypes.data_as(ctypes.c_void_p),
+            contract_map.stra_offsets.ctypes.data_as(ctypes.c_void_p),
+            contract_map.strb_ids.ctypes.data_as(ctypes.c_void_p),
+            contract_map.strb_offsets.ctypes.data_as(ctypes.c_void_p),
+            ctypes.c_int(contract_map.kmom.zero),
+            contract_map.ab_group_tab.ctypes.data_as(ctypes.c_void_p),
+            contract_map.ab_group_offsets.ctypes.data_as(ctypes.c_void_p),
+            contract_map.ab_src_addr.ctypes.data_as(ctypes.c_void_p),
+            contract_map.ab_dst_addr.ctypes.data_as(ctypes.c_void_p),
+            contract_map.ab_sign.ctypes.data_as(ctypes.c_void_p),
+            contract_map.ab_eri_idx_ab.ctypes.data_as(ctypes.c_void_p),
+            contract_map.ab_eri_idx_ba.ctypes.data_as(ctypes.c_void_p),
+            contract_map.aa_group_tab.ctypes.data_as(ctypes.c_void_p),
+            contract_map.aa_group_offsets.ctypes.data_as(ctypes.c_void_p),
+            contract_map.aa_src_addr.ctypes.data_as(ctypes.c_void_p),
+            contract_map.aa_dst_addr.ctypes.data_as(ctypes.c_void_p),
+            contract_map.aa_sign.ctypes.data_as(ctypes.c_void_p),
+            contract_map.aa_eri_idx.ctypes.data_as(ctypes.c_void_p),
+            contract_map.bb_group_tab.ctypes.data_as(ctypes.c_void_p),
+            contract_map.bb_group_offsets.ctypes.data_as(ctypes.c_void_p),
+            contract_map.bb_src_addr.ctypes.data_as(ctypes.c_void_p),
+            contract_map.bb_dst_addr.ctypes.data_as(ctypes.c_void_p),
+            contract_map.bb_sign.ctypes.data_as(ctypes.c_void_p),
+            contract_map.bb_eri_idx.ctypes.data_as(ctypes.c_void_p),
+        )
+        if not getattr(contract_map, "explicit_ab", True):
+            libpbcfci.FCIhdiag_k_stream_ab(
+                hdiag.ctypes.data_as(ctypes.c_void_p),
+                eri.ctypes.data_as(ctypes.c_void_p),
+                ctypes.c_int(nkpts),
+                ctypes.c_int(ncas),
+                ctypes.c_int(contract_map.blocks.shape[0]),
+                contract_map.blocks.ctypes.data_as(ctypes.c_void_p),
+                link_indexa.ctypes.data_as(ctypes.c_void_p),
+                ctypes.c_int(link_indexa.shape[1]),
+                link_indexb.ctypes.data_as(ctypes.c_void_p),
+                ctypes.c_int(link_indexb.shape[1]),
+                contract_map.stra_ids.ctypes.data_as(ctypes.c_void_p),
+                contract_map.stra_offsets.ctypes.data_as(ctypes.c_void_p),
+                contract_map.strb_ids.ctypes.data_as(ctypes.c_void_p),
+                contract_map.strb_offsets.ctypes.data_as(ctypes.c_void_p),
+                ctypes.c_int(contract_map.kmom.zero),
+            )
+    _timer_debug1(log_obj, "k-FCI make_hdiag C kernel", t0)
+    return hdiag
+
+
+def make_hamiltonian_k(h1e, eri, norb, nelec, nkpts, target_k=0,
+                       link_index=None, contract_map=None, log_obj=None,
+                       kmom=None, contract_fn=None):
+    '''
+    Construct the explicit k-FCI Hamiltonian in a fixed total momentum sector.
+    This routine is intended for small determinant spaces and for debugging.
+    For large spaces, kernel_ms1 uses Davidson with contract_ham_k instead.
+    '''
+    t0 = _timer_start()
+    contract_map = _as_contract_map(
+        norb, nelec, nkpts, target_k, link_index=link_index,
+        contract_map=contract_map, log_obj=log_obj, kmom=kmom)
+    link_index = contract_map.link_index
+    ndet = contract_map.sector_size
+    dtype = np.result_type(h1e, eri, np.complex128)
+    hmat = np.empty((ndet, ndet), dtype=dtype, order="F")
+    t0 = _timer_debug1(log_obj, "k-FCI make_hamiltonian setup", t0)
+
+    if contract_fn is None:
+        def apply_hamiltonian(ci):
+            return contract_ham_k(
+                h1e, eri, ci, norb, nelec, nkpts, target_k,
+                link_index=link_index, contract_map=contract_map,
+                log_obj=log_obj, kmom=kmom)
+    else:
+        def apply_hamiltonian(ci):
+            return contract_fn(
+                h1e, eri, ci, norb, nelec, nkpts=nkpts,
+                target_k=target_k, link_index=link_index,
+                contract_map=contract_map)
+
+    for i in range(ndet):
+        ci0 = np.zeros(ndet, dtype=dtype)
+        ci0[i] = 1.0
+        hmat[:, i] = apply_hamiltonian(ci0)
+
+    _timer_debug1(log_obj, "k-FCI make_hamiltonian columns", t0)
+    return hmat
