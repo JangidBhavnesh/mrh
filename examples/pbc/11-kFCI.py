@@ -1,7 +1,4 @@
 #!/usr/bin/env python
-
-"""Run k-FCI independently in each total-momentum sector."""
-
 import numpy as np
 
 from pyscf import lib
@@ -11,6 +8,11 @@ from pyscf.pbc import scf
 from mrh.my_pyscf.pbc import mcscf
 from mrh.my_pyscf.pbc.fci import ksolver
 
+# Author: Bhavnesh Jangid
+
+"""
+Run k-FCI independently in each total-momentum sector.
+"""
 
 def get_kfci_integrals(kmc, mo_coeff):
     """Build the active-space effective Hamiltonian in k-space."""
