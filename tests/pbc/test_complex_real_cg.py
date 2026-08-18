@@ -13,10 +13,12 @@ from mrh.my_pyscf.pbc.mcscf.real_linear_solvers import (
 def make_complex_hessian(real_hessian):
     """Return a complex-vector action for a small real Hessian matrix."""
     def hessian_action(vector):
+        hessian_action.call_count += 1
         real_vector = SolveScipyCGForCplx.unpack_complex(vector)
         real_result = real_hessian @ real_vector
         return SolveScipyCGForCplx.pack_real(real_result)
 
+    hessian_action.call_count = 0
     return hessian_action
 
 
@@ -37,11 +39,15 @@ class KnownValuesRealLinearSolvers(unittest.TestCase):
             -SolveScipyCGForCplx.unpack_complex(gradient),
         )
 
+        hessian_action = make_complex_hessian(hessian_real)
+        callback_steps = []
         solver = SolveScipyCGForCplx(
-            make_complex_hessian(hessian_real),
+            hessian_action,
             real_hdiag=np.diag(hessian_real),
             rtol=1e-12,
             atol=1e-14,
+            callback=callback_steps.append,
+            compute_residual=True,
         )
         step, info = solver(gradient)
 
@@ -53,6 +59,11 @@ class KnownValuesRealLinearSolvers(unittest.TestCase):
             rtol=1e-12,
         )
         self.assertLess(solver.residual_norm, 1e-12)
+        # Residual diagnostics deliberately add one Hessian action after the
+        # final CG iteration.
+        self.assertEqual(
+            hessian_action.call_count, len(callback_steps) + 1,
+        )
 
     def test_minres_solves_indefinite_hessian(self):
         # This symmetric matrix has one positive and one negative eigenvalue.
@@ -68,9 +79,12 @@ class KnownValuesRealLinearSolvers(unittest.TestCase):
             -SolveScipyMINRESForCplx.unpack_complex(gradient),
         )
 
+        hessian_action = make_complex_hessian(hessian_real)
+        callback_steps = []
         solver = SolveScipyMINRESForCplx(
-            make_complex_hessian(hessian_real),
+            hessian_action,
             rtol=1e-12,
+            callback=callback_steps.append,
         )
         step, info = solver(gradient)
 
@@ -82,7 +96,12 @@ class KnownValuesRealLinearSolvers(unittest.TestCase):
             atol=1e-12,
             rtol=1e-12,
         )
-        self.assertLess(solver.residual_norm, 1e-12)
+        self.assertIsNone(solver.residual_norm)
+        # The default path stops with SciPy and does not apply H once more
+        # merely to report a residual norm.
+        self.assertEqual(
+            hessian_action.call_count, len(callback_steps),
+        )
 
 
 if __name__ == "__main__":
