@@ -3,6 +3,7 @@
 """Momentum-sector FCI contractions for periodic systems."""
 
 import ctypes
+import warnings
 
 import numpy as np
 
@@ -29,6 +30,7 @@ from mrh.my_pyscf.pbc.fci.kfci_helper import (
 # Author: Bhavnesh Jangid
 
 logger = lib.logger
+HDIAG_IMAG_TOL = 1e-3
 libpbcfci_k = None
 libpbckfci_hdiag = None
 
@@ -1129,3 +1131,161 @@ def energy(h1e, eri, fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
     e = np.vdot(ci0, sigma)
     _timer_debug1(log_obj, "k-FCI energy dot", t0)
     return e
+
+
+def _make_diag_precond(hdiag, level_shift=1e-3):
+    '''
+    Diagonal preconditioner for the Davidson solver.
+    '''
+    t0 = _timer_start()
+    hdiag = np.asarray(hdiag)
+    if np.iscomplexobj(hdiag) and np.max(np.abs(hdiag.imag)) > HDIAG_IMAG_TOL:
+        warnings.warn("The k-FCI Hamiltonian diagonal has non-negligible "
+                      "imaginary parts: max |Im(hdiag)| = "
+                      f"{np.max(np.abs(hdiag.imag))}.")
+
+    def precond(dx, e, *args):
+        diagd = hdiag - (np.real(e) - level_shift)
+        diagd = diagd.astype(hdiag.dtype, copy=True)
+        diagd[np.abs(diagd) < 1e-8] = 1e-8
+        return dx / diagd
+
+    _timer_debug1(None, "k-FCI make diagonal preconditioner", t0)
+    return precond
+
+
+def make_diag_precond(hdiag, pspaceig=None, pspaceci=None, addr=None,
+                      level_shift=0):
+    '''
+    Wrapper to match the PySCF direct_spin1 preconditioner interface.
+    '''
+    return _make_diag_precond(hdiag, level_shift)
+
+
+def kernel_ms1(fci, h1e, eri, norb, nelec, nkpts, target_k=0, ci0=None,
+               link_index=None, tol=None, lindep=None, max_cycle=None,
+               max_space=None, nroots=None, davidson_only=None,
+               pspace_size=None, max_memory=None, verbose=None, ecore=0,
+               **kwargs):
+    '''
+    k-FCI kernel in a fixed total momentum sector.
+    This follows the direct_spin1 control flow: construct the explicit
+    Hamiltonian for small spaces when memory allows, otherwise use Davidson.
+    The Hamiltonian-vector product is contract_1e_k + contract_2e_k; no
+    absorb_h1e step is used.
+    '''
+    t0 = _timer_start()
+    if nroots is None:
+        nroots = fci.nroots
+    if davidson_only is None:
+        davidson_only = fci.davidson_only
+    if pspace_size is None:
+        pspace_size = fci.pspace_size
+    if max_memory is None:
+        max_memory = fci.max_memory - lib.current_memory()[0]
+
+    log = logger.new_logger(fci, verbose)
+    nelec = _unpack_nelec(nelec, fci.spin)
+    target_k = int(target_k) % nkpts
+    kmom = fci.get_kmom(nkpts) if hasattr(fci, "get_kmom") else None
+    link_index = _unpack(norb, nelec, link_index, nkpts, spin=fci.spin,
+                         kmom=kmom)
+    t0 = log.timer_debug1("k-FCI kernel setup options/link_index", *t0)
+    contract_map = _as_contract_map(
+        norb, nelec, nkpts, target_k, link_index=link_index,
+        explicit_ab=False, log_obj=fci, kmom=kmom)
+    link_index = contract_map.link_index
+    kmom = contract_map.kmom
+    t0 = log.timer_debug1("k-FCI kernel contract map", *t0)
+
+    assert norb % nkpts == 0
+    ncas = norb // nkpts
+    assert h1e.shape == (nkpts, ncas, ncas)
+    assert eri.shape == (nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas)
+    t0 = log.timer_debug1("k-FCI kernel shape checks", *t0)
+
+    hdiag = fci.make_hdiag(h1e, eri, norb, nelec, nkpts, target_k,
+                           link_index=link_index,
+                           contract_map=contract_map).ravel()
+    civec_size = hdiag.size
+    t0 = log.timer_debug1("k-FCI kernel hdiag", *t0)
+
+    if civec_size == 0:
+        raise RuntimeError(
+            f"No determinants in k-FCI sector target_k={target_k}.")
+
+    nroots = min(int(nroots), civec_size)
+    hmat_mem = civec_size * civec_size * np.dtype(hdiag.dtype).itemsize * 1e-6
+    min_davidson_mem = civec_size * 6 * np.dtype(hdiag.dtype).itemsize * 1e-6
+
+    if max_memory < min_davidson_mem:
+        log.warn("Not enough memory for k-FCI solver. "
+                 "The minimal Davidson requirement is %.0f MB",
+                 min_davidson_mem)
+
+    do_direct = ((not davidson_only)
+                 and civec_size <= pspace_size
+                 and hmat_mem < max_memory)
+    t0 = log.timer_debug1("k-FCI kernel memory/direct branch decision", *t0)
+
+    if do_direct:
+        hmat = fci.make_hamiltonian(h1e, eri, norb, nelec, nkpts, target_k,
+                                    link_index=link_index,
+                                    contract_map=contract_map)
+        t0 = log.timer_debug1("k-FCI kernel direct Hamiltonian", *t0)
+        e, c = fci.eig(hmat)
+        t0 = log.timer_debug1("k-FCI kernel direct eig", *t0)
+        e = e[:nroots]
+        if nroots == 1:
+            c = c[:, 0]
+            e = e[0]
+        else:
+            c = c[:, :nroots].T
+        log.timer_debug1("k-FCI kernel direct postprocess", *t0)
+        return e + ecore, c
+
+    precond = fci.make_precond(hdiag)
+    t0 = log.timer_debug1("k-FCI kernel preconditioner", *t0)
+
+    cpu0 = [logger.process_clock(), logger.perf_counter()]
+
+    def hop(c):
+        hc = fci.contract_ham(h1e, eri, c, norb, nelec, nkpts, target_k,
+                              link_index=link_index,
+                              contract_map=contract_map)
+        cpu0[:] = log.timer_debug1("contract_ham_k", *cpu0)
+        return hc.ravel()
+
+    def init_guess():
+        return fci.get_init_guess(norb, nelec, nkpts, target_k, nroots, hdiag)
+
+    if ci0 is None:
+        ci0 = init_guess
+    elif not callable(ci0):
+        if isinstance(ci0, np.ndarray):
+            ci0 = [ci0.ravel()]
+        else:
+            ci0 = [x.ravel() for x in ci0]
+        if len(ci0) < nroots:
+            ci0.extend(init_guess()[len(ci0):])
+    t0 = log.timer_debug1("k-FCI kernel initial guess setup", *t0)
+
+    if tol is None:
+        tol = fci.conv_tol
+    if lindep is None:
+        lindep = fci.lindep
+    if max_cycle is None:
+        max_cycle = fci.max_cycle
+    if max_space is None:
+        max_space = fci.max_space
+    tol_residual = getattr(fci, "conv_tol_residual", None)
+    t0 = log.timer_debug1("k-FCI kernel Davidson parameters", *t0)
+
+    with lib.with_omp_threads(lib.num_threads()):
+        e, c = fci.eig(hop, ci0, precond, tol=tol, lindep=lindep,
+                       max_cycle=max_cycle, max_space=max_space,
+                       nroots=nroots, max_memory=max_memory, verbose=log,
+                       follow_state=True, tol_residual=tol_residual,
+                       **kwargs)
+    log.timer_debug1("k-FCI kernel Davidson eig", *t0)
+    return e + ecore, c
