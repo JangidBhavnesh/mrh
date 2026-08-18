@@ -1,6 +1,7 @@
 #include <complex.h>
 #include <omp.h>
 #include <stdlib.h>
+#include "pbc_kfci_common.h"
 #include "vhf/fblas.h"
 
 /*
@@ -19,117 +20,12 @@ Author: Bhavnesh Jangid
  * Memory management:
  * - Caller-provided integral, diagonal, link, block, and contraction-map arrays
  *   are never freed here.
- * - make_block_tables transfers block_offset, block_na, and block_nb to its
- *   caller on success and frees them locally on failure.
+ * - pbc_kfci_make_block_tables transfers block_offset, block_na, and block_nb
+ *   to its caller on success and frees them locally on failure.
  * - FCIhdiag_k frees those block tables before returning.
  * - FCIhdiag_k_stream_ab allocates wmat and per-block amat, bmat, and tmp work
  *   arrays, and frees each array before returning or taking a fallback path.
 */
-
-
-#define BLOCK_KA      0
-#define BLOCK_KB      1
-#define BLOCK_NA      2
-#define BLOCK_NB      3
-#define BLOCK_OFFSET  4
-#define BLOCK_SIZE    5
-
-#define LINK_CRE    0
-#define LINK_DES    1
-#define LINK_TARGET 2
-#define LINK_SIGN   3
-#define LINK_K0     4
-#define LINK_K_CRE  5
-#define LINK_K_DES  6
-#define LINK_DK     7
-#define NLINK_FIELDS 8
-
-/** Return x modulo n in the range [0, n - 1]. */
-static inline int mod_pos(int x, int n)
-{
-        int r = x % n;
-        return (r < 0) ? r + n : r;
-}
-
-/** Flatten k-point and active-orbital indices into the ERI storage index. */
-static inline long long eri_index_k(int kp, int kq, int kr,
-                                    int p, int q, int r, int s,
-                                    int nkpts, int ncas)
-{
-        long long idx = kp;
-        idx = idx * nkpts + kq;
-        idx = idx * nkpts + kr;
-        idx = idx * ncas + p;
-        idx = idx * ncas + q;
-        idx = idx * ncas + r;
-        idx = idx * ncas + s;
-        return idx;
-}
-
-/** Set n complex values to zero. */
-static void zset0(double complex *x, size_t n)
-{
-        for (size_t i = 0; i < n; i++) {
-                x[i] = 0.0 + 0.0 * I;
-        }
-}
-
-/**
- * Build lookup arrays for packed CI momentum blocks.
- * @param nkpts Number of k-points.
- * @param nblocks Number of packed CI blocks.
- * @param blocks Input block records.
- * @param p_block_offset Output block offsets; caller owns the array.
- * @param p_block_na Output alpha dimensions; caller owns the array.
- * @param p_block_nb Output beta dimensions; caller owns the array.
- * @param p_ndet Output total packed CI-vector size.
- * @return 0 on success; 1 on allocation failure.
- */
-static int make_block_tables(int nkpts, int nblocks, int *blocks,
-                             int **p_block_offset,
-                             int **p_block_na,
-                             int **p_block_nb,
-                             int *p_ndet)
-{
-        int table_size = nkpts * nkpts;
-        int ndet = 0;
-        int *block_offset = malloc(sizeof(int) * (size_t)table_size);
-        int *block_na = malloc(sizeof(int) * (size_t)table_size);
-        int *block_nb = malloc(sizeof(int) * (size_t)table_size);
-
-        if (block_offset == NULL || block_na == NULL || block_nb == NULL) {
-                free(block_offset);
-                free(block_na);
-                free(block_nb);
-                return 1;
-        }
-
-        for (int i = 0; i < table_size; i++) {
-                block_offset[i] = -1;
-                block_na[i] = 0;
-                block_nb[i] = 0;
-        }
-
-        for (int iblk = 0; iblk < nblocks; iblk++) {
-                int *blk = blocks + iblk * 6;
-                int key = blk[BLOCK_KA] * nkpts + blk[BLOCK_KB];
-                int offset = blk[BLOCK_OFFSET];
-                int size = blk[BLOCK_SIZE];
-
-                block_offset[key] = offset;
-                block_na[key] = blk[BLOCK_NA];
-                block_nb[key] = blk[BLOCK_NB];
-                if (offset + size > ndet) {
-                        ndet = offset + size;
-                }
-        }
-
-        *p_block_offset = block_offset;
-        *p_block_na = block_na;
-        *p_block_nb = block_nb;
-        *p_ndet = ndet;
-        return 0;
-}
 
 /** Add diagonal one-electron contributions for all CI blocks. */
 static void add_one_electron_hdiag(double complex *hdiag,
@@ -499,13 +395,13 @@ void FCIhdiag_k(double complex *hdiag,
         int *block_na = NULL;
         int *block_nb = NULL;
 
-        if (make_block_tables(nkpts, nblocks, blocks,
+        if (pbc_kfci_make_block_tables(nkpts, nblocks, blocks,
                               &block_offset, &block_na, &block_nb,
                               &ndet) != 0) {
                 return;
         }
 
-        zset0(hdiag, (size_t)ndet);
+        pbc_kfci_zset0(hdiag, (size_t)ndet);
         if (ndet == 0) {
                 free(block_offset);
                 free(block_na);
@@ -634,8 +530,8 @@ void FCIhdiag_k_stream_ab(double complex *hdiag,
                         continue;
                 }
 
-                zset0(amat, (size_t)norb * na);
-                zset0(bmat, (size_t)nb * norb);
+                pbc_kfci_zset0(amat, (size_t)norb * na);
+                pbc_kfci_zset0(bmat, (size_t)nb * norb);
 
                 for (int ia = 0; ia < na; ia++) {
                         int astr0 = stra_ids[stra_offsets[ka] + ia];
