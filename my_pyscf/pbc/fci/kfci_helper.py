@@ -4,6 +4,7 @@
 
 import ctypes
 import os
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -12,9 +13,11 @@ from pyscf.fci.addons import _unpack_nelec
 
 from mrh.lib.helper import load_library
 from mrh.my_pyscf.pbc.fci.kcistrings import (
+    KPointMomentum,
     _as_kmom,
     _kadd,
     _ksub,
+    gen_k_sector_linkstr_info,
     gen_k_sector_maps,
     gen_linkstr_index_k,
 )
@@ -1022,3 +1025,392 @@ def _resolve_explicit_ab(link_indexa, link_indexb, blocks, nkpts,
     if max_memory is None:
         return True
     return required <= int(max_memory * memory_fraction)
+
+
+@dataclass
+class KFCILayoutMap:
+    norb: int
+    nelec: tuple
+    nkpts: int
+    target_k: int
+    ncas: int
+    sector_size: int
+    link_index: tuple
+    blocks: np.ndarray
+    stra_ids: np.ndarray
+    stra_offsets: np.ndarray
+    strb_ids: np.ndarray
+    strb_offsets: np.ndarray
+    str2tot_a: np.ndarray
+    str2tot_b: np.ndarray
+    kmom: KPointMomentum
+
+    @classmethod
+    def build(cls, norb, nelec, nkpts, target_k, link_index=None,
+              kmom=None, kconserv=None, cell=None, kpts=None, kmesh=None):
+        nkpts = int(nkpts)
+        kmom = _as_kmom(nkpts, kmom=kmom, kconserv=kconserv,
+                        cell=cell, kpts=kpts, kmesh=kmesh)
+        norb = int(norb)
+        ncas = norb // nkpts
+        assert ncas * nkpts == norb
+
+        nelec = _unpack_nelec(nelec)
+        link_indexa, link_indexb = _unpack_contract_link_index(
+            norb, nelec, link_index, nkpts, kmom=kmom)
+        link_indexa = np.asarray(link_indexa, dtype=np.int32, order="C")
+        link_indexb = np.asarray(link_indexb, dtype=np.int32, order="C")
+
+        blocks = gen_k_sector_linkstr_info(
+            link_indexa, link_indexb, nkpts, target_k, kmom=kmom)
+        blocks = np.asarray(blocks, dtype=np.int32, order="C")
+        sector_size = int(blocks[:, 5].sum()) if blocks.size else 0
+
+        straid_k, strbid_k, str2tot_a, str2tot_b = gen_k_sector_maps(
+            link_indexa, link_indexb, nkpts, kmom=kmom)
+        stra_ids, stra_offsets = _flatten_sector_ids(straid_k, nkpts)
+        strb_ids, strb_offsets = _flatten_sector_ids(strbid_k, nkpts)
+
+        return cls(
+            norb=norb,
+            nelec=tuple(nelec),
+            nkpts=nkpts,
+            target_k=int(target_k) % nkpts,
+            ncas=ncas,
+            sector_size=sector_size,
+            link_index=(link_indexa, link_indexb),
+            blocks=blocks,
+            stra_ids=stra_ids,
+            stra_offsets=stra_offsets,
+            strb_ids=strb_ids,
+            strb_offsets=strb_offsets,
+            str2tot_a=np.asarray(str2tot_a, dtype=np.int32, order="C"),
+            str2tot_b=np.asarray(str2tot_b, dtype=np.int32, order="C"),
+            kmom=kmom,
+        )
+
+
+@dataclass
+class KFCI2EMap:
+    ab_tab: np.ndarray
+    ab_offsets: np.ndarray
+    aa_tab: np.ndarray
+    aa_offsets: np.ndarray
+    bb_tab: np.ndarray
+    bb_offsets: np.ndarray
+    has_pair_tables: bool
+    ab_group_tab: np.ndarray
+    ab_group_offsets: np.ndarray
+    ab_src_addr: np.ndarray
+    ab_dst_addr: np.ndarray
+    ab_sign: np.ndarray
+    ab_eri_idx_ab: np.ndarray
+    ab_eri_idx_ba: np.ndarray
+    aa_group_tab: np.ndarray
+    aa_group_offsets: np.ndarray
+    aa_src_addr: np.ndarray
+    aa_dst_addr: np.ndarray
+    aa_sign: np.ndarray
+    aa_eri_idx: np.ndarray
+    bb_group_tab: np.ndarray
+    bb_group_offsets: np.ndarray
+    bb_src_addr: np.ndarray
+    bb_dst_addr: np.ndarray
+    bb_sign: np.ndarray
+    bb_eri_idx: np.ndarray
+    explicit_ab: bool = True
+
+
+@dataclass
+class KFCIContractMap:
+    layout: KFCILayoutMap
+    two_e: KFCI2EMap
+
+    def __getattr__(self, name):
+        layout = object.__getattribute__(self, "layout")
+        two_e = object.__getattribute__(self, "two_e")
+        if name in layout.__dataclass_fields__:
+            return getattr(layout, name)
+        if name in two_e.__dataclass_fields__:
+            return getattr(two_e, name)
+        raise AttributeError(name)
+
+    @classmethod
+    def build(cls, norb, nelec, nkpts, target_k, link_index=None,
+              build_pair_tables=False, use_c_structures=True,
+              explicit_ab="auto", max_memory=None, memory_fraction=0.5,
+              kmom=None, kconserv=None, cell=None, kpts=None, kmesh=None):
+        layout = KFCILayoutMap.build(
+            norb, nelec, nkpts, target_k, link_index=link_index,
+            kmom=kmom, kconserv=kconserv, cell=cell, kpts=kpts,
+            kmesh=kmesh)
+        link_indexa, link_indexb = layout.link_index
+        norb = layout.norb
+        nkpts = layout.nkpts
+        ncas = layout.ncas
+        blocks = layout.blocks
+        str2tot_a = layout.str2tot_a
+        str2tot_b = layout.str2tot_b
+        kmom = layout.kmom
+        explicit_ab = _resolve_explicit_ab(
+            link_indexa, link_indexb, blocks, nkpts,
+            explicit_ab=explicit_ab, max_memory=max_memory,
+            memory_fraction=memory_fraction, kmom=kmom)
+
+        structures = None
+        if use_c_structures and kmom.scalar:
+            try:
+                structures = build_contract_structures_c(
+                    link_indexa, link_indexb, str2tot_a, str2tot_b,
+                    blocks, nkpts, ncas, explicit_ab=explicit_ab)
+            except AttributeError:
+                structures = None
+
+        if explicit_ab and (build_pair_tables or structures is None):
+            ab_tab, ab_offsets, aa_tab, aa_offsets, bb_tab, bb_offsets = (
+                build_contract_pair_tables(link_indexa, link_indexb,
+                                           norb, nkpts, kmom=kmom))
+            has_pair_tables = True
+            if structures is None:
+                ab_sparse = build_ab_sparse_structure(
+                    ab_tab, ab_offsets, blocks, nkpts, ncas)
+                aa_dense = build_same_spin_dense_structure(
+                    aa_tab, aa_offsets, blocks, nkpts, ncas, "a")
+                bb_dense = build_same_spin_dense_structure(
+                    bb_tab, bb_offsets, blocks, nkpts, ncas, "b")
+                structures = {
+                    "ab_group_tab": ab_sparse["ab_group_tab"],
+                    "ab_group_offsets": ab_sparse["ab_group_offsets"],
+                    "ab_src_addr": ab_sparse["ab_src_addr"],
+                    "ab_dst_addr": ab_sparse["ab_dst_addr"],
+                    "ab_sign": ab_sparse["ab_sign"],
+                    "ab_eri_idx_ab": ab_sparse["ab_eri_idx_ab"],
+                    "ab_eri_idx_ba": ab_sparse["ab_eri_idx_ba"],
+                    "aa_group_tab": aa_dense["group_tab"],
+                    "aa_group_offsets": aa_dense["group_offsets"],
+                    "aa_src_addr": aa_dense["src_addr"],
+                    "aa_dst_addr": aa_dense["dst_addr"],
+                    "aa_sign": aa_dense["sign"],
+                    "aa_eri_idx": aa_dense["eri_idx"],
+                    "bb_group_tab": bb_dense["group_tab"],
+                    "bb_group_offsets": bb_dense["group_offsets"],
+                    "bb_src_addr": bb_dense["src_addr"],
+                    "bb_dst_addr": bb_dense["dst_addr"],
+                    "bb_sign": bb_dense["sign"],
+                    "bb_eri_idx": bb_dense["eri_idx"],
+                }
+        elif structures is None:
+            (aa_tab, aa_offsets, bb_tab, bb_offsets, aa_dense, bb_dense) = (
+                build_same_spin_pair_structures_py(
+                    link_indexa, link_indexb, norb, nkpts, blocks, ncas,
+                    kmom=kmom))
+            table_size = nkpts * nkpts
+            ab_tab = np.zeros((0, NAB_FIELDS), dtype=np.int32)
+            ab_offsets = np.zeros(table_size + 1, dtype=np.int32)
+            has_pair_tables = False
+            structures = _empty_ab_structure(nkpts)
+            structures.update({
+                "aa_group_tab": aa_dense["group_tab"],
+                "aa_group_offsets": aa_dense["group_offsets"],
+                "aa_src_addr": aa_dense["src_addr"],
+                "aa_dst_addr": aa_dense["dst_addr"],
+                "aa_sign": aa_dense["sign"],
+                "aa_eri_idx": aa_dense["eri_idx"],
+                "bb_group_tab": bb_dense["group_tab"],
+                "bb_group_offsets": bb_dense["group_offsets"],
+                "bb_src_addr": bb_dense["src_addr"],
+                "bb_dst_addr": bb_dense["dst_addr"],
+                "bb_sign": bb_dense["sign"],
+                "bb_eri_idx": bb_dense["eri_idx"],
+            })
+        else:
+            table_size = nkpts * nkpts
+            ab_tab = np.zeros((0, NAB_FIELDS), dtype=np.int32)
+            ab_offsets = np.zeros(table_size + 1, dtype=np.int32)
+            aa_tab = np.zeros((0, NSS_FIELDS), dtype=np.int32)
+            aa_offsets = np.zeros(nkpts + 1, dtype=np.int32)
+            bb_tab = np.zeros((0, NSS_FIELDS), dtype=np.int32)
+            bb_offsets = np.zeros(nkpts + 1, dtype=np.int32)
+            has_pair_tables = False
+
+        two_e = KFCI2EMap(
+            ab_tab=ab_tab,
+            ab_offsets=ab_offsets,
+            aa_tab=aa_tab,
+            aa_offsets=aa_offsets,
+            bb_tab=bb_tab,
+            bb_offsets=bb_offsets,
+            has_pair_tables=has_pair_tables,
+            ab_group_tab=structures["ab_group_tab"],
+            ab_group_offsets=structures["ab_group_offsets"],
+            ab_src_addr=structures["ab_src_addr"],
+            ab_dst_addr=structures["ab_dst_addr"],
+            ab_sign=structures["ab_sign"],
+            ab_eri_idx_ab=structures["ab_eri_idx_ab"],
+            ab_eri_idx_ba=structures["ab_eri_idx_ba"],
+            aa_group_tab=structures["aa_group_tab"],
+            aa_group_offsets=structures["aa_group_offsets"],
+            aa_src_addr=structures["aa_src_addr"],
+            aa_dst_addr=structures["aa_dst_addr"],
+            aa_sign=structures["aa_sign"],
+            aa_eri_idx=structures["aa_eri_idx"],
+            bb_group_tab=structures["bb_group_tab"],
+            bb_group_offsets=structures["bb_group_offsets"],
+            bb_src_addr=structures["bb_src_addr"],
+            bb_dst_addr=structures["bb_dst_addr"],
+            bb_sign=structures["bb_sign"],
+            bb_eri_idx=structures["bb_eri_idx"],
+            explicit_ab=bool(explicit_ab),
+        )
+        return cls(layout=layout, two_e=two_e)
+
+
+def make_kfci_contract_map(norb, nelec, nkpts, target_k, link_index=None,
+                           build_pair_tables=False, use_c_structures=True,
+                           explicit_ab="auto", max_memory=None,
+                           memory_fraction=0.5, kmom=None, kconserv=None,
+                           cell=None, kpts=None, kmesh=None):
+    return KFCIContractMap.build(norb, nelec, nkpts, target_k,
+                                 link_index=link_index,
+                                 build_pair_tables=build_pair_tables,
+                                 use_c_structures=use_c_structures,
+                                 explicit_ab=explicit_ab,
+                                 max_memory=max_memory,
+                                 memory_fraction=memory_fraction,
+                                 kmom=kmom, kconserv=kconserv, cell=cell,
+                                 kpts=kpts, kmesh=kmesh)
+
+
+def contract_ab_pairs(eri, ci0_block, ci1_blocks, ab_pairs, ka, kb):
+    '''
+    Contracting the alpha-beta excitation pairs for a given (ka, kb) block.
+    args:
+        eri : np.ndarray
+            The two-electron integrals in k-space.
+        ci0_block : np.ndarray
+            The input CI vector block for the (ka, kb) momentum sector.
+        ci1_blocks : list of list of np.ndarray
+            The output CI vector blocks for all momentum sectors.
+        ab_pairs : list of list of np.ndarray
+            The alpha-beta excitation-pair tables grouped by (ka, kb).
+        ka : int
+            The total momentum of the alpha strings in ci0_block.
+        kb : int
+            The total momentum of the beta strings in ci0_block.
+    returns:
+        None
+            The ci1_blocks arrays are updated in place.
+    '''
+    pairtab = ab_pairs[ka][kb]
+
+    for row in pairtab:
+        a0 = row[AB_A0]
+        a1 = row[AB_A1]
+        b0 = row[AB_B0]
+        b1 = row[AB_B1]
+        sign = row[AB_SIGN]
+        ka1 = row[AB_KA1]
+        kb1 = row[AB_KB1]
+        ci1_block = ci1_blocks[ka1][kb1]
+
+        if ci1_block is None:
+            continue
+
+        val_ab = eri[
+            row[AB_KPA], row[AB_KQA], row[AB_KRB],
+            row[AB_PA], row[AB_QA], row[AB_RB], row[AB_SB],
+        ]
+        val_ba = eri[
+            row[AB_KPB], row[AB_KQB], row[AB_KRA],
+            row[AB_PB], row[AB_QB], row[AB_RA], row[AB_SA],
+        ]
+
+        ci1_block[a1, b1] += (val_ab + val_ba) * sign * ci0_block[a0, b0]
+
+
+def contract_aa_pairs(eri, ci0_blocks, ci1_blocks, aa_pairs, ka, kb):
+    '''
+    Contracting the alpha-alpha excitation pairs for a given (ka, kb) block.
+    args:
+        eri : np.ndarray
+            The two-electron integrals in k-space.
+        ci0_blocks : list of list of np.ndarray
+            The input CI vector blocks for all momentum sectors.
+        ci1_blocks : list of list of np.ndarray
+            The output CI vector blocks for all momentum sectors.
+        aa_pairs : list of np.ndarray
+            The alpha-alpha excitation-pair tables grouped by ka.
+        ka : int
+            The total momentum of the alpha strings in the input block.
+        kb : int
+            The total momentum of the beta strings in the input block.
+    returns:
+        None
+            The ci1_blocks arrays are updated in place.
+    '''
+    ci0_block = ci0_blocks[ka][kb]
+    if ci0_block is None:
+        return
+
+    pairtab = aa_pairs[ka]
+
+    for row in pairtab:
+        a0 = row[SS_0]
+        a1 = row[SS_1]
+        sign = row[SS_SIGN]
+        ka1 = row[SS_K1]
+
+        ci1_block = ci1_blocks[ka1][kb]
+        if ci1_block is None:
+            continue
+
+        val = eri[
+            row[SS_KP], row[SS_KQ], row[SS_KR],
+            row[SS_P], row[SS_Q], row[SS_R], row[SS_S],
+        ]
+
+        ci1_block[a1, :] += val * sign * ci0_block[a0, :]
+
+
+def contract_bb_pairs(eri, ci0_blocks, ci1_blocks, bb_pairs, ka, kb):
+    '''
+    Contracting the beta-beta excitation pairs for a given (ka, kb) block.
+    args:
+        eri : np.ndarray
+            The two-electron integrals in k-space.
+        ci0_blocks : list of list of np.ndarray
+            The input CI vector blocks for all momentum sectors.
+        ci1_blocks : list of list of np.ndarray
+            The output CI vector blocks for all momentum sectors.
+        bb_pairs : list of np.ndarray
+            The beta-beta excitation-pair tables grouped by kb.
+        ka : int
+            The total momentum of the alpha strings in the input block.
+        kb : int
+            The total momentum of the beta strings in the input block.
+    returns:
+        None
+            The ci1_blocks arrays are updated in place.
+    '''
+    ci0_block = ci0_blocks[ka][kb]
+    if ci0_block is None:
+        return
+
+    pairtab = bb_pairs[kb]
+
+    for row in pairtab:
+        b0 = row[SS_0]
+        b1 = row[SS_1]
+        sign = row[SS_SIGN]
+        kb1 = row[SS_K1]
+
+        ci1_block = ci1_blocks[ka][kb1]
+        if ci1_block is None:
+            continue
+
+        val = eri[
+            row[SS_KP], row[SS_KQ], row[SS_KR],
+            row[SS_P], row[SS_Q], row[SS_R], row[SS_S],
+        ]
+
+        ci1_block[:, b1] += val * sign * ci0_block[:, b0]
