@@ -8,7 +8,7 @@ import numpy as np
 from pyscf.lib import logger
 from pyscf.pbc import gto, scf
 
-from mrh.my_pyscf.pbc import mcscf
+from mrh.my_pyscf.pbc import mcscf, mcpdft as pbc_mcpdft
 from mrh.my_pyscf.pbc.fci import direct_spin1_kfci
 from mrh.my_pyscf.pbc.mcpdft import kmcpdft, kmcpdft_helper
 from mrh.my_pyscf.pbc.mcpdft._dms import dm2_cumulant_complex
@@ -683,6 +683,136 @@ class KCASPDFTWavefunctionEnergyTests(unittest.TestCase):
                     energy_reconstructed, energy_kcas,
                     atol=1e-9, rtol=1e-9,
                 )
+
+
+class KCASPDFTRoutingTests(unittest.TestCase):
+
+    def test_kcasci_default_preserves_conventional_route(self):
+        sentinel = object()
+        with mock.patch.object(
+                pbc_mcpdft, "_MCPDFT", return_value=sentinel) as factory:
+            result = pbc_mcpdft.KCASCI(
+                "kmf", "tPBE", 2, (1, 1), ncore=0,
+            )
+
+        self.assertIs(result, sentinel)
+        factory.assert_called_once_with(
+            pbc_mcpdft.pbc_mcscf.CASCI,
+            "kmf", "tPBE", 2, (1, 1),
+            ncore=0, frozen=None,
+        )
+
+    def test_target_k_requires_momentum_resolved_flag(self):
+        with self.assertRaisesRegex(
+                ValueError, "target_k requires momentum_resolved=True"):
+            pbc_mcpdft.KCASCI(
+                "kmf", "tPBE", 2, (1, 1), target_k=0,
+            )
+
+    def test_momentum_route_constructs_kcasci_with_target(self):
+        kmf = object()
+        kmc = SimpleNamespace()
+        pdft = object()
+        with mock.patch.object(
+                pbc_mcpdft, "_sanity_check_for_kmf",
+                return_value=kmf), \
+             mock.patch.object(
+                pbc_mcpdft.pbc_mcscf, "KCASCI",
+                return_value=kmc) as make_kcasci, \
+             mock.patch.object(
+                pbc_mcpdft, "get_kcas_mcpdft_child_class",
+                return_value=pdft) as make_child:
+            result = pbc_mcpdft.KCASCI(
+                kmf, "tPBE", 2, (1, 1), ncore=0,
+                momentum_resolved=True, target_k=3,
+                grids_level=4,
+            )
+
+        self.assertIs(result, pdft)
+        make_kcasci.assert_called_once_with(
+            kmf, 2, (1, 1), ncore=0, target_k=3,
+        )
+        make_child.assert_called_once_with(
+            kmc, "tPBE", grids_level=4,
+        )
+
+    def test_existing_kcasci_sector_is_preserved_and_validated(self):
+        from mrh.my_pyscf.pbc.mcscf.kcasci import PBCKCASCI
+
+        kmc = object.__new__(PBCKCASCI)
+        kmc._scf = object()
+        kmc.nkpts = 3
+        kmc.target_k = 2
+        pdft = object()
+        with mock.patch.object(
+                pbc_mcpdft, "_sanity_check_for_kmf"), \
+             mock.patch.object(
+                pbc_mcpdft, "get_kcas_mcpdft_child_class",
+                return_value=pdft) as make_child:
+            result = pbc_mcpdft.KCASCI(
+                kmc, "tPBE", 2, (1, 1),
+                momentum_resolved=True,
+            )
+            self.assertIs(result, pdft)
+            make_child.assert_called_once_with(kmc, "tPBE")
+
+            with self.assertRaisesRegex(ValueError, "conflicts"):
+                pbc_mcpdft.KCASCI(
+                    kmc, "tPBE", 2, (1, 1),
+                    momentum_resolved=True, target_k=1,
+                )
+
+    def test_momentum_route_validates_options(self):
+        with self.assertRaisesRegex(ValueError, "momentum_resolved"):
+            pbc_mcpdft.KCASCI(
+                "kmf", "tPBE", 2, (1, 1),
+                momentum_resolved="yes",
+            )
+        with self.assertRaisesRegex(ValueError, "target_k must be an integer"):
+            pbc_mcpdft.KCASCI(
+                "kmf", "tPBE", 2, (1, 1),
+                momentum_resolved=True, target_k=0.5,
+            )
+
+    def test_kcas_pdft_mixin_uses_momentum_methods(self):
+        self.assertIs(
+            kmcpdft._kKCASPDFT.make_one_casdm1s,
+            kmcpdft_helper.make_one_casdm1s_kcas,
+        )
+        self.assertIs(
+            kmcpdft._kKCASPDFT.make_one_casdm2,
+            kmcpdft_helper.make_one_casdm2_kcas,
+        )
+        self.assertIs(
+            kmcpdft._kKCASPDFT.energy_mcwfn,
+            kmcpdft.energy_mcwfn_kcas,
+        )
+        self.assertIs(
+            kmcpdft._kKCASPDFT.energy_dft,
+            kmcpdft.energy_dft_kcas,
+        )
+
+    def test_energy_dft_kcas_delegates_to_direct_ot_method(self):
+        ot = SimpleNamespace(energy_ot_kcas=mock.Mock(return_value=0.75))
+        mc = SimpleNamespace(
+            otfnal=ot,
+            mo_coeff="mo",
+            ci="ci",
+            ncore=2,
+            max_memory=1234,
+        )
+        casdm1s = np.zeros((2, 1, 1))
+        casdm2 = np.zeros((1, 1, 1, 1))
+
+        result = kmcpdft.energy_dft_kcas(
+            mc, casdm1s=casdm1s, casdm2=casdm2,
+        )
+
+        self.assertEqual(result, 0.75)
+        ot.energy_ot_kcas.assert_called_once_with(
+            casdm1s, casdm2, "mo", 2,
+            max_memory=1234, hermi=1, momentum_tol=1e-8,
+        )
 
 
 if __name__ == "__main__":
