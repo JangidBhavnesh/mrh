@@ -1179,6 +1179,112 @@ class KCASPDFTRoutingTests(unittest.TestCase):
             kmcpdft.energy_dft_kcas,
         )
 
+    def test_charged_kcas_pdft_mixin_uses_sector_rdm_methods(self):
+        self.assertIs(
+            kmcpdft._kChargedKCASPDFT.make_one_casdm1s,
+            kmcpdft_helper.make_one_casdm1s_charged_kcas,
+        )
+        self.assertIs(
+            kmcpdft._kChargedKCASPDFT.make_one_casdm2,
+            kmcpdft_helper.make_one_casdm2_charged_kcas,
+        )
+        self.assertIs(
+            kmcpdft._kChargedKCASPDFT.energy_tot,
+            kmcpdft.energy_tot_charged_kcas,
+        )
+
+    def test_charged_energy_selects_one_sector(self):
+        ot = SimpleNamespace(
+            otxc="tPBE", reset=mock.Mock(),
+        )
+        casdm1s = np.zeros((2, 2, 2))
+        casdm2 = np.zeros((2, 2, 2, 2))
+        mc = SimpleNamespace(
+            nkpts=2,
+            target_k=None,
+            charged_results=[
+                {"target_k": 0, "ci": "sector-0"},
+                {"target_k": 1, "ci": "sector-1"},
+            ],
+            otfnal=ot,
+            mol="mol",
+            mo_coeff="mo",
+            verbose=logger.QUIET,
+            make_one_casdm1s=mock.Mock(return_value=casdm1s),
+            make_one_casdm2=mock.Mock(return_value=casdm2),
+            energy_mcwfn=mock.Mock(return_value=1.25),
+            energy_dft=mock.Mock(return_value=0.5),
+        )
+
+        result = kmcpdft.energy_tot_charged_kcas(
+            mc, target_k=-1, state=1,
+        )
+
+        self.assertEqual(result, (1.75, 0.5))
+        ot.reset.assert_called_once_with(mol="mol")
+        mc.make_one_casdm1s.assert_called_once_with(
+            ci="sector-1", state=1, target_k=1,
+        )
+        mc.make_one_casdm2.assert_called_once_with(
+            ci="sector-1", state=1, target_k=1,
+        )
+        mc.energy_mcwfn.assert_called_once_with(
+            ot=ot, mo_coeff="mo", casdm1s=casdm1s,
+            casdm2=casdm2, verbose=logger.QUIET,
+        )
+
+    def test_charged_compute_pdft_energy_loops_over_sectors_and_roots(self):
+        energy_tot = mock.Mock(
+            side_effect=lambda **kwargs: (
+                10 * kwargs["target_k"] + kwargs["state"] + 0.5,
+                10 * kwargs["target_k"] + kwargs["state"] + 0.25,
+            ),
+        )
+        mc = SimpleNamespace(
+            mo_coeff="mo",
+            target_k=None,
+            nkpts=2,
+            charge=1,
+            charged_results=[
+                {
+                    "target_k": 0, "charge": 1, "nkpts": 2,
+                    "ci": ["0-root-0", "0-root-1"],
+                    "e_tot": -1.0,
+                },
+                {
+                    "target_k": 1, "charge": 1, "nkpts": 2,
+                    "ci": ["1-root-0", "1-root-1"],
+                    "e_tot": -0.9,
+                },
+            ],
+            fcisolver=SimpleNamespace(nroots=2),
+            otfnal=SimpleNamespace(verbose=logger.QUIET),
+            verbose=logger.QUIET,
+            energy_tot=energy_tot,
+        )
+
+        output = kmcpdft._kChargedKCASPDFT.compute_pdft_energy_(mc)
+
+        np.testing.assert_allclose(mc.e_tot, [[0.5, 1.5], [10.5, 11.5]])
+        np.testing.assert_allclose(mc.e_ot, [[0.25, 1.25], [10.25, 11.25]])
+        self.assertEqual(len(mc.charged_pdft_results), 2)
+        self.assertEqual(
+            [item["e_mcscf"] for item in mc.charged_pdft_results],
+            [-1.0, -0.9],
+        )
+        self.assertIs(output[2], mc.charged_pdft_results)
+        self.assertEqual(
+            [(call.kwargs["target_k"], call.kwargs["state"],
+              call.kwargs["ci"])
+             for call in energy_tot.call_args_list],
+            [
+                (0, 0, ["0-root-0", "0-root-1"]),
+                (0, 1, ["0-root-0", "0-root-1"]),
+                (1, 0, ["1-root-0", "1-root-1"]),
+                (1, 1, ["1-root-0", "1-root-1"]),
+            ],
+        )
+
     def test_energy_dft_kcas_delegates_to_direct_ot_method(self):
         ot = SimpleNamespace(energy_ot_kcas=mock.Mock(return_value=0.75))
         mc = SimpleNamespace(

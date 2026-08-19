@@ -303,6 +303,46 @@ def energy_dft_kcas(mc, mo_coeff=None, ci=None, ot=None, state=0,
     )
 
 
+def energy_tot_charged_kcas(mc, mo_coeff=None, ci=None, ot=None, state=0,
+                            target_k=None, verbose=None):
+    """Evaluate MC-PDFT for one charged KCASCI momentum sector and root."""
+    result = kmcpdft_helper._select_charged_kcas_result(
+        mc, target_k=target_k,
+    )
+    target_k = int(result["target_k"]) % int(mc.nkpts)
+    if ot is None:
+        ot = mc.otfnal
+    ot.reset(mol=mc.mol)
+    if mo_coeff is None:
+        mo_coeff = mc.mo_coeff
+    if ci is None:
+        ci = result.get("ci")
+    if verbose is None:
+        verbose = mc.verbose
+
+    casdm1s = mc.make_one_casdm1s(
+        ci=ci, state=state, target_k=target_k,
+    )
+    casdm2 = mc.make_one_casdm2(
+        ci=ci, state=state, target_k=target_k,
+    )
+    e_mcwfn = mc.energy_mcwfn(
+        ot=ot, mo_coeff=mo_coeff, casdm1s=casdm1s,
+        casdm2=casdm2, verbose=verbose,
+    )
+    e_ot = mc.energy_dft(
+        ot=ot, mo_coeff=mo_coeff, casdm1s=casdm1s,
+        casdm2=casdm2,
+    )
+    e_tot = e_mcwfn + e_ot
+    logger.note(
+        mc,
+        "MC-PDFT charged target_k %d state %d E = %s, Eot(%s) = %s",
+        target_k, state, e_tot, ot.otxc, e_ot,
+    )
+    return e_tot, e_ot
+
+
 class _kMCPDFT(_PDFT):
     '''
     k-MC-PDFT for periodic systems at the gamma point or k-points.
@@ -380,6 +420,98 @@ class _kKCASPDFT(_kMCPDFT):
     energy_dft = energy_dft_kcas
 
 
+class _kChargedKCASPDFT(_kKCASPDFT):
+    """k-MC-PDFT specialization for charged KCASCI momentum sectors."""
+
+    make_one_casdm1s = kmcpdft_helper.make_one_casdm1s_charged_kcas
+    make_one_casdm2 = kmcpdft_helper.make_one_casdm2_charged_kcas
+    energy_tot = energy_tot_charged_kcas
+
+    def compute_pdft_energy_(self, mo_coeff=None, ci=None, ot=None,
+                             otxc=None, grids_level=None, grids_attr=None,
+                             dump_chk=False, verbose=None, target_k=None,
+                             **kwargs):
+        """Evaluate MC-PDFT independently for each charged k sector."""
+        del kwargs
+        if dump_chk:
+            raise ValueError("dump_chk is not supported for k-MC-PDFT")
+        if mo_coeff is not None:
+            self.mo_coeff = mo_coeff
+        if ot is not None:
+            self.otfnal = ot
+        if otxc is not None:
+            self.otxc = otxc
+        if grids_attr is None:
+            grids_attr = {}
+        if grids_level is not None:
+            grids_attr["level"] = grids_level
+        if grids_attr:
+            self.grids.__dict__.update(grids_attr)
+        if verbose is None:
+            verbose = self.verbose
+        self.verbose = self.otfnal.verbose = verbose
+
+        if target_k is None:
+            target_k = self.target_k
+        if target_k is None:
+            results = list(self.charged_results)
+        else:
+            results = [kmcpdft_helper._select_charged_kcas_result(
+                self, target_k=target_k,
+            )]
+        if not results:
+            raise ValueError("No charged KCASCI results are available")
+        if len(results) > 1 and ci is not None and not isinstance(ci, dict):
+            raise ValueError(
+                "ci for multiple charged sectors must be a dict keyed by "
+                "target_k",
+            )
+
+        nroots = int(getattr(self.fcisolver, "nroots", 1))
+        pdft_results = []
+        for result in results:
+            sector = int(result["target_k"]) % int(self.nkpts)
+            if isinstance(ci, dict):
+                sector_ci = ci.get(sector)
+            elif ci is None:
+                sector_ci = result.get("ci")
+            else:
+                sector_ci = ci
+            epdft = [
+                self.energy_tot(
+                    mo_coeff=self.mo_coeff, ci=sector_ci, state=state,
+                    target_k=sector, verbose=verbose,
+                )
+                for state in range(nroots)
+            ]
+            e_tot = [energy for energy, _ in epdft]
+            e_ot = [energy for _, energy in epdft]
+            if nroots == 1:
+                e_tot = e_tot[0]
+                e_ot = e_ot[0]
+            pdft_results.append({
+                "target_k": sector,
+                "charge": result.get("charge", self.charge),
+                "nkpts": result.get("nkpts", self.nkpts),
+                "e_mcscf": result.get("e_tot"),
+                "e_tot": e_tot,
+                "e_ot": e_ot,
+            })
+
+        self.charged_pdft_results = pdft_results
+        if len(pdft_results) == 1:
+            self.e_tot = pdft_results[0]["e_tot"]
+            self.e_ot = pdft_results[0]["e_ot"]
+        else:
+            self.e_tot = np.asarray([
+                result["e_tot"] for result in pdft_results
+            ])
+            self.e_ot = np.asarray([
+                result["e_ot"] for result in pdft_results
+            ])
+        return self.e_tot, self.e_ot, self.charged_pdft_results
+
+
 def _get_mcpdft_child_class(kmc, ot, pdft_base, **kwargs):
     mc_doc = (kmc.__class__.__doc__ or 'No docstring for MC-SCF parent method')
 
@@ -401,7 +533,7 @@ def _get_mcpdft_child_class(kmc, ot, pdft_base, **kwargs):
                 assert all(value is not None for value in cell_kpts_info), \
                     "The kmesh and kpts attributes should be set in the otfnal object"
             assert dump_chk is False, "dump_chk is not supported for k-MC-PDFT"
-            return _kMCPDFT.compute_pdft_energy_(self, mo_coeff=mo_coeff, ci=ci, ot=ot, otxc=otxc,
+            return pdft_base.compute_pdft_energy_(self, mo_coeff=mo_coeff, ci=ci, ot=ot, otxc=otxc,
                     grids_level=grids_level, grids_attr=grids_attr, dump_chk=False, **kwargs)
      
     pdft = PDFT(kmc._scf, kmc.ncas, kmc.nelecas, my_ot=ot, **kwargs)
@@ -420,6 +552,16 @@ def get_mcpdft_child_class(kmc, ot, **kwargs):
 def get_kcas_mcpdft_child_class(kmc, ot, **kwargs):
     """Wrap a momentum-resolved kCASCI object with k-MC-PDFT methods."""
     pdft = _get_mcpdft_child_class(kmc, ot, _kKCASPDFT, **kwargs)
+    if getattr(kmc, "converged", False):
+        pdft.e_mcscf = kmc.e_tot
+    return pdft
+
+
+def get_charged_kcas_mcpdft_child_class(kmc, ot, **kwargs):
+    """Wrap charged KCASCI results with sector-aware k-MC-PDFT methods."""
+    pdft = _get_mcpdft_child_class(kmc, ot, _kChargedKCASPDFT, **kwargs)
+    pdft._keys.add("charged_pdft_results")
+    pdft.charged_pdft_results = []
     if getattr(kmc, "converged", False):
         pdft.e_mcscf = kmc.e_tot
     return pdft
