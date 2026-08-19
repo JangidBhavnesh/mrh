@@ -1123,6 +1123,34 @@ class KCASPDFTRoutingTests(unittest.TestCase):
             kmc, "tPBE", grids_level=4,
         )
 
+    def test_charged_momentum_route_preserves_all_sector_sweep(self):
+        kmf = object()
+        kmc = SimpleNamespace(charge=1)
+        pdft = object()
+        with mock.patch.object(
+                pbc_mcpdft, "_sanity_check_for_kmf",
+                return_value=kmf), \
+             mock.patch.object(
+                pbc_mcpdft.pbc_mcscf, "KCASCI",
+                return_value=kmc) as make_kcasci, \
+             mock.patch.object(
+                pbc_mcpdft, "get_charged_kcas_mcpdft_child_class",
+                return_value=pdft) as make_child:
+            result = pbc_mcpdft.KCASCI(
+                kmf, "tPBE", 2, (1, 1), ncore=0,
+                momentum_resolved=True, charge=1,
+                charged_spin=1, grids_level=4,
+            )
+
+        self.assertIs(result, pdft)
+        make_kcasci.assert_called_once_with(
+            kmf, 2, (1, 1), ncore=0, charge=1,
+            target_k=None, charged_spin=1,
+        )
+        make_child.assert_called_once_with(
+            kmc, "tPBE", grids_level=4,
+        )
+
     def test_existing_kcasci_sector_is_preserved_and_validated(self):
         from mrh.my_pyscf.pbc.mcscf.kcasci import PBCKCASCI
 
@@ -1149,6 +1177,37 @@ class KCASPDFTRoutingTests(unittest.TestCase):
                     momentum_resolved=True, target_k=1,
                 )
 
+    def test_existing_charged_kcasci_uses_charged_wrapper(self):
+        from mrh.my_pyscf.pbc.mcscf.kcasci import ChargedPBCKCASCI
+
+        kmc = object.__new__(ChargedPBCKCASCI)
+        kmc._scf = object()
+        kmc.nkpts = 3
+        kmc.target_k = None
+        kmc.charge = -1
+        kmc.charged_spin = 1
+        pdft = object()
+        with mock.patch.object(
+                pbc_mcpdft, "_sanity_check_for_kmf"), \
+             mock.patch.object(
+                pbc_mcpdft, "get_charged_kcas_mcpdft_child_class",
+                return_value=pdft) as make_child:
+            result = pbc_mcpdft.KCASCI(
+                kmc, "tPBE", 2, (1, 1),
+                momentum_resolved=True,
+            )
+
+        self.assertIs(result, pdft)
+        make_child.assert_called_once_with(kmc, "tPBE")
+
+        with mock.patch.object(
+                pbc_mcpdft, "_sanity_check_for_kmf"):
+            with self.assertRaisesRegex(ValueError, "charge conflicts"):
+                pbc_mcpdft.KCASCI(
+                    kmc, "tPBE", 2, (1, 1),
+                    momentum_resolved=True, charge=1,
+                )
+
     def test_momentum_route_validates_options(self):
         with self.assertRaisesRegex(ValueError, "momentum_resolved"):
             pbc_mcpdft.KCASCI(
@@ -1159,6 +1218,20 @@ class KCASPDFTRoutingTests(unittest.TestCase):
             pbc_mcpdft.KCASCI(
                 "kmf", "tPBE", 2, (1, 1),
                 momentum_resolved=True, target_k=0.5,
+            )
+        with self.assertRaisesRegex(ValueError, "charge must be -1"):
+            pbc_mcpdft.KCASCI(
+                "kmf", "tPBE", 2, (1, 1),
+                momentum_resolved=True, charge=2,
+            )
+        with self.assertRaisesRegex(ValueError, "charged_spin requires"):
+            pbc_mcpdft.KCASCI(
+                "kmf", "tPBE", 2, (1, 1),
+                momentum_resolved=True, charged_spin=1,
+            )
+        with self.assertRaisesRegex(ValueError, "require momentum_resolved"):
+            pbc_mcpdft.KCASCI(
+                "kmf", "tPBE", 2, (1, 1), charge=1,
             )
 
     def test_kcas_pdft_mixin_uses_momentum_methods(self):
