@@ -1,11 +1,15 @@
 #!/usr/bin/env python
 
-"""Run neutral KCASCI in each total-momentum sector.
+"""Run neutral and charged KCASCI in total-momentum sectors.
 
 KCASCI keeps the active orbitals in the k-point basis and uses the
 momentum-resolved kFCI solver.  ``ncas`` and ``nelecas`` are specified per
 primitive cell; the CI problem spans the complete k-point mesh.  Energies
 reported by the driver are normalized per primitive cell.
+
+For charged calculations, omitting ``target_k`` sweeps every N-1 or N+1
+total-momentum sector.  The band-energy helper converts those total momenta
+to the physical momentum of the removed or added electron.
 """
 
 import numpy as np
@@ -69,6 +73,7 @@ print(f"active-space dimensions   : {nkpts * ncas} orbitals, "
       f"{nkpts * nelecas} electrons")
 print()
 
+e_neutral = None
 for target_k in range(nkpts):
     kmc = mcscf.KCASCI(
         kmf, ncas, nelecas, ncore=0, target_k=target_k,
@@ -98,6 +103,7 @@ for target_k in range(nkpts):
     print(f"  2S+1                    : {multiplicity.real:16.12f}")
     print(f"  AO 1-RDM electron count : {electron_count:16.12f}")
     if target_k == 0:
+        e_neutral = e_tot
         print(f"  KCASCI - full CASCI     : {(e_tot - e_ref).real:16.12e}")
     print()
 
@@ -109,3 +115,46 @@ mo_canonical, _, mo_energy = kmc.canonicalize_()
 print(f"Fock matrix shape         : {fock.shape}")
 print(f"Canonical orbitals shape  : {mo_canonical.shape}")
 print(f"Orbital energies shape    : {np.asarray(mo_energy).shape}")
+
+# A positive charge removes one electron from the complete k-mesh active
+# space; a negative charge adds one.  With target_k omitted, the driver solves
+# every charged total-momentum sector using the same transformed integrals.
+hole = mcscf.KCASCI(
+    kmf, ncas, nelecas, ncore=0, charge=1,
+)
+particle = mcscf.KCASCI(
+    kmf, ncas, nelecas, ncore=0, charge=-1,
+)
+for charged_mc in (hole, particle):
+    charged_mc.kmesh = kmesh
+    charged_mc.fcisolver.conv_tol = 1e-10
+    charged_mc.kernel(mo_coeff)
+
+hole_bands = hole.band_energies(e_neutral)
+particle_bands = particle.band_energies(e_neutral)
+hole_by_k = {
+    band["momentum_index"]: band for band in hole_bands
+}
+particle_by_k = {
+    band["momentum_index"]: band for band in particle_bands
+}
+
+print()
+print(f"N-1 active-space sector   : {sum(hole.charged_nelecastot)} "
+      f"electrons in {hole.nkpts * hole.ncas} orbitals")
+print(f"N+1 active-space sector   : {sum(particle.charged_nelecastot)} "
+      f"electrons in {particle.nkpts * particle.ncas} orbitals")
+print()
+print("Quasiparticle energies (Eh)")
+print("  k   scaled kx   N-1 target   removal pole   "
+      "N+1 target   addition pole")
+scaled_kpts = cell.get_scaled_kpts(kpts)
+for k in np.argsort(scaled_kpts[:, 0]):
+    hole_band = hole_by_k[k]
+    particle_band = particle_by_k[k]
+    print(
+        f"{k:3d}  {scaled_kpts[k, 0]:10.6f}  "
+        f"{hole_band['target_k']:10d}  {hole_band['energy'].real:13.8f}  "
+        f"{particle_band['target_k']:10d}  "
+        f"{particle_band['energy'].real:13.8f}"
+    )
