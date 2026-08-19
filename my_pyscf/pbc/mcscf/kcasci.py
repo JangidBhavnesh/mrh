@@ -2,9 +2,10 @@
 
 import numpy as np
 
-from pyscf import lib
+from pyscf import __config__, lib
 from pyscf.lib import logger
 
+from mrh.my_pyscf.pbc import fci as pbc_fci
 from mrh.my_pyscf.pbc.fci.addons import _unpack_nelec
 from mrh.my_pyscf.pbc.fci import kcistrings
 from mrh.my_pyscf.pbc.mcscf import casci
@@ -467,3 +468,156 @@ def canonicalize(mc, mo_coeff=None, ci=None, eris=None, sort=False,
                 )
 
     return mo_coeff1, ci, mo_energy
+
+
+class PBCKCASCI(casci.PBCCASCI):
+    """Periodic CASCI driver restricted to one total-momentum sector."""
+
+    _keys = casci.PBCCASCI._keys.union({
+        "target_k", "kpts", "kmesh", "kconserv",
+    })
+
+    def __init__(self, kmf, ncas=0, nelecas=0, ncore=None, target_k=0):
+        super().__init__(
+            kmf, ncas=ncas, nelecas=nelecas, ncore=ncore,
+        )
+        self.target_k = target_k
+        self.kpts = kcistrings._safe_getattr(kmf, "kpts", None)
+        self.kmesh = kcistrings._safe_getattr(kmf, "kmesh", None)
+        self.kconserv = None
+        self.fcisolver = pbc_fci.ksolver(
+            self.cell, nkpts=self.nkpts, target_k=target_k,
+            kpts=self.kpts, kmesh=self.kmesh,
+        )
+        self.fcisolver.lindep = getattr(
+            __config__, "mcscf_casci_CASCI_fcisolver_lindep", 1e-12,
+        )
+        self.fcisolver.max_cycle = getattr(
+            __config__, "mcscf_casci_CASCI_fcisolver_max_cycle", 200,
+        )
+        self.fcisolver.conv_tol = getattr(
+            __config__, "mcscf_casci_CASCI_fcisolver_conv_tol", 1e-8,
+        )
+        self.canonicalization = False
+
+    def dump_flags(self, verbose=None):
+        super().dump_flags(verbose)
+        logger.new_logger(self, verbose).info("target_k = %s", self.target_k)
+        return self
+
+    def get_h1cas(self, mo_coeff=None, ncas=None, ncore=None):
+        """Alias for :meth:`get_h1eff`."""
+        return self.get_h1eff(mo_coeff, ncas, ncore)
+
+    get_h1eff = h1e_for_cas = h1e_for_cas
+    get_h2eff = get_h2eff
+
+    def make_rdm1(self, mo_coeff=None, ci=None, ncas=None, nelecas=None,
+                  ncore=None, **kwargs):
+        """Return the spin-summed AO 1-RDM at each k-point."""
+        target_k = kwargs.pop("target_k", self.target_k)
+        return make_rdm1(
+            self, mo_coeff=mo_coeff, ci=ci, ncas=ncas,
+            nelecas=nelecas, ncore=ncore, target_k=target_k,
+        )
+
+    get_fock = get_fock
+    canonicalize = canonicalize
+
+    @lib.with_doc(canonicalize.__doc__)
+    def canonicalize_(self, mo_coeff=None, ci=None, eris=None, sort=False,
+                      cas_natorb=False, casdm1=None, verbose=None,
+                      with_meta_lowdin=casci.WITH_META_LOWDIN,
+                      stav_dm1=False, weights=None, target_k=None):
+        self.mo_coeff, ci, self.mo_energy = canonicalize(
+            self, mo_coeff=mo_coeff, ci=ci, eris=eris, sort=sort,
+            cas_natorb=cas_natorb, casdm1=casdm1, verbose=verbose,
+            with_meta_lowdin=with_meta_lowdin, stav_dm1=stav_dm1,
+            weights=weights, target_k=target_k,
+        )
+        return self.mo_coeff, ci, self.mo_energy
+
+    def _finalize(self):
+        log = logger.Logger(self.stdout, self.verbose)
+        ncastot = self.nkpts * self.ncas
+        nelecastot = (
+            self.nkpts * self.nelecas[0],
+            self.nkpts * self.nelecas[1],
+        )
+        with_spin = (
+            log.verbose >= logger.NOTE
+            and getattr(self.fcisolver, "spin_square", None) is not None
+        )
+
+        scalar_energy = np.ndim(self.e_cas) == 0
+        e_tot = np.atleast_1d(self.e_tot)
+        e_cas = np.atleast_1d(self.e_cas)
+        ci_roots = [self.ci] if scalar_energy else self.ci
+        for root, (e_tot_root, e_cas_root, ci_root) in enumerate(
+                zip(e_tot, e_cas, ci_roots)):
+            if scalar_energy:
+                msg = "KCASCI E (per cell) = %#.15g  E(CI) = %#.15g"
+                args = (e_tot_root.real, e_cas_root.real)
+            else:
+                msg = (
+                    "KCASCI E (per cell) state %3d  E = %#.15g  "
+                    "E(CI) = %#.15g"
+                )
+                args = (root, e_tot_root.real, e_cas_root.real)
+
+            if with_spin:
+                try:
+                    ss = self.fcisolver.spin_square(
+                        ci_root, ncastot, nelecastot, nkpts=self.nkpts,
+                        target_k=int(self.target_k) % self.nkpts,
+                    )
+                    log.note(msg + "  S^2 = %.7f", *args, ss[0])
+                    continue
+                except NotImplementedError:
+                    pass
+            log.note(msg, *args)
+        return self
+
+    def kernel(self, mo_coeff=None, ci0=None, verbose=None):
+        """Run KCASCI and return energies, CI vectors, and orbitals."""
+        if mo_coeff is None:
+            mo_coeff = self.mo_coeff
+        self.mo_coeff = mo_coeff
+        if ci0 is None:
+            ci0 = self.ci
+
+        log = logger.new_logger(self, verbose)
+        self.check_sanity()
+        self.dump_flags(log)
+        self.e_tot, self.e_cas, self.ci = kernel(
+            self, mo_coeff=mo_coeff, ci0=ci0, verbose=verbose,
+        )
+
+        if self.canonicalization:
+            self.canonicalize_(
+                mo_coeff, self.ci, sort=self.sorting_mo_energy,
+                cas_natorb=self.natorb, verbose=log,
+            )
+        if self.natorb:
+            raise NotImplementedError(
+                "KCASCI natural orbitals are not implemented",
+            )
+
+        converged = getattr(self.fcisolver, "converged", None)
+        if converged is None:
+            self.converged = True
+        else:
+            self.converged = bool(np.all(converged))
+        if self.converged:
+            log.info("KCASCI converged")
+        else:
+            log.info("KCASCI not converged")
+
+        self._finalize()
+        return (
+            self.e_tot, self.e_cas, self.ci,
+            self.mo_coeff, self.mo_energy,
+        )
+
+
+KCASCI = PBCKCASCI
