@@ -1,13 +1,15 @@
 #!/usr/bin/env python
 
-"""Tests for neutral momentum-resolved periodic CASCI."""
+"""Tests for neutral and charged momentum-resolved periodic CASCI."""
 
+import io
 import sys
 import unittest
 from types import SimpleNamespace
 
 import numpy as np
 
+from pyscf import lib
 from pyscf.pbc import gto as pgto
 from pyscf.pbc import scf
 
@@ -148,8 +150,147 @@ class KCASCIHelperTests(unittest.TestCase):
                 transformed[3:, 3:], np.diag(mo_energy[k][3:]),
             ))
 
+    def test_charged_active_electron_sectors(self):
+        get_nelec = kcasci._get_nelecas_for_charged_kcasci
+        self.assertEqual(get_nelec(2, 8, 2, 0, charge=0), (8, 8))
+        self.assertEqual(get_nelec(2, 8, 2, 0, charge=1), (8, 7))
+        self.assertEqual(get_nelec(2, 8, 2, 0, charge=-1), (9, 8))
+        self.assertEqual(
+            get_nelec(2, 8, (1, 1), 0, charge=1, spin=-1),
+            (7, 8),
+        )
 
-class NeutralKCASCIIntegrationTests(unittest.TestCase):
+        with self.assertRaisesRegex(ValueError, "single-electron"):
+            get_nelec(2, 8, 2, 0, charge=2)
+        with self.assertRaisesRegex(ValueError, "charge must be an integer"):
+            get_nelec(2, 8, 2, 0, charge=0.5)
+        with self.assertRaisesRegex(ValueError, "inconsistent parity"):
+            get_nelec(2, 8, 2, 0, charge=1, spin=0)
+        with self.assertRaisesRegex(ValueError, "active electrons"):
+            get_nelec(1, 1, 2, 0, charge=-1)
+        with self.assertRaisesRegex(ValueError, "spin must be an integer"):
+            get_nelec(2, 8, 2, 0, charge=1, spin=1.0)
+
+    def test_charged_band_energy_conventions(self):
+        kpts = np.asarray([
+            [0.0, 0.0, 0.0],
+            [0.25, 0.0, 0.0],
+            [-0.25, 0.0, 0.0],
+        ])
+        hole_results = [
+            {"target_k": 0, "charge": 1, "nkpts": 3,
+             "e_tot": np.asarray([-1.0, -0.8])},
+            {"target_k": 1, "charge": 1, "nkpts": 3,
+             "e_tot": np.asarray([-0.9, -0.7])},
+            {"target_k": 2, "charge": 1, "nkpts": 3,
+             "e_tot": np.asarray([-0.85, -0.65])},
+        ]
+        holes = kcasci.compute_band_energies(
+            hole_results, reference_energy=-1.2, root=1, kpts=kpts,
+        )
+        self.assertEqual(
+            [band["momentum_index"] for band in holes], [0, 2, 1],
+        )
+        self.assertTrue(np.allclose(
+            [band["energy"] for band in holes], [-1.2, -1.5, -1.65],
+        ))
+        self.assertTrue(all(band["kind"] == "hole" for band in holes))
+        self.assertTrue(np.allclose(holes[1]["hole_momentum"], kpts[2]))
+
+        particle_results = [
+            {"target_k": 0, "charge": -1, "nkpts": 3,
+             "e_tot": np.asarray([-1.1, -0.9])},
+            {"target_k": 1, "charge": -1, "nkpts": 3,
+             "e_tot": np.asarray([-1.0, -0.8])},
+            {"target_k": 2, "charge": -1, "nkpts": 3,
+             "e_tot": np.asarray([-0.95, -0.75])},
+        ]
+        particles = kcasci.compute_band_energies(
+            particle_results, reference_energy=-1.2, root=1, kpts=kpts,
+        )
+        self.assertEqual(
+            [band["momentum_index"] for band in particles], [0, 1, 2],
+        )
+        self.assertTrue(np.allclose(
+            [band["energy"] for band in particles], [0.9, 1.2, 1.35],
+        ))
+        self.assertTrue(
+            all(band["kind"] == "particle" for band in particles),
+        )
+
+        shifted = kcasci.compute_band_energies(
+            hole_results, reference_energy=-1.2, root=1, kpts=kpts,
+            reference_target_k=1,
+        )
+        self.assertEqual(
+            [band["momentum_index"] for band in shifted], [1, 0, 2],
+        )
+        per_cell = kcasci.compute_band_energies(
+            hole_results, reference_energy=-1.2, root=1, kpts=kpts,
+            per_cell=True,
+        )
+        self.assertTrue(np.allclose(
+            [band["energy"] for band in per_cell], [-0.4, -0.5, -0.55],
+        ))
+
+    def test_charged_band_energy_validation(self):
+        result = [{
+            "target_k": 0, "charge": 1, "nkpts": 2,
+            "e_tot": np.asarray([-1.0]),
+        }]
+        self.assertEqual(kcasci.compute_band_energies([], -1.2), [])
+        with self.assertRaisesRegex(IndexError, "scalar energy"):
+            kcasci._select_root_energy(-1.0, root=1)
+        with self.assertRaisesRegex(IndexError, "nonnegative"):
+            kcasci._select_root_energy([-1.0], root=-1)
+        with self.assertRaisesRegex(ValueError, r"charge \+1 or -1"):
+            kcasci.compute_band_energies(result, -1.2, charge=0)
+
+        mixed = result + [{
+            "target_k": 1, "charge": -1, "nkpts": 2,
+            "e_tot": -1.0,
+        }]
+        with self.assertRaisesRegex(ValueError, "inconsistent charges"):
+            kcasci.compute_band_energies(mixed, -1.2, charge=1)
+
+    def test_charged_finalize_forwards_result_target_k(self):
+        calls = []
+
+        class RecordingSolver:
+            def spin_square(self, ci, norb, nelec, **kwargs):
+                calls.append((ci, norb, nelec, kwargs))
+                return 0.75, 2.0
+
+        mc = object.__new__(kcasci.ChargedPBCKCASCI)
+        mc.stdout = io.StringIO()
+        mc.verbose = lib.logger.NOTE
+        mc.fcisolver = RecordingSolver()
+        mc.nkpts = 3
+        mc.ncas = 2
+        mc.charged_nelecastot = (3, 2)
+        mc.charged_results = [
+            {
+                "target_k": target_k,
+                "e_tot": np.asarray(-1.0),
+                "e_cas": np.asarray(-0.5),
+                "ci": np.asarray([target_k], dtype=complex),
+            }
+            for target_k in range(mc.nkpts)
+        ]
+
+        mc._finalize()
+        self.assertEqual(len(calls), mc.nkpts)
+        for target_k, (ci, norb, nelec, kwargs) in enumerate(calls):
+            self.assertTrue(np.array_equal(
+                ci, mc.charged_results[target_k]["ci"],
+            ))
+            self.assertEqual(norb, mc.nkpts * mc.ncas)
+            self.assertEqual(nelec, mc.charged_nelecastot)
+            self.assertEqual(kwargs["nkpts"], mc.nkpts)
+            self.assertEqual(kwargs["target_k"], target_k)
+
+
+class KCASCIIntegrationTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
@@ -196,6 +337,17 @@ class NeutralKCASCIIntegrationTests(unittest.TestCase):
         mc.verbose = 0
         mc.fcisolver.verbose = 0
         mc.canonicalization = False
+        return mc
+
+    def make_charged_kcasci(self, charge, target_k=None,
+                            charged_spin=None):
+        mc = mcscf.KCASCI(
+            self.kmf, 2, 2, ncore=0, target_k=target_k,
+            charge=charge, charged_spin=charged_spin,
+        )
+        mc.kmesh = self.kmesh
+        mc.verbose = 0
+        mc.fcisolver.verbose = 0
         return mc
 
     def test_single_determinant_kcasci_equals_krhf(self):
@@ -272,6 +424,115 @@ class NeutralKCASCIIntegrationTests(unittest.TestCase):
         self.assertTrue(np.allclose(
             e_wrapped, e1, atol=1e-10, rtol=1e-10,
         ))
+
+    def test_charged_hole_sweep_density_and_explicit_sector(self):
+        hole = self.make_charged_kcasci(charge=1)
+        self.assertIsInstance(hole, kcasci.ChargedPBCKCASCI)
+        self.assertIsNone(hole.target_k)
+        self.assertFalse(hasattr(mcscf, "ChargedKCASCI"))
+        with self.assertRaisesRegex(NotImplementedError, "Fock matrix"):
+            hole.get_fock()
+        with self.assertRaisesRegex(NotImplementedError, "Canonicalization"):
+            hole.canonicalize()
+
+        with self.assertRaisesRegex(ValueError, "dict keyed by target_k"):
+            hole.kernel(self.mo_coeff, ci0=np.ones(1))
+
+        e_tot, e_cas, ci, _, _ = hole.kernel(self.mo_coeff)
+        self.assertEqual(np.asarray(e_tot).shape, (2,))
+        self.assertEqual(np.asarray(e_cas).shape, (2,))
+        self.assertEqual(len(ci), 2)
+        self.assertEqual(hole.charged_nelecastot, (2, 1))
+        self.assertEqual(
+            [result["target_k"] for result in hole.charged_results],
+            [0, 1],
+        )
+        self.assertTrue(hole.converged)
+
+        with self.assertRaisesRegex(ValueError, "target_k is required"):
+            hole.make_rdm1()
+        overlap = np.asarray(self.kmf.get_ovlp())
+        for result in hole.charged_results:
+            self.assertEqual(result["charge"], 1)
+            self.assertEqual(result["nelecastot"], (2, 1))
+            self.assertTrue(np.allclose(
+                result["e_tot_supercell"],
+                hole.nkpts * result["e_tot"],
+            ))
+            self.assertTrue(np.allclose(
+                result["e_cas_supercell"],
+                hole.nkpts * result["e_cas"],
+            ))
+            dm1 = hole.make_rdm1(target_k=result["target_k"])
+            electron_count = np.einsum(
+                "kij,kji->", dm1, overlap,
+            ).real / hole.nkpts
+            self.assertAlmostEqual(electron_count, 1.5, places=9)
+
+        explicit = self.make_charged_kcasci(charge=1, target_k=1)
+        e_explicit = explicit.kernel(self.mo_coeff)[0]
+        self.assertEqual(len(explicit.charged_results), 1)
+        self.assertTrue(np.allclose(
+            e_explicit, hole.charged_results[1]["e_tot"],
+            atol=1e-10, rtol=1e-10,
+        ))
+
+    def test_charged_particle_sweep_and_band_energies(self):
+        neutral = self.make_kcasci(target_k=0)
+        e_neutral = neutral.kernel(self.mo_coeff)[0]
+
+        hole = self.make_charged_kcasci(charge=1)
+        hole.kernel(self.mo_coeff)
+        particle = self.make_charged_kcasci(charge=-1)
+        particle.kernel(self.mo_coeff)
+        self.assertEqual(particle.charged_nelecastot, (3, 2))
+
+        hole_bands = hole.band_energies(e_neutral)
+        particle_bands = particle.band_energies(e_neutral)
+        self.assertEqual(len(hole_bands), hole.nkpts)
+        self.assertEqual(len(particle_bands), particle.nkpts)
+        self.assertEqual(
+            sorted(band["momentum_index"] for band in hole_bands),
+            list(range(hole.nkpts)),
+        )
+        self.assertEqual(
+            sorted(band["momentum_index"] for band in particle_bands),
+            list(range(particle.nkpts)),
+        )
+
+        for band in hole_bands:
+            result = hole.charged_results[band["target_k"]]
+            expected = hole.nkpts * (e_neutral - result["e_tot"])
+            self.assertTrue(np.allclose(band["energy"], expected))
+            self.assertEqual(band["kind"], "hole")
+        for band in particle_bands:
+            result = particle.charged_results[band["target_k"]]
+            expected = particle.nkpts * (result["e_tot"] - e_neutral)
+            self.assertTrue(np.allclose(band["energy"], expected))
+            self.assertEqual(band["kind"], "particle")
+
+        per_cell = particle.band_energies(e_neutral, per_cell=True)
+        self.assertTrue(np.allclose(
+            [band["energy"] for band in particle_bands],
+            particle.nkpts * np.asarray([
+                band["energy"] for band in per_cell
+            ]),
+        ))
+
+        dm1 = particle.make_rdm1(target_k=0)
+        overlap = np.asarray(self.kmf.get_ovlp())
+        electron_count = np.einsum(
+            "kij,kji->", dm1, overlap,
+        ).real / particle.nkpts
+        self.assertAlmostEqual(electron_count, 2.5, places=9)
+
+    def test_charged_explicit_negative_spin_sector(self):
+        hole = self.make_charged_kcasci(
+            charge=1, target_k=0, charged_spin=-1,
+        )
+        hole.kernel(self.mo_coeff)
+        self.assertEqual(hole.charged_nelecastot, (1, 2))
+        self.assertEqual(hole.charged_results[0]["nelecastot"], (1, 2))
 
 
 if __name__ == "__main__":
