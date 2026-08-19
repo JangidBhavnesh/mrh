@@ -250,6 +250,126 @@ def _get_nelecas_for_charged_kcasci(ncas, nkpts, nelecas, cell_spin,
     return int(neleca), int(nelecb)
 
 
+def _target_ks_for_charged_kcasci(mc, target_k=None):
+    """Return the normalized total-momentum sectors for a charged solve."""
+    if target_k is None:
+        target_k = mc.target_k
+    if target_k is None:
+        return list(range(mc.nkpts))
+    if not isinstance(target_k, (int, np.integer)):
+        raise ValueError("target_k must be an integer or None")
+    return [int(target_k) % mc.nkpts]
+
+
+def kernel_chrkcasci(mc, mo_coeff=None, ci0=None, verbose=logger.NOTE,
+                     target_k=None, charge=None, charged_spin=None,
+                     envs=None):
+    """Run charged KCASCI in one or all total-momentum sectors."""
+    del envs
+    if mo_coeff is None:
+        mo_coeff = mc.mo_coeff
+
+    if charge is None:
+        charge = getattr(mc, "charge", None)
+    if charge is None:
+        raise ValueError("charge is required for charged KCASCI")
+    if not isinstance(charge, (int, np.integer)):
+        raise ValueError("charge must be an integer")
+    charge = int(charge)
+    if charge == 0:
+        raise ValueError("charged KCASCI requires a nonzero charge")
+    if charged_spin is None:
+        charged_spin = getattr(mc, "charged_spin", None)
+
+    log = logger.new_logger(mc, verbose)
+    t0 = (logger.process_clock(), logger.perf_counter())
+    log.debug("Start charged KCASCI")
+
+    nkpts = mc.nkpts
+    ncas = mc.ncas
+    h1eff, energy_core = mc.get_h1eff(mo_coeff)
+    t1 = log.timer("one-electron integral computation for charged k-CAS", *t0)
+    h2eff = mc.get_h2eff(mo_coeff)
+    t1 = log.timer("integral transformation to charged k-CAS space", *t1)
+    h1eff = _adjust_h1eff_for_kfci(h1eff, h2eff)
+    log.debug("core energy = %.15g", energy_core.real)
+
+    assert h1eff.shape == (nkpts, ncas, ncas)
+    assert h2eff.shape == (
+        nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas,
+    )
+
+    kmom = _set_solver_kpts(mc)
+    ncastot = nkpts * ncas
+    nelecastot = _get_nelecas_for_charged_kcasci(
+        ncas, nkpts, mc.nelecas, mc.cell.spin,
+        charge=charge, spin=charged_spin,
+    )
+    target_ks = _target_ks_for_charged_kcasci(mc, target_k=target_k)
+    if len(target_ks) > 1 and ci0 is not None and not isinstance(ci0, dict):
+        raise ValueError(
+            "ci0 for a charged target_k sweep must be a dict keyed by "
+            "target_k",
+        )
+
+    max_memory = max(4000, mc.max_memory - lib.current_memory()[0])
+    results = []
+    e_tot_all = []
+    e_cas_all = []
+    ci_all = []
+    converged = []
+    for sector in target_ks:
+        sector = int(sector) % nkpts
+        ci0_sector = ci0.get(sector) if isinstance(ci0, dict) else ci0
+        log.info(
+            "Solving charged KCASCI target_k = %d, nelec = %s",
+            sector, nelecastot,
+        )
+
+        mc.fcisolver.nkpts = nkpts
+        mc.fcisolver.target_k = sector
+        mc.fcisolver.kmom = kmom
+        e_tot_supercell, fcivec = mc.fcisolver.kernel(
+            h1eff, h2eff, ncastot, nelecastot, ci0=ci0_sector,
+            nkpts=nkpts, target_k=sector, verbose=log,
+            max_memory=max_memory, ecore=energy_core,
+        )
+        t1 = log.timer(
+            f"charged k-FCI solver target_k = {sector}", *t1,
+        )
+        e_cas_supercell = e_tot_supercell - energy_core
+        e_tot = e_tot_supercell / nkpts
+        e_cas = e_cas_supercell / nkpts
+        sector_converged = bool(np.all(
+            getattr(mc.fcisolver, "converged", True),
+        ))
+
+        results.append({
+            "target_k": sector,
+            "charge": charge,
+            "ncas": ncas,
+            "ncastot": ncastot,
+            "nelecas": nelecastot,
+            "nelecastot": nelecastot,
+            "nkpts": nkpts,
+            "e_tot": e_tot,
+            "e_cas": e_cas,
+            "e_tot_supercell": e_tot_supercell,
+            "e_cas_supercell": e_cas_supercell,
+            "ci": fcivec,
+            "converged": sector_converged,
+        })
+        e_tot_all.append(e_tot)
+        e_cas_all.append(e_cas)
+        ci_all.append(fcivec)
+        converged.append(sector_converged)
+
+    return (
+        results, e_tot_all, e_cas_all, ci_all,
+        nelecastot, converged,
+    )
+
+
 def make_casdm1(mc, ci=None, stav_dm1=False, weights=None, target_k=None):
     """Build the k-basis active-space one-particle density matrix.
 
