@@ -277,6 +277,86 @@ class KCASPDFTRDMTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "charged KCASCI 1-RDM"):
             kmcpdft_helper.make_one_casdm1s_charged_kcas(mc)
 
+    def test_make_one_charged_casdm2_uses_rdm12_and_sector_context(self):
+        calls = []
+
+        class RDM12Solver:
+            nroots = 1
+
+            def make_rdm12(self, ci, norb, nelec, **kwargs):
+                calls.append((ci, norb, nelec, kwargs))
+                return np.eye(norb), np.zeros((norb,) * 4)
+
+        mc = make_mc(RDM12Solver(), target_k=-1, nkpts=3, ncas=2)
+        mc.charged_results = [{
+            "target_k": 2,
+            "ci": "charged-ci",
+            "nelecastot": (3, 2),
+        }]
+
+        casdm2 = kmcpdft_helper.make_one_casdm2_charged_kcas(mc)
+
+        self.assertEqual(casdm2.shape, (6, 6, 6, 6))
+        self.assertEqual(
+            calls,
+            [("charged-ci", 6, (3, 2),
+              {"nkpts": 3, "target_k": 2})],
+        )
+
+    def test_make_one_charged_casdm2_falls_back_to_make_rdm2(self):
+        solver = RecordingSolver()
+        mc = make_mc(solver, target_k=1, nkpts=2, ncas=1)
+        mc.charged_results = [{
+            "target_k": 1,
+            "ci": "charged-ci",
+            "nelecastot": (1, 0),
+        }]
+
+        casdm2 = kmcpdft_helper.make_one_casdm2_charged_kcas(mc)
+
+        self.assertEqual(casdm2.shape, (2, 2, 2, 2))
+        self.assertEqual(
+            solver.calls,
+            [("make_rdm2", "charged-ci", 2, (1, 0),
+              {"nkpts": 2, "target_k": 1})],
+        )
+
+    def test_make_one_charged_casdm2_accepts_root_and_sector_override(self):
+        solver = RecordingSolver(nroots=2)
+        mc = make_mc(solver, target_k=None, nkpts=2, ncas=1)
+        mc.charged_results = [
+            {"target_k": 0, "ci": "sector-0", "nelecastot": (1, 0)},
+            {"target_k": 1, "ci": "sector-1", "nelecastot": (1, 0)},
+        ]
+
+        kmcpdft_helper.make_one_casdm2_charged_kcas(
+            mc,
+            ci=["override-root-0", "override-root-1"],
+            state=1,
+            target_k=3,
+        )
+
+        self.assertEqual(
+            solver.calls,
+            [("make_rdm2", "override-root-1", 2, (1, 0),
+              {"nkpts": 2, "target_k": 1})],
+        )
+
+    def test_make_one_charged_casdm2_rejects_invalid_shape(self):
+        class BadShapeSolver(RecordingSolver):
+            def make_rdm2(self, ci, norb, nelec, **kwargs):
+                return np.zeros((norb, norb))
+
+        mc = make_mc(BadShapeSolver(), target_k=0, nkpts=2, ncas=1)
+        mc.charged_results = [{
+            "target_k": 0,
+            "ci": "charged-ci",
+            "nelecastot": (1, 0),
+        }]
+
+        with self.assertRaisesRegex(ValueError, "charged KCASCI 2-RDM"):
+            kmcpdft_helper.make_one_casdm2_charged_kcas(mc)
+
     def test_make_one_casdm1s_passes_target_sector(self):
         solver = RecordingSolver()
         mc = make_mc(solver, target_k=5)

@@ -163,6 +163,31 @@ def make_one_casdm2_kcas(mc, ci, state=0):
     return casdm2
 
 
+def make_one_casdm2_charged_kcas(mc, ci=None, state=0, target_k=None):
+    """Build a charged KCASCI state's spin-summed active-space 2-RDM."""
+    fcisolver, ci, ncastot, nelecastot, rdm_kwargs = \
+        _get_charged_kcas_rdm_context(
+            mc, ci=ci, state=state, target_k=target_k,
+        )
+    try:
+        _, casdm2 = fcisolver.make_rdm12(
+            ci, ncastot, nelecastot, **rdm_kwargs,
+        )
+    except AttributeError:
+        casdm2 = fcisolver.make_rdm2(
+            ci, ncastot, nelecastot, **rdm_kwargs,
+        )
+
+    casdm2 = np.asarray(casdm2)
+    expected_shape = (ncastot,) * 4
+    if casdm2.shape != expected_shape:
+        raise ValueError(
+            f"Expected charged KCASCI 2-RDM shape {expected_shape}, "
+            f"got {casdm2.shape}",
+        )
+    return casdm2
+
+
 def _validate_kspace_layout(nkpts, ncas, kconserv=None):
     """Validate dimensions shared by the k-space RDM converters."""
     nkpts = int(nkpts)
