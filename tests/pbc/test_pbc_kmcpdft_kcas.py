@@ -970,12 +970,50 @@ class KCASPDFTWavefunctionEnergyTests(unittest.TestCase):
                     atol=1e-9, rtol=1e-9,
                 )
 
+    def test_full_hybrid_reconstructs_charged_kcasci_sectors(self):
+        _, kmf, kmesh, mo_coeff = build_periodic_h2()
+        numint = SimpleNamespace(
+            rsh_and_hybrid_coeff=lambda otxc, spin:
+                (0.0, 0.0, (1.0, 1.0)),
+        )
+        ot = SimpleNamespace(_numint=numint, otxc="full-MC")
+
+        for charge in (1, -1):
+            with self.subTest(charge=charge):
+                mc = mcscf.KCASCI(
+                    kmf, 2, 2, ncore=0, charge=charge,
+                )
+                mc.kmesh = kmesh
+                mc.verbose = 0
+                mc.fcisolver.verbose = 0
+                mc.kernel(mo_coeff)
+
+                for result in mc.charged_results:
+                    target_k = result["target_k"]
+                    casdm1s = \
+                        kmcpdft_helper.make_one_casdm1s_charged_kcas(
+                            mc, target_k=target_k,
+                        )
+                    casdm2 = \
+                        kmcpdft_helper.make_one_casdm2_charged_kcas(
+                            mc, target_k=target_k,
+                        )
+                    energy_reconstructed = kmcpdft.energy_mcwfn_kcas(
+                        mc, ot=ot, casdm1s=casdm1s, casdm2=casdm2,
+                        verbose=logger.QUIET,
+                    )
+                    np.testing.assert_allclose(
+                        energy_reconstructed, result["e_tot"],
+                        atol=1e-9, rtol=1e-9,
+                    )
+
 
 class KCASPDFTEndToEndTests(unittest.TestCase):
 
     grids_attr = {"level": 1}
 
-    def make_pdft(self, ncas, target_k=None, momentum_resolved=False):
+    def make_pdft(self, ncas, target_k=None, momentum_resolved=False,
+                  charge=None, charged_spin=None):
         _, kmf, kmesh, _ = build_periodic_h2()
         kwargs = {
             "ncore": 0,
@@ -984,6 +1022,10 @@ class KCASPDFTEndToEndTests(unittest.TestCase):
         }
         if target_k is not None:
             kwargs["target_k"] = target_k
+        if charge is not None:
+            kwargs["charge"] = charge
+        if charged_spin is not None:
+            kwargs["charged_spin"] = charged_spin
         mc = pbc_mcpdft.KCASCI(kmf, "tPBE", ncas, 2, **kwargs)
         mc.kpts = kmf.kpts
         mc.kmesh = kmesh
@@ -1070,6 +1112,71 @@ class KCASPDFTEndToEndTests(unittest.TestCase):
             momentum.e_tot, conventional.e_tot,
             atol=1e-8, rtol=1e-8,
         )
+
+    def test_charged_hole_and_particle_sector_sweeps(self):
+        _, _, _, mo_coeff = build_periodic_h2()
+        neutral = self.make_pdft(
+            ncas=2, momentum_resolved=True, target_k=0,
+        )
+        hole = self.make_pdft(
+            ncas=2, momentum_resolved=True, charge=1,
+        )
+        particle = self.make_pdft(
+            ncas=2, momentum_resolved=True, charge=-1,
+        )
+
+        neutral.kernel(mo_coeff)
+        hole.kernel(mo_coeff)
+        particle.kernel(mo_coeff)
+
+        self.assertEqual(hole.charged_nelecastot, (2, 1))
+        self.assertEqual(particle.charged_nelecastot, (3, 2))
+        self.assertEqual(
+            [result["target_k"] for result in hole.charged_pdft_results],
+            [0, 1],
+        )
+        self.assertEqual(
+            [result["target_k"]
+             for result in particle.charged_pdft_results],
+            [0, 1],
+        )
+        np.testing.assert_allclose(
+            hole.e_mcscf,
+            [result["e_tot"] for result in hole.charged_results],
+        )
+        np.testing.assert_allclose(
+            particle.e_mcscf,
+            [result["e_tot"] for result in particle.charged_results],
+        )
+
+        hole_bands = hole.band_energies(neutral.e_tot)
+        particle_bands = particle.band_energies(neutral.e_tot)
+        for band, result in zip(hole_bands, hole.charged_pdft_results):
+            np.testing.assert_allclose(
+                band["energy"],
+                hole.nkpts * (neutral.e_tot - result["e_tot"]),
+            )
+        for band, result in zip(
+                particle_bands, particle.charged_pdft_results):
+            np.testing.assert_allclose(
+                band["energy"],
+                particle.nkpts * (result["e_tot"] - neutral.e_tot),
+            )
+
+    def test_charged_explicit_sector_returns_scalar_energy(self):
+        _, _, _, mo_coeff = build_periodic_h2()
+        hole = self.make_pdft(
+            ncas=2, momentum_resolved=True, charge=1, target_k=1,
+        )
+
+        hole.kernel(mo_coeff)
+
+        self.assertEqual(hole.target_k, 1)
+        self.assertEqual(len(hole.charged_results), 1)
+        self.assertEqual(len(hole.charged_pdft_results), 1)
+        self.assertEqual(hole.charged_pdft_results[0]["target_k"], 1)
+        self.assertEqual(np.ndim(hole.e_tot), 0)
+        self.assertEqual(np.ndim(hole.e_ot), 0)
 
 
 class KCASPDFTRoutingTests(unittest.TestCase):
