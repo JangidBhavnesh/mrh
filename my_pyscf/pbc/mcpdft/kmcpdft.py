@@ -419,4 +419,7 @@ def get_mcpdft_child_class(kmc, ot, **kwargs):
 
 def get_kcas_mcpdft_child_class(kmc, ot, **kwargs):
     """Wrap a momentum-resolved kCASCI object with k-MC-PDFT methods."""
-    return _get_mcpdft_child_class(kmc, ot, _kKCASPDFT, **kwargs)
+    pdft = _get_mcpdft_child_class(kmc, ot, _kKCASPDFT, **kwargs)
+    if getattr(kmc, "converged", False):
+        pdft.e_mcscf = kmc.e_tot
+    return pdft

@@ -1,6 +1,7 @@
 """Tests for momentum-resolved periodic CASCI-PDFT."""
 
 import unittest
+from functools import lru_cache
 from types import SimpleNamespace
 from unittest import mock
 
@@ -47,6 +48,32 @@ def make_kconserv(nkpts):
             for k3 in range(nkpts):
                 kconserv[k1, k2, k3] = (k1 - k2 + k3) % nkpts
     return kconserv
+
+
+@lru_cache(maxsize=1)
+def build_periodic_h2():
+    cell = gto.Cell()
+    cell.a = np.diag([2.24, 2.24, 12.0])
+    cell.atom = [
+        ["H", (0.0, 0.0, 6.0)],
+        ["H", (0.74, 0.0, 6.0)],
+    ]
+    cell.basis = "sto-6g"
+    cell.unit = "Angstrom"
+    cell.precision = 1e-9
+    cell.verbose = 0
+    cell.build()
+
+    kmesh = (2, 1, 1)
+    kpts = cell.make_kpts(kmesh, wrap_around=True)
+    kmf = scf.KRHF(cell, kpts=kpts).density_fit()
+    kmf.exxdiv = None
+    kmf.conv_tol = 1e-9
+    kmf.verbose = 0
+    kmf.kernel()
+    if not kmf.converged:
+        raise RuntimeError("Periodic H2 KRHF did not converge")
+    return cell, kmf, kmesh, np.asarray(kmf.mo_coeff)
 
 
 class KCASPDFTRDMTests(unittest.TestCase):
@@ -629,34 +656,14 @@ class KCASPDFTWavefunctionEnergyTests(unittest.TestCase):
         get_h2eff.assert_not_called()
 
     def test_full_hybrid_reconstructs_kcasci_energy(self):
-        cell = gto.Cell()
-        cell.a = np.diag([2.24, 2.24, 12.0])
-        cell.atom = [
-            ["H", (0.0, 0.0, 6.0)],
-            ["H", (0.74, 0.0, 6.0)],
-        ]
-        cell.basis = "sto-6g"
-        cell.unit = "Angstrom"
-        cell.precision = 1e-9
-        cell.verbose = 0
-        cell.build()
-
-        kmesh = [2, 1, 1]
-        kpts = cell.make_kpts(kmesh, wrap_around=True)
-        kmf = scf.KRHF(cell, kpts=kpts).density_fit()
-        kmf.exxdiv = None
-        kmf.conv_tol = 1e-9
-        kmf.verbose = 0
-        kmf.kernel()
-        self.assertTrue(kmf.converged)
+        _, kmf, kmesh, mo_coeff = build_periodic_h2()
+        kpts = kmf.kpts
 
         numint = SimpleNamespace(
             rsh_and_hybrid_coeff=lambda otxc, spin:
                 (0.0, 0.0, (1.0, 1.0)),
         )
         ot = SimpleNamespace(_numint=numint, otxc="full-MC")
-        mo_coeff = np.asarray(kmf.mo_coeff)
-
         for target_k in range(len(kpts)):
             with self.subTest(target_k=target_k):
                 mc = mcscf.KCASCI(
@@ -683,6 +690,107 @@ class KCASPDFTWavefunctionEnergyTests(unittest.TestCase):
                     energy_reconstructed, energy_kcas,
                     atol=1e-9, rtol=1e-9,
                 )
+
+
+class KCASPDFTEndToEndTests(unittest.TestCase):
+
+    grids_attr = {"level": 1}
+
+    def make_pdft(self, ncas, target_k=None, momentum_resolved=False):
+        _, kmf, kmesh, _ = build_periodic_h2()
+        kwargs = {
+            "ncore": 0,
+            "grids_attr": self.grids_attr,
+            "momentum_resolved": momentum_resolved,
+        }
+        if target_k is not None:
+            kwargs["target_k"] = target_k
+        mc = pbc_mcpdft.KCASCI(kmf, "tPBE", ncas, 2, **kwargs)
+        mc.kpts = kmf.kpts
+        mc.kmesh = kmesh
+        mc.verbose = 0
+        mc.fcisolver.verbose = 0
+        mc.canonicalization = False
+        return mc
+
+    def test_target_k_zero_matches_conventional_kcasci_pdft(self):
+        _, _, _, mo_coeff = build_periodic_h2()
+        conventional = self.make_pdft(ncas=2)
+        momentum = self.make_pdft(
+            ncas=2, momentum_resolved=True, target_k=0,
+        )
+
+        conventional.kernel(mo_coeff)
+        momentum.kernel(mo_coeff)
+
+        self.assertFalse(conventional.momentum_resolved)
+        self.assertTrue(momentum.momentum_resolved)
+        self.assertEqual(momentum.target_k, 0)
+        np.testing.assert_allclose(
+            momentum.e_mcscf, conventional.e_mcscf,
+            atol=1e-9, rtol=1e-9,
+        )
+        np.testing.assert_allclose(
+            momentum.e_ot, conventional.e_ot,
+            atol=1e-8, rtol=1e-8,
+        )
+        np.testing.assert_allclose(
+            momentum.e_tot, conventional.e_tot,
+            atol=1e-8, rtol=1e-8,
+        )
+
+    def test_nonzero_target_matches_existing_kcasci_route(self):
+        _, kmf, kmesh, mo_coeff = build_periodic_h2()
+        direct = self.make_pdft(
+            ncas=2, momentum_resolved=True, target_k=1,
+        )
+        direct.kernel(mo_coeff)
+
+        kcas = mcscf.KCASCI(kmf, 2, 2, ncore=0, target_k=1)
+        kcas.kmesh = kmesh
+        kcas.verbose = 0
+        kcas.fcisolver.verbose = 0
+        kcas.canonicalization = False
+        kcas.kernel(mo_coeff)
+        wrapped = pbc_mcpdft.KCASCI(
+            kcas, "tPBE", 2, 2, ncore=0,
+            momentum_resolved=True,
+            grids_attr=self.grids_attr,
+        )
+        wrapped.verbose = 0
+        wrapped.compute_pdft_energy_()
+
+        self.assertEqual(direct.target_k, 1)
+        self.assertEqual(wrapped.target_k, 1)
+        self.assertEqual(wrapped.fcisolver.target_k, 1)
+        np.testing.assert_allclose(
+            direct.e_mcscf, wrapped.e_mcscf,
+            atol=1e-9, rtol=1e-9,
+        )
+        np.testing.assert_allclose(
+            direct.e_tot, wrapped.e_tot,
+            atol=1e-8, rtol=1e-8,
+        )
+
+    def test_single_determinant_matches_conventional_pdft(self):
+        _, kmf, _, mo_coeff = build_periodic_h2()
+        conventional = self.make_pdft(ncas=1)
+        momentum = self.make_pdft(
+            ncas=1, momentum_resolved=True, target_k=0,
+        )
+
+        conventional.kernel(mo_coeff)
+        momentum.kernel(mo_coeff)
+
+        self.assertEqual(np.size(momentum.ci), 1)
+        np.testing.assert_allclose(
+            momentum.e_mcscf, kmf.e_tot,
+            atol=1e-9, rtol=1e-9,
+        )
+        np.testing.assert_allclose(
+            momentum.e_tot, conventional.e_tot,
+            atol=1e-8, rtol=1e-8,
+        )
 
 
 class KCASPDFTRoutingTests(unittest.TestCase):
