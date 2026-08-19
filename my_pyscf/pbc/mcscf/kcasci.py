@@ -205,6 +205,51 @@ def kernel(mc, mo_coeff=None, ci0=None, verbose=logger.NOTE, envs=None):
     return e_tot, e_cas, fcivec
 
 
+def _get_nelecas_for_charged_kcasci(ncas, nkpts, nelecas, cell_spin,
+                                     charge=0, spin=None):
+    """Return the total active-electron sector for charged KCASCI.
+
+    Positive charge removes one electron from the complete k-mesh active
+    space, while negative charge adds one.  ``spin`` is the requested total
+    active-space ``N_alpha - N_beta`` value.  When it is omitted, the lowest
+    nonnegative spin sector consistent with the electron-count parity is used.
+    """
+    if not isinstance(charge, (int, np.integer)):
+        raise ValueError("charge must be an integer")
+    charge = int(charge)
+    if charge not in (-1, 0, 1):
+        raise ValueError("only neutral and single-electron charges are supported")
+
+    nelecas = _unpack_nelec(nelecas, cell_spin)
+    nelec = nkpts * (nelecas[0] + nelecas[1]) - charge
+    norb = nkpts * ncas
+    if spin is None:
+        spin = nelec % 2
+    if not isinstance(spin, (int, np.integer)):
+        raise ValueError("spin must be an integer")
+    spin = int(spin)
+
+    if nelec < 0 or nelec > 2 * norb:
+        raise ValueError(
+            f"charge={charge} gives {nelec} active electrons for "
+            f"{norb} active orbitals",
+        )
+    if (nelec + spin) % 2:
+        raise ValueError(
+            f"active electron count {nelec} and spin {spin} have "
+            "inconsistent parity",
+        )
+
+    neleca = (nelec + spin) // 2
+    nelecb = nelec - neleca
+    if not (0 <= neleca <= norb and 0 <= nelecb <= norb):
+        raise ValueError(
+            f"charge={charge}, spin={spin} gives invalid active electrons "
+            f"({neleca}, {nelecb})",
+        )
+    return int(neleca), int(nelecb)
+
+
 def make_casdm1(mc, ci=None, stav_dm1=False, weights=None, target_k=None):
     """Build the k-basis active-space one-particle density matrix.
 
