@@ -23,7 +23,8 @@ def CASCI(kmf, ncas, nelecas, ncore=None):
     kmc = casci.CASCI(kmf, ncas, nelecas, ncore)
     return kmc
 
-def KCASCI(kmf, ncas, nelecas, ncore=None, target_k=0):
+def KCASCI(kmf, ncas, nelecas, ncore=None, target_k=None, charge=None,
+           charged_spin=None):
     assert isinstance(kmf, scf.hf.SCF), \
         "KCASCI only works with periodic SCF objects"
     if isinstance(kmf, (dft.krks.KRKS, dft.kuks.KUKS,
@@ -31,8 +32,15 @@ def KCASCI(kmf, ncas, nelecas, ncore=None, target_k=0):
         raise NotImplementedError("KCASCI with DFT is not implemented yet.")
     if isinstance(kmf, scf.kuhf.KUHF):
         kmf = scf.addons.convert_to_rhf(kmf)
-    return kcasci.KCASCI(
-        kmf, ncas, nelecas, ncore, target_k=target_k,
+    if charge is None:
+        if target_k is None:
+            target_k = 0
+        return kcasci.KCASCI(
+            kmf, ncas, nelecas, ncore, target_k=target_k,
+        )
+    return kcasci.ChargedKCASCI(
+        kmf, ncas, nelecas, ncore, charge=charge,
+        target_k=target_k, charged_spin=charged_spin,
     )
 
 def CASSCF(kmf, ncas, nelecas, ncore=None):
