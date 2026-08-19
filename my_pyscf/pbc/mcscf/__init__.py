@@ -1,6 +1,7 @@
 
 from pyscf.pbc import scf, dft
 from mrh.my_pyscf.pbc.mcscf import casci
+from mrh.my_pyscf.pbc.mcscf import kcasci
 from mrh.my_pyscf.pbc.mcscf import mc1step
 from mrh.my_pyscf.pbc.mcscf.productstate import (
     PBCTransSymmImpureProductStateFCISolver,
@@ -21,6 +22,18 @@ def CASCI(kmf, ncas, nelecas, ncore=None):
         kmf = scf.addons.convert_to_rhf(kmf)
     kmc = casci.CASCI(kmf, ncas, nelecas, ncore)
     return kmc
+
+def KCASCI(kmf, ncas, nelecas, ncore=None, target_k=0):
+    assert isinstance(kmf, scf.hf.SCF), \
+        "KCASCI only works with periodic SCF objects"
+    if isinstance(kmf, (dft.krks.KRKS, dft.kuks.KUKS,
+                        dft.rks.RKS, dft.uks.UKS)):
+        raise NotImplementedError("KCASCI with DFT is not implemented yet.")
+    if isinstance(kmf, scf.kuhf.KUHF):
+        kmf = scf.addons.convert_to_rhf(kmf)
+    return kcasci.KCASCI(
+        kmf, ncas, nelecas, ncore, target_k=target_k,
+    )
 
 def CASSCF(kmf, ncas, nelecas, ncore=None):
     assert isinstance(kmf, scf.hf.SCF),  "CASSCF only works with periodic SCF objects"
