@@ -43,6 +43,43 @@ def _select_charged_kcas_result(mc, target_k=None):
     return matches[0]
 
 
+def _get_charged_kcas_rdm_context(mc, ci=None, state=0, target_k=None):
+    """Resolve the CI and electron sector for one charged KCASCI result."""
+    result = _select_charged_kcas_result(mc, target_k=target_k)
+    nkpts = int(mc.nkpts)
+    target_k = int(result["target_k"]) % nkpts
+
+    if ci is None:
+        ci = result.get("ci")
+    if ci is None:
+        raise ValueError(
+            f"The charged KCASCI result for target_k={target_k} has no CI "
+            "vector",
+        )
+    fcisolver, ci, _ = _get_fcisolver(mc, ci, state=state)
+
+    nelecastot = result.get("nelecastot", result.get("nelecas"))
+    if nelecastot is None:
+        nelecastot = getattr(mc, "charged_nelecastot", None)
+    try:
+        nelecastot = tuple(int(value) for value in nelecastot)
+    except (TypeError, ValueError):
+        nelecastot = ()
+    if len(nelecastot) != 2:
+        raise ValueError(
+            "charged nelecastot must contain alpha and beta counts",
+        )
+
+    ncastot = nkpts * int(mc.ncas)
+    if any(value < 0 or value > ncastot for value in nelecastot):
+        raise ValueError(
+            f"charged nelecastot {nelecastot} is invalid for "
+            f"ncastot={ncastot}",
+        )
+    rdm_kwargs = {"nkpts": nkpts, "target_k": target_k}
+    return fcisolver, ci, ncastot, nelecastot, rdm_kwargs
+
+
 def _get_kcas_rdm_context(mc, ci, state=0):
     """Resolve one kCASCI state and its momentum-sector RDM arguments."""
     nkpts = int(mc.nkpts)

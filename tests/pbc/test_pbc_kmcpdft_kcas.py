@@ -143,6 +143,86 @@ class KCASPDFTRDMTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Multiple charged"):
             kmcpdft_helper._select_charged_kcas_result(mc)
 
+    def test_get_charged_context_uses_sector_ci_and_electron_count(self):
+        solver = RecordingSolver()
+        result = {
+            "target_k": 2,
+            "ci": "charged-ci",
+            "nelecastot": (3, 2),
+        }
+        mc = make_mc(solver, target_k=-1, nkpts=3, ncas=2)
+        mc.charged_results = [result]
+        mc.charged_nelecastot = (9, 9)
+
+        context = kmcpdft_helper._get_charged_kcas_rdm_context(mc)
+
+        self.assertEqual(
+            context,
+            (solver, "charged-ci", 6, (3, 2),
+             {"nkpts": 3, "target_k": 2}),
+        )
+
+    def test_get_charged_context_selects_root_from_explicit_ci(self):
+        solver = RecordingSolver(nroots=2)
+        mc = make_mc(solver, target_k=1, nkpts=2, ncas=2)
+        mc.charged_results = [{
+            "target_k": 1,
+            "ci": ["stored-0", "stored-1"],
+            "nelecastot": (2, 1),
+        }]
+
+        context = kmcpdft_helper._get_charged_kcas_rdm_context(
+            mc, ci=["override-0", "override-1"], state=1,
+        )
+
+        self.assertIs(context[0], solver)
+        self.assertEqual(context[1], "override-1")
+        self.assertEqual(context[2:], (
+            4, (2, 1), {"nkpts": 2, "target_k": 1},
+        ))
+
+    def test_get_charged_context_falls_back_to_object_electron_count(self):
+        solver = RecordingSolver()
+        mc = make_mc(solver, target_k=0, nkpts=2, ncas=1)
+        mc.charged_results = [{"target_k": 0, "ci": "charged-ci"}]
+        mc.charged_nelecastot = (1, 0)
+
+        context = kmcpdft_helper._get_charged_kcas_rdm_context(mc)
+
+        self.assertEqual(context[3], (1, 0))
+
+    def test_get_charged_context_rejects_missing_ci(self):
+        mc = make_mc(RecordingSolver(), target_k=0, nkpts=2, ncas=1)
+        mc.charged_results = [{
+            "target_k": 0,
+            "nelecastot": (1, 0),
+        }]
+
+        with self.assertRaisesRegex(ValueError, "has no CI vector"):
+            kmcpdft_helper._get_charged_kcas_rdm_context(mc)
+
+    def test_get_charged_context_rejects_invalid_electron_count(self):
+        mc = make_mc(RecordingSolver(), target_k=0, nkpts=2, ncas=1)
+        mc.charged_results = [{
+            "target_k": 0,
+            "ci": "charged-ci",
+            "nelecastot": (3, 0),
+        }]
+
+        with self.assertRaisesRegex(ValueError, "invalid for ncastot=2"):
+            kmcpdft_helper._get_charged_kcas_rdm_context(mc)
+
+    def test_get_charged_context_rejects_malformed_electron_count(self):
+        mc = make_mc(RecordingSolver(), target_k=0, nkpts=2, ncas=1)
+        mc.charged_results = [{
+            "target_k": 0,
+            "ci": "charged-ci",
+            "nelecastot": 1,
+        }]
+
+        with self.assertRaisesRegex(ValueError, "alpha and beta counts"):
+            kmcpdft_helper._get_charged_kcas_rdm_context(mc)
+
     def test_make_one_casdm1s_passes_target_sector(self):
         solver = RecordingSolver()
         mc = make_mc(solver, target_k=5)
