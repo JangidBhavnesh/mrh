@@ -223,6 +223,60 @@ class KCASPDFTRDMTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "alpha and beta counts"):
             kmcpdft_helper._get_charged_kcas_rdm_context(mc)
 
+    def test_make_one_charged_casdm1s_uses_sector_context(self):
+        solver = RecordingSolver()
+        mc = make_mc(solver, target_k=2, nkpts=3, ncas=2)
+        mc.charged_results = [{
+            "target_k": 2,
+            "ci": "charged-ci",
+            "nelecastot": (3, 2),
+        }]
+
+        casdm1s = kmcpdft_helper.make_one_casdm1s_charged_kcas(mc)
+
+        self.assertEqual(casdm1s.shape, (2, 6, 6))
+        self.assertEqual(
+            solver.calls,
+            [("make_rdm1s", "charged-ci", 6, (3, 2),
+              {"nkpts": 3, "target_k": 2})],
+        )
+
+    def test_make_one_charged_casdm1s_accepts_ci_and_sector_override(self):
+        solver = RecordingSolver(nroots=2)
+        mc = make_mc(solver, target_k=None, nkpts=2, ncas=1)
+        mc.charged_results = [
+            {"target_k": 0, "ci": "sector-0", "nelecastot": (1, 0)},
+            {"target_k": 1, "ci": "sector-1", "nelecastot": (1, 0)},
+        ]
+
+        kmcpdft_helper.make_one_casdm1s_charged_kcas(
+            mc,
+            ci=["override-root-0", "override-root-1"],
+            state=1,
+            target_k=-1,
+        )
+
+        self.assertEqual(
+            solver.calls,
+            [("make_rdm1s", "override-root-1", 2, (1, 0),
+              {"nkpts": 2, "target_k": 1})],
+        )
+
+    def test_make_one_charged_casdm1s_rejects_invalid_shape(self):
+        class BadShapeSolver(RecordingSolver):
+            def make_rdm1s(self, ci, norb, nelec, **kwargs):
+                return np.zeros((norb, norb))
+
+        mc = make_mc(BadShapeSolver(), target_k=0, nkpts=2, ncas=1)
+        mc.charged_results = [{
+            "target_k": 0,
+            "ci": "charged-ci",
+            "nelecastot": (1, 0),
+        }]
+
+        with self.assertRaisesRegex(ValueError, "charged KCASCI 1-RDM"):
+            kmcpdft_helper.make_one_casdm1s_charged_kcas(mc)
+
     def test_make_one_casdm1s_passes_target_sector(self):
         solver = RecordingSolver()
         mc = make_mc(solver, target_k=5)

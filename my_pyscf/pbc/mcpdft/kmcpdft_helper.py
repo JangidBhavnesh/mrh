@@ -122,6 +122,24 @@ def make_one_casdm1s_kcas(mc, ci, state=0):
     return casdm1s
 
 
+def make_one_casdm1s_charged_kcas(mc, ci=None, state=0, target_k=None):
+    """Build a charged KCASCI state's spin-separated active-space 1-RDM."""
+    fcisolver, ci, ncastot, nelecastot, rdm_kwargs = \
+        _get_charged_kcas_rdm_context(
+            mc, ci=ci, state=state, target_k=target_k,
+        )
+    casdm1s = np.asarray(fcisolver.make_rdm1s(
+        ci, ncastot, nelecastot, **rdm_kwargs,
+    ))
+    expected_shape = (2, ncastot, ncastot)
+    if casdm1s.shape != expected_shape:
+        raise ValueError(
+            f"Expected spin-separated charged KCASCI 1-RDM shape "
+            f"{expected_shape}, got {casdm1s.shape}",
+        )
+    return casdm1s
+
+
 def make_one_casdm2_kcas(mc, ci, state=0):
     """Build one state's spin-summed kCASCI active-space 2-RDM."""
     fcisolver, ci, ncastot, nelecastot, rdm_kwargs = \
