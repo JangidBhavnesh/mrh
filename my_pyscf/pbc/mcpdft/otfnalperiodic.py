@@ -166,14 +166,9 @@ def _energy_ot_from_kpts(ot, casdm1s_kpts, cascm2_kpts, mo_coeff,
     if ncore < 0 or ncore + ncas > mo_coeff.shape[2]:
         raise ValueError("ncore and ncas are incompatible with mo_coeff")
 
-    dm1s_kpts = []
-    for k in range(nkpts):
-        dm1s = _dms.casdm1s_to_dm1s(
-            ot, casdm1s_kpts[:, k], mo_coeff=mo_coeff[k],
-            ncore=ncore, ncas=ncas,
-        )
-        dm1s_kpts.append(np.asarray(dm1s))
-    dm1s_kpts = np.stack(dm1s_kpts, axis=1)
+    dm1s_kpts = kmcpdft_helper.casdm1s_kpts_to_dm1s(
+        ot, casdm1s_kpts, mo_coeff, ncore,
+    )
 
     ni = ot._numint
     make_rho_alpha, nset_a, nao_a = ni._gen_rho_evaluator(
