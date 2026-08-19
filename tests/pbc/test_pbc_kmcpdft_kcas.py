@@ -78,6 +78,71 @@ def build_periodic_h2():
 
 class KCASPDFTRDMTests(unittest.TestCase):
 
+    def test_select_charged_result_uses_requested_sector(self):
+        results = [
+            {"target_k": 0, "ci": "sector-0"},
+            {"target_k": 2, "ci": "sector-2"},
+        ]
+        mc = SimpleNamespace(
+            nkpts=3, target_k=None, charged_results=results,
+        )
+
+        result = kmcpdft_helper._select_charged_kcas_result(
+            mc, target_k=-1,
+        )
+
+        self.assertIs(result, results[1])
+
+    def test_select_charged_result_defaults_to_object_sector(self):
+        results = [{"target_k": 1, "ci": "sector-1"}]
+        mc = SimpleNamespace(
+            nkpts=3, target_k=4, charged_results=results,
+        )
+
+        result = kmcpdft_helper._select_charged_kcas_result(mc)
+
+        self.assertIs(result, results[0])
+
+    def test_select_charged_result_infers_only_stored_sector(self):
+        results = [{"target_k": 2, "ci": "sector-2"}]
+        mc = SimpleNamespace(
+            nkpts=3, target_k=None, charged_results=results,
+        )
+
+        result = kmcpdft_helper._select_charged_kcas_result(mc)
+
+        self.assertIs(result, results[0])
+
+    def test_select_charged_result_rejects_ambiguous_sector(self):
+        mc = SimpleNamespace(
+            nkpts=3,
+            target_k=None,
+            charged_results=[{"target_k": 0}, {"target_k": 1}],
+        )
+
+        with self.assertRaisesRegex(ValueError, "target_k is required"):
+            kmcpdft_helper._select_charged_kcas_result(mc)
+
+    def test_select_charged_result_rejects_missing_sector(self):
+        mc = SimpleNamespace(
+            nkpts=3,
+            target_k=None,
+            charged_results=[{"target_k": 0}],
+        )
+
+        with self.assertRaisesRegex(ValueError, "target_k=1"):
+            kmcpdft_helper._select_charged_kcas_result(mc, target_k=1)
+
+    def test_select_charged_result_rejects_duplicate_sector(self):
+        mc = SimpleNamespace(
+            nkpts=3,
+            target_k=1,
+            charged_results=[{"target_k": 1}, {"target_k": 4}],
+        )
+
+        with self.assertRaisesRegex(ValueError, "Multiple charged"):
+            kmcpdft_helper._select_charged_kcas_result(mc)
+
     def test_make_one_casdm1s_passes_target_sector(self):
         solver = RecordingSolver()
         mc = make_mc(solver, target_k=5)
