@@ -7,6 +7,42 @@ from pyscf.mcpdft._dms import _get_fcisolver
 from mrh.my_pyscf.pbc.mcpdft._dms import dm2_cumulant_complex
 
 
+def _select_charged_kcas_result(mc, target_k=None):
+    """Select one stored charged KCASCI momentum-sector result."""
+    nkpts = int(mc.nkpts)
+    if nkpts <= 0:
+        raise ValueError("nkpts must be positive")
+
+    results = list(getattr(mc, "charged_results", ()))
+    if target_k is None:
+        target_k = getattr(mc, "target_k", None)
+    if target_k is None:
+        if len(results) != 1:
+            raise ValueError(
+                "target_k is required when multiple charged KCASCI "
+                "sectors are available",
+            )
+        target_k = results[0]["target_k"]
+    if not isinstance(target_k, (int, np.integer)):
+        raise ValueError("target_k must be an integer")
+    target_k = int(target_k) % nkpts
+
+    matches = [
+        result for result in results
+        if int(result["target_k"]) % nkpts == target_k
+    ]
+    if not matches:
+        raise ValueError(
+            f"No charged KCASCI result is available for target_k={target_k}",
+        )
+    if len(matches) > 1:
+        raise ValueError(
+            f"Multiple charged KCASCI results are available for "
+            f"target_k={target_k}",
+        )
+    return matches[0]
+
+
 def _get_kcas_rdm_context(mc, ci, state=0):
     """Resolve one kCASCI state and its momentum-sector RDM arguments."""
     nkpts = int(mc.nkpts)
