@@ -6,9 +6,11 @@ from unittest import mock
 
 import numpy as np
 from pyscf.lib import logger
+from pyscf.pbc import gto, scf
 
+from mrh.my_pyscf.pbc import mcscf
 from mrh.my_pyscf.pbc.fci import direct_spin1_kfci
-from mrh.my_pyscf.pbc.mcpdft import kmcpdft_helper
+from mrh.my_pyscf.pbc.mcpdft import kmcpdft, kmcpdft_helper
 from mrh.my_pyscf.pbc.mcpdft._dms import dm2_cumulant_complex
 from mrh.my_pyscf.pbc.mcpdft import otfnalperiodic
 
@@ -419,6 +421,268 @@ class KCASPDFTOnTopEnergyTests(unittest.TestCase):
         self.assertEqual(seen_eval["rho"].shape, (2, 1, weight.size))
         self.assertEqual(seen_eval["Pi"].shape, (1, weight.size))
         self.assertIs(get_pi.call_args.args[3], cascm2_kpts)
+
+
+class KCASPDFTWavefunctionEnergyTests(unittest.TestCase):
+
+    def test_cumulant_contraction_matches_wannier_normalization(self):
+        nkpts, ncas = 2, 1
+        norb = nkpts * ncas
+        kconserv = make_kconserv(nkpts)
+        rng = np.random.default_rng(23)
+        eri_k = (
+            rng.normal(size=(nkpts, nkpts, nkpts, ncas, ncas,
+                             ncas, ncas))
+            + 1j * rng.normal(size=(nkpts, nkpts, nkpts, ncas,
+                                    ncas, ncas, ncas))
+        )
+        cascm2_kpts = (
+            rng.normal(size=eri_k.shape)
+            + 1j * rng.normal(size=eri_k.shape)
+        )
+
+        eri_full = np.zeros((norb,) * 4, dtype=complex)
+        cascm2_full = np.zeros((norb,) * 4, dtype=complex)
+        for k1 in range(nkpts):
+            for k2 in range(nkpts):
+                for k3 in range(nkpts):
+                    k4 = kconserv[k1, k2, k3]
+                    eri_full[k1, k2, k3, k4] = \
+                        eri_k[k1, k2, k3, 0, 0, 0, 0]
+                    cascm2_full[k1, k2, k3, k4] = \
+                        cascm2_kpts[k1, k2, k3, 0, 0, 0, 0]
+
+        phase = np.asarray([[1.0, 1.0], [1.0, -1.0]]) / np.sqrt(2.0)
+        eri_wannier = np.einsum(
+            "iP,jQ,ijkl,kR,lS->PQRS",
+            phase.conj(), phase, eri_full, phase.conj(), phase,
+            optimize=True,
+        ) / nkpts
+        cascm2_wannier = np.einsum(
+            "iP,jQ,ijkl,kR,lS->PQRS",
+            phase, phase.conj(), cascm2_full, phase, phase.conj(),
+            optimize=True,
+        )
+        reference = np.einsum(
+            "PQRS,PQRS->", eri_wannier, cascm2_wannier,
+            optimize=True,
+        ) / (2 * nkpts)
+
+        # kCASCI stores raw Bloch ERIs with 1 / (2 * nkpts).
+        h2eff = eri_k / (2 * nkpts)
+        result = kmcpdft.contract_kcas_cumulant(
+            h2eff, cascm2_kpts, nkpts,
+        )
+        np.testing.assert_allclose(result, reference, atol=1e-12, rtol=1e-12)
+
+    def test_cumulant_contraction_rejects_incompatible_shapes(self):
+        h2eff = np.zeros((2, 2, 2, 1, 1, 1, 1))
+        with self.assertRaisesRegex(ValueError, "matching seven-dimensional"):
+            kmcpdft.contract_kcas_cumulant(
+                h2eff, np.zeros((2,) * 4), nkpts=2,
+            )
+
+    def test_energy_mcwfn_kcas_hybrid_components(self):
+        nkpts, ncas, nao = 2, 1, 1
+        ncastot = nkpts * ncas
+        kconserv = make_kconserv(nkpts)
+        casdm1s = np.zeros((2, ncastot, ncastot))
+        casdm2 = np.zeros((ncastot,) * 4)
+        casdm1s_kpts = np.zeros((2, nkpts, ncas, ncas))
+        cascm2_kpts = np.full(
+            (nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas), 0.2,
+        )
+        dm1s_kpts = np.asarray([
+            [[[1.0]], [[0.5]]],
+            [[[0.25]], [[0.75]]],
+        ])
+        hcore = np.asarray([[[2.0]], [[3.0]]])
+        vj_spin = np.asarray([
+            [[[0.4]], [[0.6]]],
+            [[[0.1]], [[0.2]]],
+        ])
+        vk_spin = np.asarray([
+            [[[0.3]], [[0.4]]],
+            [[[0.2]], [[0.1]]],
+        ])
+        h2eff = np.full(cascm2_kpts.shape, 0.1)
+        jk_calls = []
+
+        class FakeSCF:
+            def get_jk(self, cell, dm_kpts, kpts, **kwargs):
+                jk_calls.append((np.asarray(dm_kpts), kwargs))
+                return vj_spin, vk_spin
+
+        class FakeNumInt:
+            def rsh_and_hybrid_coeff(self, otxc, spin):
+                self.seen = (otxc, spin)
+                return 0.0, 0.0, (0.25, 0.25)
+
+        numint = FakeNumInt()
+        ot = SimpleNamespace(_numint=numint, otxc="tPBE0")
+        mc = SimpleNamespace(
+            otfnal=ot,
+            mo_coeff=np.ones((nkpts, nao, ncas), dtype=complex),
+            ci="ci",
+            verbose=logger.QUIET,
+            nkpts=nkpts,
+            ncas=ncas,
+            ncore=0,
+            kconserv=kconserv,
+            kpts=np.zeros((nkpts, 3)),
+            cell=SimpleNamespace(spin=0),
+            _scf=FakeSCF(),
+            energy_nuc=lambda: 1.5,
+            get_hcore=lambda **kwargs: hcore,
+            get_h2eff=mock.Mock(return_value=h2eff),
+        )
+
+        with mock.patch.object(
+                kmcpdft_helper, "make_kcas_rdms_kpts",
+                return_value=(casdm1s_kpts, cascm2_kpts)), \
+             mock.patch.object(
+                kmcpdft_helper, "casdm1s_kpts_to_dm1s",
+                return_value=dm1s_kpts):
+            result = kmcpdft.energy_mcwfn_kcas(
+                mc, casdm1s=casdm1s, casdm2=casdm2,
+            )
+
+        dm1_kpts = dm1s_kpts.sum(axis=0)
+        energy_one = np.einsum("kij,kji->", hcore, dm1_kpts) / nkpts
+        vj_kpts = vj_spin.sum(axis=0)
+        energy_j = 0.5 * np.einsum(
+            "kij,kji->", vj_kpts, dm1_kpts,
+        ) / nkpts
+        energy_x = -0.5 * (
+            np.einsum("kij,kji->", vk_spin[0], dm1s_kpts[0])
+            + np.einsum("kij,kji->", vk_spin[1], dm1s_kpts[1])
+        ) / nkpts
+        energy_c = np.einsum(
+            "abcuvxy,abcuvxy->", h2eff, cascm2_kpts,
+        ) / nkpts
+        reference = (
+            1.5 + energy_one + energy_j
+            + 0.25 * energy_x + 0.25 * energy_c
+        )
+
+        np.testing.assert_allclose(result, reference)
+        self.assertEqual(numint.seen, ("tPBE0", 0))
+        self.assertEqual(len(jk_calls), 1)
+        np.testing.assert_allclose(jk_calls[0][0], dm1s_kpts)
+        mc.get_h2eff.assert_called_once_with(mo_coeff=mc.mo_coeff)
+
+    def test_energy_mcwfn_kcas_pure_functional_skips_exchange_and_eris(self):
+        nkpts, ncas = 2, 1
+        ncastot = nkpts * ncas
+        kconserv = make_kconserv(nkpts)
+        casdm1s = np.zeros((2, ncastot, ncastot))
+        casdm2 = np.zeros((ncastot,) * 4)
+        casdm1s_kpts = np.zeros((2, nkpts, ncas, ncas))
+        cascm2_kpts = np.zeros(
+            (nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas),
+        )
+        dm1s_kpts = np.ones((2, nkpts, 1, 1)) * 0.5
+        get_h2eff = mock.Mock(side_effect=AssertionError("unexpected ERIs"))
+
+        class FakeSCF:
+            def get_jk(self, cell, dm_kpts, kpts, **kwargs):
+                self.dm_kpts = np.asarray(dm_kpts)
+                self.kwargs = kwargs
+                return np.ones((nkpts, 1, 1)) * 0.4, None
+
+        fake_scf = FakeSCF()
+        numint = SimpleNamespace(
+            rsh_and_hybrid_coeff=lambda otxc, spin:
+                (0.0, 0.0, (0.0, 0.0)),
+        )
+        mc = SimpleNamespace(
+            otfnal=SimpleNamespace(_numint=numint, otxc="tPBE"),
+            mo_coeff=np.ones((nkpts, 1, 1)),
+            ci="ci",
+            verbose=logger.QUIET,
+            nkpts=nkpts,
+            ncas=ncas,
+            ncore=0,
+            kconserv=kconserv,
+            kpts=np.zeros((nkpts, 3)),
+            cell=SimpleNamespace(spin=0),
+            _scf=fake_scf,
+            energy_nuc=lambda: 1.0,
+            get_hcore=lambda **kwargs: np.ones((nkpts, 1, 1)),
+            get_h2eff=get_h2eff,
+        )
+
+        with mock.patch.object(
+                kmcpdft_helper, "make_kcas_rdms_kpts",
+                return_value=(casdm1s_kpts, cascm2_kpts)), \
+             mock.patch.object(
+                kmcpdft_helper, "casdm1s_kpts_to_dm1s",
+                return_value=dm1s_kpts):
+            result = kmcpdft.energy_mcwfn_kcas(
+                mc, casdm1s=casdm1s, casdm2=casdm2,
+            )
+
+        # Per cell: Vnn=1, E1=1, EJ=0.2.
+        self.assertAlmostEqual(result, 2.2)
+        np.testing.assert_allclose(fake_scf.dm_kpts, dm1s_kpts.sum(axis=0))
+        self.assertEqual(fake_scf.kwargs, {"hermi": 1, "with_k": False})
+        get_h2eff.assert_not_called()
+
+    def test_full_hybrid_reconstructs_kcasci_energy(self):
+        cell = gto.Cell()
+        cell.a = np.diag([2.24, 2.24, 12.0])
+        cell.atom = [
+            ["H", (0.0, 0.0, 6.0)],
+            ["H", (0.74, 0.0, 6.0)],
+        ]
+        cell.basis = "sto-6g"
+        cell.unit = "Angstrom"
+        cell.precision = 1e-9
+        cell.verbose = 0
+        cell.build()
+
+        kmesh = [2, 1, 1]
+        kpts = cell.make_kpts(kmesh, wrap_around=True)
+        kmf = scf.KRHF(cell, kpts=kpts).density_fit()
+        kmf.exxdiv = None
+        kmf.conv_tol = 1e-9
+        kmf.verbose = 0
+        kmf.kernel()
+        self.assertTrue(kmf.converged)
+
+        numint = SimpleNamespace(
+            rsh_and_hybrid_coeff=lambda otxc, spin:
+                (0.0, 0.0, (1.0, 1.0)),
+        )
+        ot = SimpleNamespace(_numint=numint, otxc="full-MC")
+        mo_coeff = np.asarray(kmf.mo_coeff)
+
+        for target_k in range(len(kpts)):
+            with self.subTest(target_k=target_k):
+                mc = mcscf.KCASCI(
+                    kmf, 2, 2, ncore=0, target_k=target_k,
+                )
+                mc.kmesh = kmesh
+                mc.verbose = 0
+                mc.fcisolver.verbose = 0
+                mc.canonicalization = False
+                energy_kcas = mc.kernel(mo_coeff)[0]
+
+                casdm1s = kmcpdft_helper.make_one_casdm1s_kcas(
+                    mc, mc.ci,
+                )
+                casdm2 = kmcpdft_helper.make_one_casdm2_kcas(
+                    mc, mc.ci,
+                )
+                energy_reconstructed = kmcpdft.energy_mcwfn_kcas(
+                    mc, ot=ot, casdm1s=casdm1s, casdm2=casdm2,
+                    verbose=logger.QUIET,
+                )
+
+                np.testing.assert_allclose(
+                    energy_reconstructed, energy_kcas,
+                    atol=1e-9, rtol=1e-9,
+                )
 
 
 if __name__ == "__main__":

@@ -54,11 +54,11 @@ def make_one_casdm2_kcas(mc, ci, state=0):
     fcisolver, ci, ncastot, nelecastot, rdm_kwargs = \
         _get_kcas_rdm_context(mc, ci, state=state)
     try:
-        casdm2 = fcisolver.make_rdm2(
+        _, casdm2 = fcisolver.make_rdm12(
             ci, ncastot, nelecastot, **rdm_kwargs,
         )
     except AttributeError:
-        _, casdm2 = fcisolver.make_rdm12(
+        casdm2 = fcisolver.make_rdm2(
             ci, ncastot, nelecastot, **rdm_kwargs,
         )
 
@@ -208,3 +208,37 @@ def make_kcas_rdms_kpts(casdm1s, casdm2, nkpts, ncas, kconserv,
         momentum_tol=momentum_tol,
     )
     return casdm1s_kpts, cascm2_kpts
+
+
+def casdm1s_kpts_to_dm1s(obj, casdm1s_kpts, mo_coeff, ncore):
+    """Transform k-resolved active 1-RDMs to spin-separated AO matrices."""
+    from pyscf.mcpdft import _dms
+
+    mo_coeff = np.asarray(mo_coeff)
+    casdm1s_kpts = np.asarray(casdm1s_kpts)
+    if mo_coeff.ndim != 3:
+        raise ValueError("mo_coeff must have shape (nkpts, nao, nmo)")
+
+    nkpts = mo_coeff.shape[0]
+    if casdm1s_kpts.ndim != 4 or casdm1s_kpts.shape[:2] != (2, nkpts):
+        raise ValueError(
+            "casdm1s_kpts must have shape (2, nkpts, ncas, ncas)",
+        )
+    ncas = casdm1s_kpts.shape[2]
+    expected_shape = (2, nkpts, ncas, ncas)
+    if casdm1s_kpts.shape != expected_shape:
+        raise ValueError(
+            f"Expected casdm1s_kpts shape {expected_shape}, "
+            f"got {casdm1s_kpts.shape}",
+        )
+    if ncore < 0 or ncore + ncas > mo_coeff.shape[2]:
+        raise ValueError("ncore and ncas are incompatible with mo_coeff")
+
+    dm1s_kpts = []
+    for k in range(nkpts):
+        dm1s = _dms.casdm1s_to_dm1s(
+            obj, casdm1s_kpts[:, k], mo_coeff=mo_coeff[k],
+            ncore=ncore, ncas=ncas,
+        )
+        dm1s_kpts.append(np.asarray(dm1s))
+    return np.stack(dm1s_kpts, axis=1)
