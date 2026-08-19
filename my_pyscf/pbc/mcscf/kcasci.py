@@ -323,3 +323,147 @@ def make_rdm1(mc, mo_coeff=None, ci=None, ncas=None, nelecas=None,
         dm1[k] = 2.0 * mocore @ mocore.conj().T
         dm1[k] += mocas @ casdm1[p0:p1, p0:p1] @ mocas.conj().T
     return dm1
+
+
+def get_fock(mc, mo_coeff=None, ci=None, eris=None, casdm1=None,
+             verbose=None, target_k=None, stav_dm1=False, weights=None):
+    """Construct the generalized KCASCI Fock matrix in the AO basis."""
+    del eris, verbose
+    if mo_coeff is None:
+        mo_coeff = mc.mo_coeff
+    if ci is None:
+        ci = mc.ci
+    if casdm1 is None:
+        casdm1 = make_casdm1(
+            mc, ci, stav_dm1=stav_dm1, weights=weights,
+            target_k=target_k,
+        )
+
+    mo_coeff = np.asarray(mo_coeff)
+    nkpts = mc.nkpts
+    ncore = mc.ncore
+    ncas = mc.ncas
+    nocc = ncore + ncas
+    ncastot = nkpts * ncas
+    casdm1 = np.asarray(casdm1)
+    dtype = np.result_type(mo_coeff.dtype, casdm1.dtype)
+    casdm1 = np.asarray(casdm1, dtype=dtype)
+    if casdm1.shape != (ncastot, ncastot):
+        raise ValueError(
+            f"Expected casdm1 shape {(ncastot, ncastot)}, "
+            f"got {casdm1.shape}",
+        )
+
+    mo_core = mo_coeff[:, :, :ncore]
+    dm_k = np.asarray([
+        2.0 * mo_core[k] @ mo_core[k].conj().T
+        for k in range(nkpts)
+    ], dtype=dtype)
+    for k in range(nkpts):
+        mocas = mo_coeff[k, :, ncore:nocc]
+        p0 = k * ncas
+        p1 = p0 + ncas
+        dm_k[k] += mocas @ casdm1[p0:p1, p0:p1] @ mocas.conj().T
+
+    hcore = np.asarray(mc.get_hcore(), dtype=dtype)
+    veff = np.asarray(mc.get_veff(
+        mc.cell, dm_k, hermi=1, kpts=mc._scf.kpts,
+    ), dtype=dtype)
+    return hcore + veff
+
+
+@lib.with_doc(casci.canonicalize.__doc__)
+def canonicalize(mc, mo_coeff=None, ci=None, eris=None, sort=False,
+                 cas_natorb=False, casdm1=None, verbose=logger.NOTE,
+                 with_meta_lowdin=casci.WITH_META_LOWDIN, stav_dm1=False,
+                 weights=None, target_k=None):
+    """Canonicalize the unfrozen KCASCI core and virtual orbitals."""
+    del eris, with_meta_lowdin
+    log = logger.new_logger(mc, verbose)
+    log.debug("Canonicalizing KCASCI orbitals")
+
+    if mo_coeff is None:
+        mo_coeff = mc.mo_coeff
+    if ci is None:
+        ci = mc.ci
+    if cas_natorb:
+        raise NotImplementedError("KCASCI natural orbitals are not implemented")
+    if casdm1 is None:
+        casdm1 = make_casdm1(
+            mc, ci, stav_dm1=stav_dm1, weights=weights,
+            target_k=target_k,
+        )
+
+    mo_coeff = np.asarray(mo_coeff)
+    casdm1 = np.asarray(casdm1)
+    nkpts = mc.nkpts
+    ncas = mc.ncas
+    ncore = mc.ncore
+    nocc = ncore + ncas
+    nmo = mo_coeff.shape[2]
+
+    fock_ao = get_fock(
+        mc, mo_coeff=mo_coeff, ci=ci, casdm1=casdm1,
+        target_k=target_k,
+    )
+    mo_coeff1 = mo_coeff.copy()
+
+    log.info("Density matrix diagonal elements")
+    for k in range(nkpts):
+        p0 = k * ncas
+        p1 = p0 + ncas
+        dm_k = casdm1[p0:p1, p0:p1]
+        log.info(
+            "k-point %d, only real diagonal = %s", k,
+            np.array2string(
+                np.diag(dm_k).real, precision=5, floatmode="fixed",
+                separator=", ",
+            ),
+        )
+
+    mo_energy = [
+        np.einsum(
+            "pi,pi->i", mo_coeff1[k].conj(), fock_ao[k] @ mo_coeff1[k],
+        )
+        for k in range(nkpts)
+    ]
+    orbsym_extra = np.zeros(nmo, dtype=int)
+
+    def _diag_subfock_(idx):
+        if idx.size > 1:
+            for k in range(nkpts):
+                coeff = mo_coeff1[k][:, idx]
+                fock = coeff.conj().T @ fock_ao[k] @ coeff
+                energy, rotation = mc._eig(
+                    fock, None, None, orbsym_extra[idx],
+                )
+                if sort:
+                    order = np.argsort(energy.round(9), kind="mergesort")
+                    energy = energy[order]
+                    rotation = rotation[:, order]
+                mo_coeff1[k][:, idx] = coeff @ rotation
+                mo_energy[k][idx] = energy
+
+    mask = np.ones(nmo, dtype=bool)
+    frozen = getattr(mc, "frozen", None)
+    if frozen is not None:
+        if isinstance(frozen, (int, np.integer)):
+            mask[:frozen] = False
+        else:
+            mask[frozen] = False
+
+    core_idx = np.where(mask[:ncore])[0]
+    vir_idx = np.where(mask[nocc:])[0] + nocc
+    _diag_subfock_(core_idx)
+    _diag_subfock_(vir_idx)
+
+    if log.verbose >= logger.DEBUG:
+        for k in range(nkpts):
+            log.debug("k-point %d", k)
+            for i in range(nmo):
+                log.debug(
+                    "i = %d  <i|F|i> = %12.8f",
+                    i + 1, mo_energy[k][i].real,
+                )
+
+    return mo_coeff1, ci, mo_energy
