@@ -4,6 +4,8 @@ import numpy as np
 
 from pyscf.mcpdft._dms import _get_fcisolver
 
+from mrh.my_pyscf.pbc.mcpdft._dms import dm2_cumulant_complex
+
 
 def _get_kcas_rdm_context(mc, ci, state=0):
     """Resolve one kCASCI state and its momentum-sector RDM arguments."""
@@ -68,3 +70,141 @@ def make_one_casdm2_kcas(mc, ci, state=0):
             f"got {casdm2.shape}",
         )
     return casdm2
+
+
+def _validate_kspace_layout(nkpts, ncas, kconserv=None):
+    """Validate dimensions shared by the k-space RDM converters."""
+    nkpts = int(nkpts)
+    ncas = int(ncas)
+    if nkpts <= 0:
+        raise ValueError("nkpts must be positive")
+    if ncas <= 0:
+        raise ValueError("ncas must be positive")
+
+    if kconserv is not None:
+        kconserv = np.asarray(kconserv)
+        expected_shape = (nkpts, nkpts, nkpts)
+        if kconserv.shape != expected_shape:
+            raise ValueError(
+                f"Expected kconserv shape {expected_shape}, "
+                f"got {kconserv.shape}",
+            )
+        if not np.issubdtype(kconserv.dtype, np.integer):
+            raise ValueError("kconserv must contain integer indices")
+        if np.any(kconserv < 0) or np.any(kconserv >= nkpts):
+            raise ValueError("kconserv indices must lie in [0, nkpts)")
+    return nkpts, ncas, kconserv
+
+
+def _check_forbidden_norm(total_norm_sq, forbidden_norm_sq, momentum_tol,
+                          tensor_name):
+    """Reject density-matrix weight outside momentum-conserving blocks."""
+    if momentum_tol is None:
+        return
+    if momentum_tol < 0:
+        raise ValueError("momentum_tol must be nonnegative or None")
+
+    total_norm = np.sqrt(max(0.0, float(total_norm_sq)))
+    forbidden_norm = np.sqrt(max(0.0, float(forbidden_norm_sq)))
+    if forbidden_norm > momentum_tol * max(1.0, total_norm):
+        raise ValueError(
+            f"{tensor_name} contains momentum-forbidden blocks with norm "
+            f"{forbidden_norm:.3e}",
+        )
+
+
+def casdm1s_to_kpts(casdm1s, nkpts, ncas, momentum_tol=1e-8):
+    """Extract the k-diagonal blocks of a flattened Bloch-basis 1-RDM."""
+    nkpts, ncas, _ = _validate_kspace_layout(nkpts, ncas)
+    ncastot = nkpts * ncas
+    casdm1s = np.asarray(casdm1s)
+    expected_shape = (2, ncastot, ncastot)
+    if casdm1s.shape != expected_shape:
+        raise ValueError(
+            f"Expected spin-separated kCASCI 1-RDM shape {expected_shape}, "
+            f"got {casdm1s.shape}",
+        )
+
+    casdm1s_full = casdm1s.reshape(
+        2, nkpts, ncas, nkpts, ncas,
+    )
+    casdm1s_kpts = np.stack([
+        casdm1s_full[:, k, :, k, :] for k in range(nkpts)
+    ], axis=1)
+
+    if momentum_tol is not None:
+        total_norm_sq = np.vdot(casdm1s, casdm1s).real
+        forbidden_norm_sq = 0.0
+        for k1 in range(nkpts):
+            for k2 in range(nkpts):
+                if k1 != k2:
+                    block = casdm1s_full[:, k1, :, k2, :]
+                    forbidden_norm_sq += np.vdot(block, block).real
+        _check_forbidden_norm(
+            total_norm_sq, forbidden_norm_sq, momentum_tol,
+            "kCASCI 1-RDM",
+        )
+    return casdm1s_kpts
+
+
+def cascm2_to_kpts(cascm2, nkpts, ncas, kconserv, momentum_tol=1e-8):
+    """Extract momentum-conserving blocks of a Bloch-basis cumulant."""
+    nkpts, ncas, kconserv = _validate_kspace_layout(
+        nkpts, ncas, kconserv=kconserv,
+    )
+    ncastot = nkpts * ncas
+    cascm2 = np.asarray(cascm2)
+    expected_shape = (ncastot,) * 4
+    if cascm2.shape != expected_shape:
+        raise ValueError(
+            f"Expected kCASCI cumulant shape {expected_shape}, "
+            f"got {cascm2.shape}",
+        )
+
+    cascm2_full = cascm2.reshape(
+        nkpts, ncas, nkpts, ncas, nkpts, ncas, nkpts, ncas,
+    )
+    cascm2_kpts = np.empty(
+        (nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas),
+        dtype=cascm2.dtype,
+    )
+    for k1 in range(nkpts):
+        for k2 in range(nkpts):
+            for k3 in range(nkpts):
+                k4 = kconserv[k1, k2, k3]
+                cascm2_kpts[k1, k2, k3] = cascm2_full[
+                    k1, :, k2, :, k3, :, k4, :,
+                ]
+
+    if momentum_tol is not None:
+        total_norm_sq = np.vdot(cascm2, cascm2).real
+        forbidden_norm_sq = 0.0
+        for k1 in range(nkpts):
+            for k2 in range(nkpts):
+                for k3 in range(nkpts):
+                    allowed_k4 = kconserv[k1, k2, k3]
+                    for k4 in range(nkpts):
+                        if k4 != allowed_k4:
+                            block = cascm2_full[
+                                k1, :, k2, :, k3, :, k4, :,
+                            ]
+                            forbidden_norm_sq += np.vdot(block, block).real
+        _check_forbidden_norm(
+            total_norm_sq, forbidden_norm_sq, momentum_tol,
+            "kCASCI cumulant",
+        )
+    return cascm2_kpts
+
+
+def make_kcas_rdms_kpts(casdm1s, casdm2, nkpts, ncas, kconserv,
+                         momentum_tol=1e-8):
+    """Convert dense kCASCI RDMs to the blocks used by periodic MC-PDFT."""
+    casdm1s_kpts = casdm1s_to_kpts(
+        casdm1s, nkpts, ncas, momentum_tol=momentum_tol,
+    )
+    cascm2 = dm2_cumulant_complex(casdm2, casdm1s)
+    cascm2_kpts = cascm2_to_kpts(
+        cascm2, nkpts, ncas, kconserv,
+        momentum_tol=momentum_tol,
+    )
+    return casdm1s_kpts, cascm2_kpts
