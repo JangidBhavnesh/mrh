@@ -2,6 +2,12 @@
 
 import numpy as np
 
+from pyscf import lib
+from pyscf.lib import logger
+
+from mrh.my_pyscf.pbc.fci.addons import _unpack_nelec
+from mrh.my_pyscf.pbc.fci import kcistrings
+
 
 # Author: Bhavnesh Jangid
 
@@ -100,3 +106,98 @@ def _adjust_h1eff_for_kfci(h1eff, h2eff):
         for kq in range(nkpts):
             j_eff[kp] += np.einsum("piis->ps", h2eff[kp, kq, kq])
     return h1eff - j_eff
+
+
+def _get_kmom_for_kcasci(mc):
+    """Build momentum-arithmetic tables from the KCASCI k-point metadata."""
+    kmf = mc._scf
+    kpts = kcistrings._safe_getattr(mc, "kpts", None)
+    if kpts is None:
+        kpts = kcistrings._safe_getattr(kmf, "kpts", None)
+    kmesh = kcistrings._safe_getattr(mc, "kmesh", None)
+    if kmesh is None:
+        kmesh = kcistrings._safe_getattr(kmf, "kmesh", None)
+    kconserv = kcistrings._safe_getattr(mc, "kconserv", None)
+    return kcistrings.make_kpoint_momentum(
+        mc.nkpts, cell=mc.cell, kpts=kpts, kmesh=kmesh,
+        kconserv=kconserv, kmf=kmf, kmc=mc,
+    )
+
+
+def _set_solver_kpts(mc, kmom=None):
+    """Pass KCASCI k-point metadata to its k-FCI solver."""
+    if kmom is None:
+        kmom = _get_kmom_for_kcasci(mc)
+
+    mc.kconserv = kmom.kconserv
+    mc.fcisolver.kpts = kcistrings._safe_getattr(
+        mc, "kpts", kcistrings._safe_getattr(mc._scf, "kpts", None),
+    )
+    mc.fcisolver.kmesh = kcistrings._safe_getattr(
+        mc, "kmesh", kcistrings._safe_getattr(mc._scf, "kmesh", None),
+    )
+    mc.fcisolver.kconserv = kmom.kconserv
+    mc.fcisolver.kmom = kmom
+    return kmom
+
+
+def kernel(mc, mo_coeff=None, ci0=None, verbose=logger.NOTE, envs=None):
+    """Run neutral KCASCI in one total-momentum sector.
+
+    The k-FCI problem represents the supercell associated with the k-point
+    mesh.  Its total and active-space energies are divided by ``nkpts`` before
+    they are returned so that KCASCI follows the periodic per-cell energy
+    convention.
+    """
+    del envs
+    if mo_coeff is None:
+        mo_coeff = mc.mo_coeff
+    if ci0 is None:
+        ci0 = mc.ci
+
+    log = logger.new_logger(mc, verbose)
+    t0 = (logger.process_clock(), logger.perf_counter())
+    log.debug("Start KCASCI")
+
+    nkpts = mc.nkpts
+    ncas = mc.ncas
+    nelecas = _unpack_nelec(mc.nelecas, mc.cell.spin)
+
+    h1eff, energy_core = mc.get_h1eff(mo_coeff)
+    t1 = log.timer("one-electron integral computation for k-CAS", *t0)
+    h2eff = mc.get_h2eff(mo_coeff)
+    t1 = log.timer("integral transformation to k-CAS space", *t1)
+    h1eff = _adjust_h1eff_for_kfci(h1eff, h2eff)
+    log.debug("core energy = %.15g", energy_core.real)
+
+    assert h1eff.shape == (nkpts, ncas, ncas)
+    assert h2eff.shape == (
+        nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas,
+    )
+
+    kmom = _set_solver_kpts(mc)
+    if not isinstance(mc.target_k, (int, np.integer)):
+        raise ValueError("target_k must be an integer")
+    target_k = int(mc.target_k)
+    if not 0 <= target_k < nkpts:
+        target_k %= nkpts
+        log.warn("target_k is out of bounds, using %d instead", target_k)
+
+    ncastot = nkpts * ncas
+    nelecastot = (nkpts * nelecas[0], nkpts * nelecas[1])
+    max_memory = max(4000, mc.max_memory - lib.current_memory()[0])
+
+    mc.fcisolver.nkpts = nkpts
+    mc.fcisolver.target_k = target_k
+    mc.fcisolver.kmom = kmom
+    e_tot, fcivec = mc.fcisolver.kernel(
+        h1eff, h2eff, ncastot, nelecastot, ci0=ci0, nkpts=nkpts,
+        target_k=target_k, verbose=log, max_memory=max_memory,
+        ecore=energy_core,
+    )
+    log.timer("k-FCI solver", *t1)
+
+    e_cas = e_tot - energy_core
+    e_cas /= nkpts
+    e_tot /= nkpts
+    return e_tot, e_cas, fcivec
