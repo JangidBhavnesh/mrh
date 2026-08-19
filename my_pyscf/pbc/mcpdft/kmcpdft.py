@@ -7,7 +7,10 @@ from pyscf.mcpdft import _dms
 from pyscf.pbc.dft import gen_grid as pbc_gen_grid
 from pyscf.pbc.lib import kpts_helper
 
-from mrh.my_pyscf.pbc.mcpdft.otfnalperiodic import get_pbc_otfnal_kpts
+from mrh.my_pyscf.pbc.mcpdft.otfnalperiodic import (
+    get_pbc_otfnal_kpts,
+    otfnalperiodic_kpts,
+)
 from mrh.my_pyscf.pbc.mcscf.k2R import get_mo_coeff_k2R
 from mrh.my_pyscf.pbc.mcpdft._dms import dm2_cumulant_complex
 from mrh.my_pyscf.pbc.mcpdft import kmcpdft_helper
@@ -277,12 +280,37 @@ def energy_mcwfn_kcas(mc, mo_coeff=None, ci=None, ot=None, state=0,
     )
 
 
+def energy_dft_kcas(mc, mo_coeff=None, ci=None, ot=None, state=0,
+                    casdm1s=None, casdm2=None, max_memory=None, hermi=1,
+                    momentum_tol=1e-8):
+    """Evaluate the on-top functional directly from momentum kCAS RDMs."""
+    if ot is None:
+        ot = mc.otfnal
+    if mo_coeff is None:
+        mo_coeff = mc.mo_coeff
+    if ci is None:
+        ci = mc.ci
+    if casdm1s is None:
+        casdm1s = mc.make_one_casdm1s(ci, state=state)
+    if casdm2 is None:
+        casdm2 = mc.make_one_casdm2(ci, state=state)
+    if max_memory is None:
+        max_memory = mc.max_memory
+    return ot.energy_ot_kcas(
+        casdm1s, casdm2, mo_coeff, mc.ncore,
+        max_memory=max_memory, hermi=hermi,
+        momentum_tol=momentum_tol,
+    )
+
+
 class _kMCPDFT(_PDFT):
     '''
     k-MC-PDFT for periodic systems at the gamma point or k-points.
     This class is adding or replacing the functionalities which are not 
     compatible with periodic systems are throwing NotImplementedError. 
     '''
+
+    momentum_resolved = False
 
     def _init_ot_grids(self, my_ot, grids_attr=None):
         '''
@@ -339,12 +367,24 @@ class _kMCPDFT(_PDFT):
 
     def update_from_chk(self, chkfile=None, **kwargs):
         raise NotImplementedError("update_from_chk is not implemented for k-MC-PDFT")
-    
-def get_mcpdft_child_class(kmc, ot, **kwargs):
+
+
+class _kKCASPDFT(_kMCPDFT):
+    """k-MC-PDFT specialization for one total-momentum kCAS sector."""
+
+    momentum_resolved = True
+
+    make_one_casdm1s = kmcpdft_helper.make_one_casdm1s_kcas
+    make_one_casdm2 = kmcpdft_helper.make_one_casdm2_kcas
+    energy_mcwfn = energy_mcwfn_kcas
+    energy_dft = energy_dft_kcas
+
+
+def _get_mcpdft_child_class(kmc, ot, pdft_base, **kwargs):
     mc_doc = (kmc.__class__.__doc__ or 'No docstring for MC-SCF parent method')
 
-    class PDFT(_kMCPDFT, kmc.__class__):
-        __doc__ = mc_doc + '\n\n' + _kMCPDFT.__doc__
+    class PDFT(pdft_base, kmc.__class__):
+        __doc__ = mc_doc + '\n\n' + pdft_base.__doc__
         _mc_class = kmc.__class__
 
         # MC-PDFT object requires mol object in ot.reset functions
@@ -354,11 +394,11 @@ def get_mcpdft_child_class(kmc, ot, **kwargs):
                                  grids_level=None, grids_attr=None, dump_chk=False, **kwargs):
             # Some sanity checks:
             if ot is not None:
-                assert isinstance(ot, _kMCPDFT.__class__)
+                assert isinstance(ot, otfnalperiodic_kpts)
                 cell_kpts_info = [getattr(ot, 'kmesh', None), 
                                   getattr(ot, 'kpts', None), 
                                   getattr(ot, 'cell', None)]
-                assert None not in cell_kpts_info, \
+                assert all(value is not None for value in cell_kpts_info), \
                     "The kmesh and kpts attributes should be set in the otfnal object"
             assert dump_chk is False, "dump_chk is not supported for k-MC-PDFT"
             return _kMCPDFT.compute_pdft_energy_(self, mo_coeff=mo_coeff, ci=ci, ot=ot, otxc=otxc,
@@ -368,4 +408,15 @@ def get_mcpdft_child_class(kmc, ot, **kwargs):
     _keys = pdft._keys.copy()
     pdft.__dict__.update(kmc.__dict__)
     pdft._keys = pdft._keys.union(_keys)
+    pdft._keys.add("momentum_resolved")
     return pdft
+
+
+def get_mcpdft_child_class(kmc, ot, **kwargs):
+    """Wrap a conventional periodic CAS object with k-MC-PDFT methods."""
+    return _get_mcpdft_child_class(kmc, ot, _kMCPDFT, **kwargs)
+
+
+def get_kcas_mcpdft_child_class(kmc, ot, **kwargs):
+    """Wrap a momentum-resolved kCASCI object with k-MC-PDFT methods."""
+    return _get_mcpdft_child_class(kmc, ot, _kKCASPDFT, **kwargs)

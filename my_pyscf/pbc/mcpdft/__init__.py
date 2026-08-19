@@ -1,12 +1,16 @@
 #!/bin/bash
 import copy
+from numbers import Integral
 
 from pyscf import mcscf
 from pyscf.pbc import scf, dft
 
 from mrh.my_pyscf.pbc import mcscf as pbc_mcscf
 from mrh.my_pyscf.pbc.mcpdft.mcpdft import get_mcpdft_child_class as get_pbc_mcpdft_child_class_gamma
-from mrh.my_pyscf.pbc.mcpdft.kmcpdft import get_mcpdft_child_class
+from mrh.my_pyscf.pbc.mcpdft.kmcpdft import (
+    get_kcas_mcpdft_child_class,
+    get_mcpdft_child_class,
+)
 
 # Author: Bhavnesh Jangid
 # Implementing MC-PDFT at gamma point and k-MC-PDFT. For initialization, I am using different function,.
@@ -85,9 +89,64 @@ def kCASSCFPDFT(kmc_or_kmf, ot, ncas, nelecas, ncore=None, frozen=None, **kwargs
     return _MCPDFT(pbc_mcscf.CASSCF, kmc_or_kmf, ot, ncas, nelecas, ncore=ncore, frozen=frozen,
                 **kwargs)
 
-def kCASCIPDFT(kmc_or_kmf, ot, ncas, nelecas, ncore=None, frozen=None, **kwargs):
-    return _MCPDFT(pbc_mcscf.CASCI, kmc_or_kmf, ot, ncas, nelecas, ncore=ncore, frozen=frozen,
-                **kwargs)
+def kCASCIPDFT(kmc_or_kmf, ot, ncas, nelecas, ncore=None, frozen=None,
+               momentum_resolved=False, target_k=None, **kwargs):
+    """Construct conventional or total-momentum-resolved k-CASCI-PDFT.
+
+    Set ``momentum_resolved=True`` to use ``PBCKCASCI`` and select its total
+    momentum sector with ``target_k``.  The default retains the established
+    Wannier-basis periodic CASCI-PDFT implementation.
+    """
+    if not isinstance(momentum_resolved, bool):
+        raise ValueError("momentum_resolved must be True or False")
+
+    if not momentum_resolved:
+        if target_k is not None:
+            raise ValueError(
+                "target_k requires momentum_resolved=True",
+            )
+        return _MCPDFT(
+            pbc_mcscf.CASCI, kmc_or_kmf, ot, ncas, nelecas,
+            ncore=ncore, frozen=frozen, **kwargs,
+        )
+
+    if target_k is not None and not isinstance(target_k, Integral):
+        raise ValueError("target_k must be an integer or None")
+
+    if frozen is not None:
+        raise ValueError("Frozen orbitals are not supported in k-MC-PDFT")
+
+    from mrh.my_pyscf.pbc.mcscf.kcasci import PBCKCASCI
+
+    kmf = getattr(kmc_or_kmf, "_scf", None)
+    if kmf is None:
+        kmf = _sanity_check_for_kmf(kmc_or_kmf)
+        sector = 0 if target_k is None else target_k
+        kmc = pbc_mcscf.KCASCI(
+            kmf, ncas, nelecas, ncore=ncore, target_k=sector,
+        )
+    else:
+        if not isinstance(kmc_or_kmf, PBCKCASCI):
+            raise TypeError(
+                "momentum_resolved=True requires a mean-field object or "
+                "an existing PBCKCASCI object",
+            )
+        _sanity_check_for_kmf(kmf)
+        kmc = kmc_or_kmf
+        if getattr(kmc, "charge", 0):
+            raise NotImplementedError(
+                "momentum-resolved MC-PDFT currently supports neutral "
+                "PBCKCASCI objects only",
+            )
+        if target_k is not None:
+            requested_sector = target_k % kmc.nkpts
+            existing_sector = int(kmc.target_k) % kmc.nkpts
+            if requested_sector != existing_sector:
+                raise ValueError(
+                    "target_k conflicts with the existing PBCKCASCI CI sector",
+                )
+
+    return get_kcas_mcpdft_child_class(kmc, ot, **kwargs)
 
 KCASSCF = kCASSCFPDFT
 KCASCI = kCASCIPDFT
