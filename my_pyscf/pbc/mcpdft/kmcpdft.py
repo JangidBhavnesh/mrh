@@ -511,6 +511,32 @@ class _kChargedKCASPDFT(_kKCASPDFT):
             ])
         return self.e_tot, self.e_ot, self.charged_pdft_results
 
+    def band_energies(self, reference_energy, root=0, kpts=None,
+                      per_cell=False, reference_target_k=None):
+        """Return quasiparticle energies from charged MC-PDFT results."""
+        from mrh.my_pyscf.pbc.mcscf import kcasci
+
+        if not self.charged_pdft_results:
+            raise ValueError("No charged KCASCI-PDFT results are available")
+        if kpts is None:
+            kpts = getattr(self._scf, "kpts", None)
+        return kcasci.compute_band_energies(
+            self.charged_pdft_results,
+            reference_energy,
+            charge=self.charge,
+            root=root,
+            kpts=kpts,
+            nkpts=self.nkpts,
+            per_cell=per_cell,
+            reference_target_k=reference_target_k,
+            kmom=kcasci._get_kmom_for_kcasci(self),
+            cell=self.cell,
+            kconserv=getattr(self, "kconserv", None),
+        )
+
+    get_band_energy = band_energies
+    band_energy = band_energies
+
 
 def _get_mcpdft_child_class(kmc, ot, pdft_base, **kwargs):
     mc_doc = (kmc.__class__.__doc__ or 'No docstring for MC-SCF parent method')

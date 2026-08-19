@@ -1358,6 +1358,51 @@ class KCASPDFTRoutingTests(unittest.TestCase):
             ],
         )
 
+    def test_charged_pdft_band_energies_use_pdft_results(self):
+        from mrh.my_pyscf.pbc.mcscf import kcasci
+
+        pdft_results = [
+            {
+                "target_k": 0, "charge": 1, "nkpts": 2,
+                "e_tot": -1.25,
+            },
+        ]
+        mc = SimpleNamespace(
+            charged_pdft_results=pdft_results,
+            charged_results=[{"target_k": 0, "e_tot": -9.0}],
+            charge=1,
+            nkpts=2,
+            _scf=SimpleNamespace(kpts="kpts"),
+            cell="cell",
+            kconserv="kconserv",
+        )
+        sentinel = object()
+        with mock.patch.object(
+                kcasci, "_get_kmom_for_kcasci",
+                return_value="kmom"), \
+             mock.patch.object(
+                kcasci, "compute_band_energies",
+                return_value=sentinel) as compute:
+            result = kmcpdft._kChargedKCASPDFT.band_energies(
+                mc, -1.5, root=1, per_cell=True,
+                reference_target_k=1,
+            )
+
+        self.assertIs(result, sentinel)
+        compute.assert_called_once_with(
+            pdft_results,
+            -1.5,
+            charge=1,
+            root=1,
+            kpts="kpts",
+            nkpts=2,
+            per_cell=True,
+            reference_target_k=1,
+            kmom="kmom",
+            cell="cell",
+            kconserv="kconserv",
+        )
+
     def test_energy_dft_kcas_delegates_to_direct_ot_method(self):
         ot = SimpleNamespace(energy_ot_kcas=mock.Mock(return_value=0.75))
         mc = SimpleNamespace(
