@@ -19,6 +19,7 @@ from mrh.my_pyscf.pbc.mcscf.k2R import get_mo_coeff_k2R_wokmf
 from mrh.my_pyscf.pbc.mcscf.mc1step import _get_casdm2_kpts as _basis_transform_casdm2_kpts
 from mrh.my_pyscf.pbc.mcpdft.kotpd import get_ontop_pair_density_kpts
 from mrh.my_pyscf.pbc.mcpdft._dms import dm2_cumulant_complex
+from mrh.my_pyscf.pbc.mcpdft import kmcpdft_helper
 
 # Author: Bhavnesh Jangid
 
@@ -122,6 +123,103 @@ class otfnalperiodic_gamma(otfnal):
         # A hack to reset the grids for the new cell object.
         self.grids.reset (mol) 
 
+def _energy_ot_from_kpts(ot, casdm1s_kpts, cascm2_kpts, mo_coeff,
+                         ncore, kconserv, max_memory=param.MAX_MEMORY,
+                         hermi=1):
+    """Evaluate an on-top functional from prepared k-space active RDMs."""
+    if ot.xctype == 'HF':
+        return 0.0
+
+    mo_coeff = np.asarray(mo_coeff)
+    casdm1s_kpts = np.asarray(casdm1s_kpts)
+    cascm2_kpts = np.asarray(cascm2_kpts)
+    kconserv = np.asarray(kconserv)
+    if mo_coeff.ndim != 3:
+        raise ValueError(
+            "mo_coeff must have shape (nkpts, nao, nmo)",
+        )
+
+    nkpts, nao = mo_coeff.shape[:2]
+    if casdm1s_kpts.ndim != 4 or casdm1s_kpts.shape[:2] != (2, nkpts):
+        raise ValueError(
+            "casdm1s_kpts must have shape (2, nkpts, ncas, ncas)",
+        )
+    ncas = casdm1s_kpts.shape[2]
+    expected_dm1_shape = (2, nkpts, ncas, ncas)
+    if casdm1s_kpts.shape != expected_dm1_shape:
+        raise ValueError(
+            f"Expected casdm1s_kpts shape {expected_dm1_shape}, "
+            f"got {casdm1s_kpts.shape}",
+        )
+    expected_cm2_shape = (
+        nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas,
+    )
+    if cascm2_kpts.shape != expected_cm2_shape:
+        raise ValueError(
+            f"Expected cascm2_kpts shape {expected_cm2_shape}, "
+            f"got {cascm2_kpts.shape}",
+        )
+    if kconserv.shape != (nkpts, nkpts, nkpts):
+        raise ValueError(
+            "kconserv must have shape (nkpts, nkpts, nkpts)",
+        )
+    if ncore < 0 or ncore + ncas > mo_coeff.shape[2]:
+        raise ValueError("ncore and ncas are incompatible with mo_coeff")
+
+    dm1s_kpts = []
+    for k in range(nkpts):
+        dm1s = _dms.casdm1s_to_dm1s(
+            ot, casdm1s_kpts[:, k], mo_coeff=mo_coeff[k],
+            ncore=ncore, ncas=ncas,
+        )
+        dm1s_kpts.append(np.asarray(dm1s))
+    dm1s_kpts = np.stack(dm1s_kpts, axis=1)
+
+    ni = ot._numint
+    make_rho_alpha, nset_a, nao_a = ni._gen_rho_evaluator(
+        ot.cell, dm1s_kpts[0], hermi, False,
+    )
+    make_rho_beta, nset_b, nao_b = ni._gen_rho_evaluator(
+        ot.cell, dm1s_kpts[1], hermi, False,
+    )
+    if nset_a != 1 or nset_b != 1:
+        raise NotImplementedError("k-MC-PDFT requires one density set")
+    if nao_a != nao or nao_b != nao:
+        raise ValueError("Density evaluator and MO AO dimensions differ")
+
+    mo_cas = np.ascontiguousarray(
+        mo_coeff[:, :, ncore:ncore + ncas],
+    )
+    make_rho = (make_rho_alpha, make_rho_beta)
+    kpts = np.asarray(ot.kpts).reshape(-1, 3)
+    if kpts.shape[0] != nkpts:
+        raise ValueError("ot.kpts and mo_coeff contain different k-point counts")
+
+    energy_ot = 0.0
+    t0 = (logger.process_clock(), logger.perf_counter())
+    for ao_k1, ao_k2, mask, weight, _ in ni.block_loop(
+            ot.cell, ot.grids, nao, deriv=ot.dens_deriv, kpts=kpts,
+            max_memory=max_memory):
+        rho = np.asarray([
+            make_rho_spin(0, ao_k1, mask, ot.xctype).real
+            for make_rho_spin in make_rho
+        ])
+        t0 = logger.timer(ot, 'untransformed density', *t0)
+        Pi = get_ontop_pair_density_kpts(
+            ot, rho, ao_k2, cascm2_kpts, mo_cas, kconserv,
+            deriv=ot.Pi_deriv, non0tab=mask,
+        )
+        t0 = logger.timer(ot, 'on-top pair density calculation', *t0)
+        if rho.ndim == 2:
+            rho = np.expand_dims(rho, 1)
+            Pi = np.expand_dims(Pi, 0)
+        energy_ot += ot.eval_ot(
+            rho, Pi, dderiv=0, weights=weight,
+        )[0].dot(weight)
+        t0 = logger.timer(ot, 'on-top energy calculation', *t0)
+    return energy_ot
+
+
 class otfnalperiodic_kpts(otfnal):
     '''
     Child class to define the otfnal class for periodic systems with k-points.
@@ -133,18 +231,13 @@ class otfnalperiodic_kpts(otfnal):
         them to the block mo-orbital basis for k-points calculations.
         '''
 
-        E_ot = 0.0
-        ni = ot._numint
-        xctype =  ot.xctype
+        xctype = ot.xctype
         dtype = mo_coeff.dtype
-        if xctype=='HF': 
-            return E_ot
+        if xctype == 'HF':
+            return 0.0
         
         assert mo_coeff.ndim == 3, "The mo_coeff should be 3D array for k-points calculations"
         
-        dens_deriv = ot.dens_deriv
-        Pi_deriv = ot.Pi_deriv
-        nao = mo_coeff[0].shape[0]
         ncastot = casdm2.shape[0]
         nkpts = mo_coeff.shape[0]
         ncas = ncastot // nkpts
@@ -171,52 +264,54 @@ class otfnalperiodic_kpts(otfnal):
             dm2_k = _basis_transform_casdm2_kpts(cascm2, mo_phase, (k1, k2, k3, k4))
             cascm2_kpts[k1, k2, k3] = dm2_k
         
-        # First, transform the casdm1s to dm1s for each k-point.
-        dm1s_kpts = []
+        # Transform the Wannier-basis active 1-RDM to each k-point.
+        casdm1s_kpts = []
         for k in range(nkpts):
             casdm1s_k = [reduce(np.dot, (mo_phase[k], casdm1s_, mo_phase[k].conj().T)) 
                         for casdm1s_ in casdm1s]
-            dm1s = _dms.casdm1s_to_dm1s (ot, casdm1s_k, mo_coeff=mo_coeff[k], ncore=ncore, 
-                                         ncas=ncas)
-            dm1s_kpts.append(dm1s)
-        
-        # Making sure the tagging the dm1s doesn't create the weird problems
-        # for pbc.
-        dm1s_kpts = np.stack([np.asarray(dm1s) for dm1s in dm1s_kpts], axis=1,)
+            casdm1s_kpts.append(casdm1s_k)
+        casdm1s_kpts = np.asarray(casdm1s_kpts).transpose(1, 0, 2, 3)
 
-        mo_cas = np.array([mo_coeff[k][:,ncore:][:,:ncas] 
-                           for k in range(nkpts)])
-        
-        t0 = (logger.process_clock (), logger.perf_counter ())
-        
-        make_rho_alpha, nset, nao = ni._gen_rho_evaluator (ot.cell, dm1s_kpts[0], hermi, False)
-        make_rho_beta, nset, nao = ni._gen_rho_evaluator (ot.cell, dm1s_kpts[1], hermi, False)
-        
-        assert nset == 1, "Not implemented for nset > 1"
+        return _energy_ot_from_kpts(
+            ot, casdm1s_kpts, cascm2_kpts, mo_coeff, ncore, kconserv,
+            max_memory=max_memory, hermi=hermi,
+        )
 
-        make_rho = (make_rho_alpha, make_rho_beta)
+    def energy_ot_kcas(ot, casdm1s, casdm2, mo_coeff, ncore,
+                       max_memory=param.MAX_MEMORY, hermi=1,
+                       momentum_tol=1e-8):
+        """Evaluate the on-top energy directly from Bloch-basis kCAS RDMs."""
+        if ot.xctype == 'HF':
+            return 0.0
 
-        kpts = kpts.reshape(-1,3)
+        mo_coeff = np.asarray(mo_coeff)
+        if mo_coeff.ndim != 3:
+            raise ValueError(
+                "mo_coeff must have shape (nkpts, nao, nmo)",
+            )
+        nkpts = mo_coeff.shape[0]
+        casdm2 = np.asarray(casdm2)
+        if casdm2.ndim != 4 or len(set(casdm2.shape)) != 1:
+            raise ValueError(
+                "casdm2 must have shape (ncas * nkpts,) * 4",
+            )
+        ncastot = casdm2.shape[0]
+        if ncastot % nkpts:
+            raise ValueError("The active RDM size must be divisible by nkpts")
+        ncas = ncastot // nkpts
 
-        for ao_k1, ao_k2, mask, weight, _ \
-            in ni.block_loop(ot.cell, ot.grids, nao, deriv=dens_deriv, kpts=kpts, 
-                             max_memory=max_memory):
-            '''
-            ao_k1 and ao_k2 are of the shape: (nkpts, *, ngrids, nao)
-            '''
-            rho = np.asarray ([m (0, ao_k1, mask, xctype).real for m in make_rho])
-            
-            t0 = logger.timer (ot, 'untransformed density', *t0)
-            Pi = get_ontop_pair_density_kpts (ot, rho, ao_k2, cascm2_kpts, mo_cas,
-                                              kconserv, deriv=Pi_deriv, non0tab=mask)
-            t0 = logger.timer (ot, 'on-top pair density calculation', *t0)
-            if rho.ndim == 2:
-                rho = np.expand_dims (rho, 1)
-                Pi = np.expand_dims (Pi, 0)
-            E_ot += ot.eval_ot (rho, Pi, dderiv=0, weights=weight)[0].dot (weight)
-            t0 = logger.timer (ot, 'on-top energy calculation', *t0)
-
-        return E_ot
+        kconserv = getattr(ot, 'kconserv', None)
+        if kconserv is None:
+            kconserv = kpts_helper.get_kconserv(ot.cell, ot.kpts)
+        casdm1s_kpts, cascm2_kpts = \
+            kmcpdft_helper.make_kcas_rdms_kpts(
+                casdm1s, casdm2, nkpts, ncas, kconserv,
+                momentum_tol=momentum_tol,
+            )
+        return _energy_ot_from_kpts(
+            ot, casdm1s_kpts, cascm2_kpts, mo_coeff, ncore, kconserv,
+            max_memory=max_memory, hermi=hermi,
+        )
     
     energy_ot.__doc__ = otfnal.energy_ot.__doc__
 

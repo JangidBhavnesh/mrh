@@ -2,12 +2,15 @@
 
 import unittest
 from types import SimpleNamespace
+from unittest import mock
 
 import numpy as np
+from pyscf.lib import logger
 
 from mrh.my_pyscf.pbc.fci import direct_spin1_kfci
 from mrh.my_pyscf.pbc.mcpdft import kmcpdft_helper
 from mrh.my_pyscf.pbc.mcpdft._dms import dm2_cumulant_complex
+from mrh.my_pyscf.pbc.mcpdft import otfnalperiodic
 
 
 class RecordingSolver:
@@ -262,6 +265,160 @@ class KCASPDFTKBlockTests(unittest.TestCase):
                 )
                 self.assertAlmostEqual(np.trace(casdm1s[0]).real, 1.0)
                 self.assertAlmostEqual(np.trace(casdm1s[1]).real, 1.0)
+
+
+class KCASPDFTOnTopEnergyTests(unittest.TestCase):
+
+    def test_energy_ot_kcas_uses_direct_kspace_preparation(self):
+        nkpts, ncas = 2, 1
+        ncastot = nkpts * ncas
+        kconserv = make_kconserv(nkpts)
+        casdm1s = np.zeros((2, ncastot, ncastot))
+        casdm2 = np.zeros((ncastot,) * 4)
+        mo_coeff = np.ones((nkpts, 1, 1), dtype=complex)
+        prepared_dm1s = np.ones((2, nkpts, ncas, ncas))
+        prepared_cm2 = np.ones(
+            (nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas),
+        )
+        ot = SimpleNamespace(
+            xctype="LDA",
+            kconserv=kconserv,
+            cell=object(),
+            kpts=np.zeros((nkpts, 3)),
+        )
+
+        with mock.patch.object(
+                kmcpdft_helper, "make_kcas_rdms_kpts",
+                return_value=(prepared_dm1s, prepared_cm2)) as prepare, \
+             mock.patch.object(
+                otfnalperiodic, "_energy_ot_from_kpts",
+                return_value=1.25) as evaluate, \
+             mock.patch.object(
+                otfnalperiodic, "get_mo_coeff_k2R_wokmf",
+                side_effect=AssertionError("unexpected Wannier transform")):
+            energy = otfnalperiodic.otfnalperiodic_kpts.energy_ot_kcas(
+                ot, casdm1s, casdm2, mo_coeff, ncore=0,
+            )
+
+        self.assertEqual(energy, 1.25)
+        prepare.assert_called_once_with(
+            casdm1s, casdm2, nkpts, ncas, kconserv,
+            momentum_tol=1e-8,
+        )
+        evaluate.assert_called_once_with(
+            ot, prepared_dm1s, prepared_cm2, mo_coeff, 0, kconserv,
+            max_memory=4000, hermi=1,
+        )
+
+    def test_existing_wannier_path_uses_shared_kspace_backend(self):
+        nkpts, ncas = 2, 1
+        ncastot = nkpts * ncas
+        casdm1s = np.asarray([
+            np.diag([0.8, 0.2]),
+            np.diag([0.3, 0.7]),
+        ])
+        casdm2 = np.zeros((ncastot,) * 4)
+        mo_coeff = np.ones((nkpts, 1, 1), dtype=complex)
+        mo_phase = np.zeros((nkpts, ncas, ncastot), dtype=complex)
+        mo_phase[0, 0, 0] = 1.0
+        mo_phase[1, 0, 1] = 1.0
+        kconserv = make_kconserv(nkpts)
+        ot = SimpleNamespace(
+            xctype="LDA",
+            cell=object(),
+            kpts=np.zeros((nkpts, 3)),
+            kmesh=(nkpts, 1, 1),
+        )
+
+        def transform_cm2(cascm2, phase, ks):
+            self.assertIs(phase, mo_phase)
+            return np.full((ncas,) * 4, sum(ks), dtype=complex)
+
+        with mock.patch.object(
+                otfnalperiodic, "get_mo_coeff_k2R_wokmf",
+                return_value=(None, None, mo_phase)), \
+             mock.patch.object(
+                otfnalperiodic.kpts_helper, "get_kconserv",
+                return_value=kconserv), \
+             mock.patch.object(
+                otfnalperiodic, "_basis_transform_casdm2_kpts",
+                side_effect=transform_cm2), \
+             mock.patch.object(
+                otfnalperiodic, "_energy_ot_from_kpts",
+                return_value=2.5) as evaluate:
+            energy = otfnalperiodic.otfnalperiodic_kpts.energy_ot(
+                ot, casdm1s, casdm2, mo_coeff, ncore=0,
+            )
+
+        self.assertEqual(energy, 2.5)
+        prepared_dm1s = evaluate.call_args.args[1]
+        np.testing.assert_allclose(
+            prepared_dm1s[:, :, 0, 0], [[0.8, 0.2], [0.3, 0.7]],
+        )
+        np.testing.assert_array_equal(evaluate.call_args.args[5], kconserv)
+
+    def test_shared_kspace_backend_runs_grid_evaluation(self):
+        nkpts, nao, ncas = 2, 2, 1
+        kconserv = make_kconserv(nkpts)
+        casdm1s_kpts = np.zeros((2, nkpts, ncas, ncas))
+        casdm1s_kpts[0, :, 0, 0] = [0.8, 0.6]
+        casdm1s_kpts[1, :, 0, 0] = [0.2, 0.4]
+        cascm2_kpts = np.zeros(
+            (nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas),
+        )
+        mo_coeff = np.tile(np.eye(nao, dtype=complex), (nkpts, 1, 1))
+        weight = np.asarray([0.25, 0.75])
+        seen_dms = []
+        seen_eval = {}
+
+        class FakeNumInt:
+            def _gen_rho_evaluator(self, cell, dm, hermi, with_lapl):
+                seen_dms.append(np.asarray(dm))
+
+                def make_rho(idm, ao, mask, xctype):
+                    return np.asarray([0.5, 0.75])
+
+                return make_rho, 1, nao
+
+            def block_loop(self, cell, grids, nao_arg, **kwargs):
+                self_nao = nao_arg
+                if self_nao != nao:
+                    raise AssertionError((self_nao, nao))
+                ao = np.ones((nkpts, 1, weight.size, nao), dtype=complex)
+                yield ao, ao, None, weight, None
+
+        def eval_ot(rho, Pi, **kwargs):
+            seen_eval["rho"] = rho
+            seen_eval["Pi"] = Pi
+            return (np.asarray([2.0, 4.0]),)
+
+        ot = SimpleNamespace(
+            xctype="LDA",
+            dens_deriv=0,
+            Pi_deriv=0,
+            _numint=FakeNumInt(),
+            cell=object(),
+            grids=object(),
+            kpts=np.zeros((nkpts, 3)),
+            eval_ot=eval_ot,
+            verbose=logger.QUIET,
+        )
+
+        with mock.patch.object(
+                otfnalperiodic, "get_ontop_pair_density_kpts",
+                return_value=np.asarray([0.1, 0.2])) as get_pi:
+            energy = otfnalperiodic._energy_ot_from_kpts(
+                ot, casdm1s_kpts, cascm2_kpts, mo_coeff,
+                ncore=1, kconserv=kconserv,
+            )
+
+        self.assertAlmostEqual(energy, 3.5)
+        self.assertEqual(len(seen_dms), 2)
+        self.assertEqual(seen_dms[0].shape, (nkpts, nao, nao))
+        self.assertEqual(seen_dms[1].shape, (nkpts, nao, nao))
+        self.assertEqual(seen_eval["rho"].shape, (2, 1, weight.size))
+        self.assertEqual(seen_eval["Pi"].shape, (1, weight.size))
+        self.assertIs(get_pi.call_args.args[3], cascm2_kpts)
 
 
 if __name__ == "__main__":
