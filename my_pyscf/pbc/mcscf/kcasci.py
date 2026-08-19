@@ -370,6 +370,127 @@ def kernel_chrkcasci(mc, mo_coeff=None, ci0=None, verbose=logger.NOTE,
     )
 
 
+def _select_root_energy(energy, root=0):
+    """Select one root from a scalar or multiroot energy result."""
+    if not isinstance(root, (int, np.integer)):
+        raise ValueError("root must be an integer")
+    root = int(root)
+    if root < 0:
+        raise IndexError("root must be nonnegative")
+
+    energy = np.asarray(energy)
+    if energy.ndim == 0:
+        if root != 0:
+            raise IndexError("root index requested for a scalar energy")
+        return energy.item()
+    if root >= energy.shape[0]:
+        raise IndexError(
+            f"root {root} is unavailable for {energy.shape[0]} energies",
+        )
+    return energy[root].item()
+
+
+def compute_band_energies(charged_results, reference_energy, charge=None,
+                          root=0, kpts=None, nkpts=None, per_cell=False,
+                          reference_target_k=None, kmom=None, cell=None,
+                          kconserv=None):
+    """Convert charged KCASCI total energies to quasiparticle energies.
+
+    For a neutral reference in total-momentum sector ``K0``, the physical
+    momentum labels are
+
+    ``k_hole = K0 - K(N-1)`` and ``k_particle = K(N+1) - K0``.
+
+    Positive charge denotes electron removal and returns ``E(N)-E(N-1)``.
+    Negative charge denotes electron addition and returns ``E(N+1)-E(N)``.
+    KCASCI energies are stored per cell, so the default result is multiplied
+    by ``nkpts`` to recover the charged-supercell energy difference.  Set
+    ``per_cell=True`` to leave the difference in the per-cell convention.
+    """
+    if hasattr(charged_results, "charged_results"):
+        mc = charged_results
+        if charge is None:
+            charge = mc.charge
+        if nkpts is None:
+            nkpts = mc.nkpts
+        if kpts is None:
+            kpts = kcistrings._safe_getattr(mc._scf, "kpts", None)
+        if cell is None:
+            cell = mc.cell
+        if kconserv is None:
+            kconserv = kcistrings._safe_getattr(mc, "kconserv", None)
+        if kmom is None:
+            kmom = _get_kmom_for_kcasci(mc)
+        charged_results = mc.charged_results
+
+    charged_results = list(charged_results)
+    if not charged_results:
+        return []
+    if charge is None:
+        charge = charged_results[0].get("charge")
+    if not isinstance(charge, (int, np.integer)):
+        raise ValueError("charge must be an integer")
+    charge = int(charge)
+    if charge not in (-1, 1):
+        raise ValueError("charged band energies require charge +1 or -1")
+
+    kind = "hole" if charge > 0 else "particle"
+    momentum_key = f"{kind}_momentum"
+    bands = []
+    for result in charged_results:
+        result_charge = result.get("charge", charge)
+        if int(result_charge) != charge:
+            raise ValueError("charged results contain inconsistent charges")
+
+        target_k = int(result["target_k"])
+        result_nkpts = result.get("nkpts", nkpts)
+        if result_nkpts is None:
+            raise ValueError(
+                "nkpts is required when charged results do not store it",
+            )
+        result_nkpts = int(result_nkpts)
+        scale = 1 if per_cell else result_nkpts
+
+        result_kmom = kmom
+        if result_kmom is None or result_kmom.nkpts != result_nkpts:
+            result_kmom = kcistrings.make_kpoint_momentum(
+                result_nkpts, cell=cell, kpts=kpts,
+                kconserv=kconserv,
+            )
+        if reference_target_k is None:
+            reference_k = int(result_kmom.zero)
+        else:
+            if not isinstance(reference_target_k, (int, np.integer)):
+                raise ValueError("reference_target_k must be an integer")
+            reference_k = int(reference_target_k) % result_nkpts
+
+        if kind == "hole":
+            band_k = int(result_kmom.ksub[reference_k, target_k])
+        else:
+            band_k = int(result_kmom.ksub[target_k, reference_k])
+
+        momentum = band_k
+        if kpts is not None:
+            momentum = np.asarray(kpts[band_k]).copy()
+        e_charged = _select_root_energy(result["e_tot"], root=root)
+        e_reference = _select_root_energy(reference_energy, root=0)
+        if kind == "hole":
+            energy = scale * (e_reference - e_charged)
+        else:
+            energy = scale * (e_charged - e_reference)
+
+        bands.append({
+            "target_k": target_k,
+            "momentum_index": band_k,
+            momentum_key: momentum,
+            "energy": energy,
+            "root": int(root),
+            "charge": charge,
+            "kind": kind,
+        })
+    return bands
+
+
 def make_casdm1(mc, ci=None, stav_dm1=False, weights=None, target_k=None):
     """Build the k-basis active-space one-particle density matrix.
 
