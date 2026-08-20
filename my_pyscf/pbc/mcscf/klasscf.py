@@ -1123,6 +1123,51 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
         self.eris = eris
         self.eri_paaa = eris.paaa
 
+    def _init_orb_(self, mo_phase=None):
+        """Build the reference generalized Fock matrix in block-MO form."""
+        if mo_phase is None:
+            mo_act_kpts = self.mo_coeff[:, :, self.ncore:self.nocc]
+            mo_phase = get_wannier_orbs(
+                self.las._scf, self.kmesh, mo_act_kpts,
+            )[-1]
+        self.mo_phase = np.asarray(mo_phase)
+        _check_shape(
+            self.mo_phase, (self.nkpts, self.ncas, self.ncastot),
+            label="mo_phase",
+        )
+
+        dtype = np.result_type(
+            self.h1s.dtype, self.dm1s.dtype, self.cascm2.dtype,
+        )
+        self.fock1 = np.empty(
+            (self.nkpts, self.nmo, self.nmo), dtype=dtype,
+        )
+        for k in range(self.nkpts):
+            self.fock1[k] = sum(
+                self.h1s[s, k] @ self.dm1s[s, k]
+                for s in range(2)
+            )
+
+        kconserv = kpts_helper.get_kconserv(
+            self.las._scf.cell, self.kpts,
+        )
+        active = slice(self.ncore, self.nocc)
+        for k1, k2, k3 in kpts_helper.loop_kkk(self.nkpts):
+            k4 = kconserv[k1, k2, k3]
+            cascm2_kpts = _get_casdm2_kpts(
+                self.cascm2, self.mo_phase, (k1, k2, k3, k4),
+            )
+            paaa_kpts = self.eri_paaa(k1, k2, k3)
+            _check_shape(
+                paaa_kpts,
+                (self.nmo, self.ncas, self.ncas, self.ncas),
+                label="paaa_kpts",
+            )
+            self.fock1[k1][:, active] += np.tensordot(
+                paaa_kpts, cascm2_kpts,
+                axes=((1, 2, 3), (1, 2, 3)),
+            )
+
     @property
     def shape(self):
         """tuple: Shape of the combined orbital/CI Hessian operator."""
