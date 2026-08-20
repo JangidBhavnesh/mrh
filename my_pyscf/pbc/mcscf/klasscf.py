@@ -1672,6 +1672,37 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
 
         return h1frs
 
+    def ci_response_diag(self, ci1):
+        """Apply the same-cell blocks of the CI Hessian.
+
+        This is the complex generalization of the molecular CI-diagonal
+        response. Both the input and output are projected relative to the
+        current CI vector using the Hermitian inner product.
+        """
+        ci2 = self.Hci_all(
+            [[-energy for energy in energy_r] for energy_r in self.e0],
+            self.h1frs,
+            self.eri_cas,
+            ci1,
+        )
+
+        response = []
+        for ci2_r, ci1_r, ci0_r, residual_r in zip(
+                ci2, ci1, self.ci, self.hci0):
+            response_r = []
+            for hc1, c1, c0, residual in zip(
+                    ci2_r, ci1_r, ci0_r, residual_r):
+                output_overlap = np.vdot(residual, c1)
+                input_overlap = np.vdot(c0, c1)
+                response_r.append(2.0 * (
+                    hc1
+                    - output_overlap * c0
+                    - input_overlap * residual
+                ))
+            response.append(response_r)
+
+        return response
+
     @property
     def shape(self):
         """tuple: Shape of the combined orbital/CI Hessian operator."""
