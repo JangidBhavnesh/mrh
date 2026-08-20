@@ -4,6 +4,11 @@ import numpy as np
 
 from mrh.my_pyscf.pbc.mcscf.klasscf import (
     KLASSCF_UnitaryGroupGenerators,
+    get_ugg,
+)
+from mrh.my_pyscf.pbc.mcscf.klasci import (
+    PBCLASCINoSymm,
+    PBCLASCITransSymm,
 )
 
 
@@ -79,6 +84,37 @@ class _FakeKLASActive(_FakeKLAS):
 
 
 class KnownValues(unittest.TestCase):
+
+    def test_get_ugg_is_registered(self):
+        for cls in (PBCLASCINoSymm, PBCLASCITransSymm):
+            self.assertIs(cls._ugg, KLASSCF_UnitaryGroupGenerators)
+            self.assertIs(cls.get_ugg, get_ugg)
+
+    def test_get_ugg_forwards_constructor_arguments(self):
+        sentinel = object()
+        calls = []
+
+        class _FactoryOwner:
+            @staticmethod
+            def _ugg(klas, **kwargs):
+                calls.append((klas, kwargs))
+                return sentinel
+
+        klas = _FactoryOwner()
+        mo_coeff = object()
+        ci = object()
+        mo_phase = object()
+
+        result = get_ugg(
+            klas, mo_coeff=mo_coeff, ci=ci, mo_phase=mo_phase,
+        )
+
+        self.assertIs(result, sentinel)
+        self.assertEqual(len(calls), 1)
+        self.assertIs(calls[0][0], klas)
+        self.assertIs(calls[0][1]["mo_coeff"], mo_coeff)
+        self.assertIs(calls[0][1]["ci"], ci)
+        self.assertIs(calls[0][1]["mo_phase"], mo_phase)
 
     def test_complex_orbital_and_ci_pack_unpack(self):
         ugg = KLASSCF_UnitaryGroupGenerators(_FakeKLAS())
