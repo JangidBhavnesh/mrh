@@ -1766,6 +1766,48 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
 
         return hci_diag
 
+    def _get_Horb_diag_matvec(self):
+        """Return the reference orbital diagonal from Hessian matvecs.
+
+        The periodic orbital-orbital response is complex and uses disk-backed
+        ERIs. Reconstructing its diagonal from unit orbital directions gives
+        an exact reference for the analytic preconditioner, including the
+        ``kappa2/2`` packing convention. The result is cached because the
+        Hessian intermediates are immutable for the operator's lifetime.
+        """
+        cached = getattr(self, "_Horb_diag_matvec_cache", None)
+        if cached is not None:
+            return np.array(cached, copy=True)
+
+        nvar_orb = self.ugg.nvar_orb
+        if nvar_orb == 0:
+            diagonal = np.empty(0, dtype=np.complex128)
+        else:
+            diagonal = np.empty(nvar_orb, dtype=np.complex128)
+            unit = np.zeros(nvar_orb, dtype=np.complex128)
+            for index in range(nvar_orb):
+                unit[index] = 1.0
+                kappa = self.ugg.unpack_orb(unit)
+                response = np.asarray(
+                    self._orbital_hessian_response(kappa)
+                )
+                _check_shape(
+                    response, np.shape(kappa),
+                    label=f"orbital_hessian_response[{index}]",
+                )
+                packed_response = np.asarray(
+                    self.ugg.pack_orb(response / 2.0)
+                ).reshape(-1)
+                _check_shape(
+                    packed_response, (nvar_orb,),
+                    label=f"packed_orbital_hessian_response[{index}]",
+                )
+                diagonal[index] = packed_response[index]
+                unit[index] = 0.0
+
+        self._Horb_diag_matvec_cache = np.array(diagonal, copy=True)
+        return diagonal
+
     @property
     def shape(self):
         """tuple: Shape of the combined orbital/CI Hessian operator."""
