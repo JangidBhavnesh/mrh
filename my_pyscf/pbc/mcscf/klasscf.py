@@ -16,6 +16,9 @@ from mrh.my_pyscf.pbc.mcscf.klasci import (
     _convert_h1e_mo_k_to_wann,
 )
 from mrh.my_pyscf.pbc.mcscf.mc1step import _get_casdm2_kpts
+from mrh.my_pyscf.pbc.mcscf.productstate import (
+    ImpureProductStateFCISolver,
+)
 from mrh.my_pyscf.pbc.util.wannier import get_wannier_orbs
 
 # Author: Bhavnesh Jangid
@@ -3633,6 +3636,21 @@ def get_hop(klas, mo_coeff=None, ci=None, ugg=None, **kwargs):
     return hop(klas, ugg, mo_coeff=mo_coeff, ci=ci, **kwargs)
 
 
+def _optimizer_metric(klas, ugg):
+    """Return the metric for the supported single-state optimizer."""
+    weights = np.asarray(klas.weights, dtype=float).reshape(-1)
+    if weights.size != int(klas.nroots):
+        raise ValueError(
+            f"weights has size {weights.size}; expected {klas.nroots}"
+        )
+    if weights.size != 1 or not np.allclose(weights, 1.0):
+        raise NotImplementedError(
+            "state-averaged k-LASSCF needs the CI weights in the real "
+            "optimizer metric"
+        )
+    return np.ones(ugg.nvar_tot, dtype=float)
+
+
 def _ci_guess_is_missing(ci):
     """Return whether a nested fragment/root CI guess is incomplete."""
     if ci is None:
@@ -3699,6 +3717,45 @@ def ci_cycle(
         ci1.append(c1)
         offset = stop
     return e_sub, ci1
+
+
+def _fixed_ci_energies(klas, mo_coeff, ci, h2eff):
+    """Evaluate root energies without optimizing the product-state CI."""
+    h1eff, energy_core = klas.h1e_for_cas(
+        mo_coeff=mo_coeff, ncas=klas.ncas, ncore=klas.ncore,
+    )
+    dtype = np.result_type(h1eff, h2eff, energy_core)
+    e_cas = np.empty(klas.nroots, dtype=dtype)
+    e_states = np.empty(klas.nroots, dtype=dtype)
+    for iroot in range(klas.nroots):
+        fcisolvers = [box.fcisolvers[iroot] for box in klas.fciboxes]
+        solver = ImpureProductStateFCISolver(
+            fcisolvers,
+            lweights=[[1.0] for _ in fcisolvers],
+            stdout=klas.stdout,
+            verbose=lib.logger.QUIET,
+        )
+        energy_active = solver.energy_elec(
+            h1eff, h2eff, [roots[iroot] for roots in ci],
+            klas.ncas_sub, klas.nelecas_sub, ecore=0,
+        )
+        e_cas[iroot] = energy_active / klas.nkpts
+        e_states[iroot] = (energy_active + energy_core) / klas.nkpts
+    e_tot = np.dot(klas.weights, e_states)
+    e_lexc = [
+        [np.zeros(1, dtype=dtype) for _ in range(klas.nroots)]
+        for _ in range(klas.nfrags)
+    ]
+    return e_tot, e_states, e_cas, e_lexc
+
+
+def _get_mo_energy(hop):
+    """Return diagonal state-averaged Fock values for each k-point."""
+    h1s = getattr(hop, "h1s", None)
+    if h1s is None:
+        return None
+    fock = np.asarray(h1s).sum(axis=0) / 2.0
+    return np.diagonal(fock, axis1=-2, axis2=-1).real.copy()
 
 # Install the gradient and Hessian interfaces on the periodic LAS variants.
 # Each variant selects the Hessian operator matching its CI layout.
