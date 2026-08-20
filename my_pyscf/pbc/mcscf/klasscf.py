@@ -1195,6 +1195,30 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
                 axes=((1, 2, 3), (1, 2, 3)),
             )
 
+    def _init_ci_(self):
+        """Cache local Hamiltonian actions, energies, and CI residuals."""
+        self.linkstrl = []
+        self.linkstr = []
+        for fcibox, norb, nelec in zip(
+                self.fciboxes, self.ncas_sub, self.nelecas_sub):
+            # Complex periodic contractions use ordinary link tables without
+            # molecular lower-triangular index packing.
+            linkstr = fcibox.states_gen_linkstr(norb, nelec, False)
+            self.linkstrl.append(linkstr)
+            self.linkstr.append(linkstr)
+        hc0 = self.Hci_all(None, self.h1frs, self.eri_cas, self.ci)
+        self.e0 = [
+            [np.vdot(c, hc) for c, hc in zip(ci_r, hc_r)]
+            for ci_r, hc_r in zip(self.ci, hc0)
+        ]
+        self.hci0 = [
+            [
+                hc - energy * c
+                for hc, energy, c in zip(hc_r, e_r, ci_r)
+            ]
+            for hc_r, e_r, ci_r in zip(hc0, self.e0, self.ci)
+        ]
+
     @property
     def shape(self):
         """tuple: Shape of the combined orbital/CI Hessian operator."""
