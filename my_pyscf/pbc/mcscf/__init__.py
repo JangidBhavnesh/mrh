@@ -10,6 +10,16 @@ from mrh.my_pyscf.pbc.mcscf.klasci import (
     PBCLASCITransSymm,
     kLASCI,
 )
+from mrh.my_pyscf.pbc.mcscf.klasscf import (
+    KLASSCF_UnitaryGroupGenerators,
+    KLASSCF_HessianOperator,
+    PBCLASSCFNoSymm,
+    kLASSCF,
+)
+from mrh.my_pyscf.pbc.mcscf.real_linear_solvers import (
+    SolveScipyCGForCplx,
+    SolveScipyMINRESForCplx,
+)
 
 def CASCI(kmf, ncas, nelecas, ncore=None):
     assert isinstance(kmf, scf.hf.SCF),  "CASCI only works with periodic SCF objects"
@@ -35,4 +45,5 @@ def CASSCF(kmf, ncas, nelecas, ncore=None):
     return kmc
 
 KLASCI = kLASCI
+KLASSCF = kLASSCF
 # The kLASCI call function should be added here instead of defining it in kasci.py

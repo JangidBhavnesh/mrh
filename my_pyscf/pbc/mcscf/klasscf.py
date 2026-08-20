@@ -14,6 +14,7 @@ from mrh.my_pyscf.pbc.mcscf.klasci import (
     PBCLASCINoSymm,
     PBCLASCITransSymm,
     _convert_h1e_mo_k_to_wann,
+    kLASCI,
 )
 from mrh.my_pyscf.pbc.mcscf.mc1step import _get_casdm2_kpts
 from mrh.my_pyscf.pbc.mcscf.productstate import (
@@ -3977,6 +3978,75 @@ def kernel(
         converged, e_tot, e_states, mo_energy, mo_coeff, e_cas, e_lexc,
         ci, h2eff, veff,
     )
+
+
+def _klasscf_kernel_method(
+        self, mo_coeff=None, ci0=None, conv_tol_grad=None, verbose=None,
+        _kern=None):
+    """Run k-LASSCF and store the final result on this object."""
+    if mo_coeff is None:
+        mo_coeff = self.mo_coeff
+    else:
+        self.mo_coeff = mo_coeff
+    if ci0 is None:
+        ci0 = self.ci
+    if verbose is None:
+        verbose = self.verbose
+    if conv_tol_grad is None:
+        conv_tol_grad = self.conv_tol_grad
+    if _kern is None:
+        _kern = self._kern
+
+    if self.verbose >= lib.logger.WARN:
+        self.check_sanity()
+    self.dump_flags(verbose)
+
+    result = _kern(
+        mo_coeff=mo_coeff, ci0=ci0,
+        conv_tol_grad=conv_tol_grad, verbose=verbose,
+    )
+    (
+        self.converged, self.e_tot, self.e_states, self.mo_energy,
+        self.mo_coeff, self.e_cas, self.e_lexc, self.ci, h2eff, veff,
+    ) = result
+    self._finalize(method="LASSCF")
+    return (
+        self.e_tot, self.e_cas, self.ci, self.mo_coeff, self.mo_energy,
+        h2eff, veff,
+    )
+
+
+class PBCLASSCFNoSymm(PBCLASCINoSymm):
+    """Periodic LASSCF object without translation-adapted CI packing."""
+
+    _hop = KLASSCF_HessianOperator
+    _kern = kernel
+    micro_solver = SolveScipyMINRESForCplx
+    micro_solver_compute_residual = False
+    get_hop = get_hop
+    kernel = _klasscf_kernel_method
+
+
+def kLASSCF(
+        kmf, ncas, nelecas, ncore=None, spin_mult=None, kmesh=None,
+        kpts=None, trans_sym=False, ref_cell=0):
+    """Create a periodic LASSCF macro/micro optimizer.
+
+    Translation-adapted optimization is outside the current implementation
+    scope.  Its Hessian compatibility code remains available internally, but
+    the public optimizer requires ``trans_sym=False``.
+    """
+    if trans_sym:
+        raise NotImplementedError(
+            "translation-adapted k-LASSCF optimization is not implemented"
+        )
+    klas = kLASCI(
+        kmf, ncas, nelecas, ncore=ncore, spin_mult=spin_mult,
+        kmesh=kmesh, kpts=kpts, trans_sym=False,
+        ref_cell=ref_cell,
+    )
+    klas.__class__ = PBCLASSCFNoSymm
+    return klas
 
 # Install the gradient and Hessian interfaces on the periodic LAS variants.
 # Each variant selects the Hessian operator matching its CI layout.
