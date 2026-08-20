@@ -26,6 +26,23 @@ class _SelectingTransformer:
         return np.asarray(diagonal)[self.indices]
 
 
+class _RecordingGradientUGG:
+
+    nvar_tot = 5
+
+    def __init__(self):
+        self.calls = []
+
+    def pack(self, gorb, gci):
+        self.calls.append((gorb, gci))
+        ci_flat = [
+            np.asarray(vector).reshape(-1)
+            for fragment in gci
+            for vector in fragment
+        ]
+        return np.concatenate(([gorb[0, 1, 0]], *ci_flat))
+
+
 def make_diagonal_operator():
     operator = KLASSCF_HessianOperator.__new__(KLASSCF_HessianOperator)
     boxes = [
@@ -195,6 +212,56 @@ class KnownValues(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "Hdiag has shape"):
             operator._get_Hdiag()
+
+    def test_operator_gradient_uses_complex_adjoint_and_combined_order(self):
+        operator = KLASSCF_HessianOperator.__new__(
+            KLASSCF_HessianOperator
+        )
+        operator.ugg = _RecordingGradientUGG()
+        operator.fock1 = np.array([[
+            [0.7, 0.2 + 0.4j],
+            [-0.3 + 0.1j, -0.2],
+        ]], dtype=np.complex128)
+        operator.hci0 = [
+            [
+                np.array([0.15 + 0.2j]),
+                np.array([-0.25j, 0.3 - 0.1j]),
+            ],
+            [np.array([0.4j])],
+        ]
+
+        gradient = operator.get_grad()
+
+        gorb = operator.fock1 - operator.fock1.conj().transpose(0, 2, 1)
+        expected = np.concatenate((
+            [gorb[0, 1, 0]],
+            *[
+                2.0 * residual.reshape(-1)
+                for residual_r in operator.hci0
+                for residual in residual_r
+            ],
+        ))
+        np.testing.assert_allclose(gradient, expected)
+        self.assertEqual(len(operator.ugg.calls), 1)
+        packed_gorb, packed_gci = operator.ugg.calls[0]
+        np.testing.assert_allclose(packed_gorb, gorb)
+        for response_r, residual_r in zip(packed_gci, operator.hci0):
+            for response, residual in zip(response_r, residual_r):
+                np.testing.assert_allclose(response, 2.0 * residual)
+
+    def test_operator_gradient_rejects_packed_layout_mismatch(self):
+        operator = KLASSCF_HessianOperator.__new__(
+            KLASSCF_HessianOperator
+        )
+        operator.ugg = type("UGG", (), {
+            "nvar_tot": 2,
+            "pack": staticmethod(lambda gorb, gci: np.array([1.0])),
+        })()
+        operator.fock1 = np.zeros((1, 1, 1), dtype=np.complex128)
+        operator.hci0 = []
+
+        with self.assertRaisesRegex(ValueError, "gradient has shape"):
+            operator.get_grad()
 
 
 if __name__ == "__main__":
