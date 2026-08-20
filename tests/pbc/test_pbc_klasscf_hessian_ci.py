@@ -144,6 +144,58 @@ class KnownValues(unittest.TestCase):
                 ValueError, "cell 0, root 0 packed Hamiltonian diagonal"):
             operator._get_Hci_diag()
 
+    def test_hdiag_combines_orbital_and_ci_operator_order(self):
+        operator = KLASSCF_HessianOperator.__new__(
+            KLASSCF_HessianOperator
+        )
+        operator.ugg = type("UGG", (), {"nvar_tot": 6})()
+        calls = []
+
+        def orbital_diagonal():
+            calls.append("orbital")
+            return np.array([1.0, 2.0], dtype=np.complex128)
+
+        def ci_diagonal():
+            calls.append("ci")
+            return [
+                np.array([3.0]),
+                np.array([4.0, 5.0, 6.0]),
+            ]
+
+        operator._get_Horb_diag = orbital_diagonal
+        operator._get_Hci_diag = ci_diagonal
+
+        diagonal = operator._get_Hdiag()
+
+        np.testing.assert_allclose(diagonal, [1, 2, 3, 4, 5, 6])
+        self.assertEqual(calls, ["orbital", "ci"])
+
+    def test_hdiag_handles_an_empty_parameter_space(self):
+        operator = KLASSCF_HessianOperator.__new__(
+            KLASSCF_HessianOperator
+        )
+        operator.ugg = type("UGG", (), {"nvar_tot": 0})()
+        operator._get_Horb_diag = lambda: np.empty(
+            0, dtype=np.complex128,
+        )
+        operator._get_Hci_diag = lambda: []
+
+        diagonal = operator._get_Hdiag()
+
+        self.assertEqual(diagonal.shape, (0,))
+        self.assertEqual(diagonal.dtype, np.dtype(np.complex128))
+
+    def test_hdiag_rejects_total_layout_mismatch(self):
+        operator = KLASSCF_HessianOperator.__new__(
+            KLASSCF_HessianOperator
+        )
+        operator.ugg = type("UGG", (), {"nvar_tot": 4})()
+        operator._get_Horb_diag = lambda: np.array([1.0, 2.0])
+        operator._get_Hci_diag = lambda: [np.array([3.0])]
+
+        with self.assertRaisesRegex(ValueError, "Hdiag has shape"):
+            operator._get_Hdiag()
+
 
 if __name__ == "__main__":
     unittest.main()

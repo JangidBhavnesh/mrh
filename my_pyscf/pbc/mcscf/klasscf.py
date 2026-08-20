@@ -2012,6 +2012,21 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
         )
         return diagonal
 
+    def _get_Hdiag(self):
+        """Return the full orbital-plus-CI diagonal in packed UGG ordering."""
+        horb_diag = self._get_Horb_diag()
+        hci_diag = self._get_Hci_diag()
+        pieces = [horb_diag]
+        pieces.extend(hci_diag)
+        if pieces:
+            diagonal = np.concatenate(pieces)
+        else:
+            diagonal = np.empty(0, dtype=np.complex128)
+        _check_shape(
+            diagonal, (self.ugg.nvar_tot,), label="Hdiag",
+        )
+        return diagonal
+
     @property
     def shape(self):
         """tuple: Shape of the combined orbital/CI Hessian operator."""
