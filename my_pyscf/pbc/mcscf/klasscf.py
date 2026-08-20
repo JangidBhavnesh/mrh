@@ -1703,6 +1703,42 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
 
         return response
 
+    def _get_Hci_diag(self):
+        """Build the CI preconditioner diagonal in packed CSF coordinates."""
+        hci_diag = []
+        for ifrag, (fcibox, norb, nelec, h1rs, transformers) in enumerate(zip(
+                self.fciboxes, self.ncas_sub, self.nelecas_sub,
+                self.h1frs, self.ci_transformers)):
+            if ifrag in self.frozen_ci:
+                continue
+            i = int(np.sum(self.ncas_sub[:ifrag]))
+            j = i + int(norb)
+            h2 = self.eri_cas[i:j, i:j, i:j, i:j]
+            hdiag_csf_r = fcibox.states_make_hdiag_csf(
+                h1rs, h2, norb, nelec,
+            )
+            if len(hdiag_csf_r) != len(transformers):
+                msg = (
+                    f"cell {ifrag} produced {len(hdiag_csf_r)} Hamiltonian "
+                    f"diagonals for {len(transformers)} CI roots"
+                )
+                raise ValueError(msg)
+
+            for iroot, (transformer, hdiag_csf) in enumerate(zip(
+                    transformers, hdiag_csf_r)):
+                hdiag_csf = np.asarray(transformer.pack_csf(hdiag_csf))
+                if hdiag_csf.size != transformer.ncsf:
+                    msg = (
+                        f"cell {ifrag}, root {iroot} packed Hamiltonian "
+                        f"diagonal has size {hdiag_csf.size}; expected "
+                        f"{transformer.ncsf}"
+                    )
+                    raise ValueError(msg)
+
+                hci_diag.append(hdiag_csf.reshape(-1))
+
+        return hci_diag
+
     @property
     def shape(self):
         """tuple: Shape of the combined orbital/CI Hessian operator."""
