@@ -900,6 +900,64 @@ def get_grad_orb(
     raise ValueError("kwarg 'hermi' must be -1, 0, or +1")
 
 
+def get_grad(
+        klas, mo_coeff=None, ci=None, ugg=None, h2eff_sub=None,
+        veff_kpts=None, dm1s_kpts=None, casdm1frs=None,
+        h1eff=None, h2eff=None):
+    """Return the packed k-LASSCF orbital and CI energy gradient.
+
+    The orbital gradient is packed first, followed by the CI gradient, using
+    the ordering defined by ``ugg``.
+
+    Args:
+        klas : object
+            Periodic LAS object providing the gradient methods.
+        mo_coeff : ndarray of shape (nkpts, nao, nmo), optional
+            Bloch-MO coefficients. Defaults to ``klas.mo_coeff``.
+        ci : sequence, optional
+            Nested ``[fragment][root]`` determinant-basis CI vectors. Defaults
+            to ``klas.ci``.
+        ugg : KLASSCF_UnitaryGroupGenerators, optional
+            Parameterization used to pack the result. It is constructed from
+            ``mo_coeff`` and ``ci`` when omitted.
+        h2eff_sub : _ERIS or ndarray, optional
+            ``paaa`` intermediates forwarded to :func:`get_grad_orb`.
+        veff_kpts : ndarray, optional
+            Spin-resolved effective potential forwarded to
+            :func:`get_grad_orb`.
+        dm1s_kpts : ndarray, optional
+            Spin-resolved AO density forwarded to :func:`get_grad_orb`.
+        casdm1frs : sequence, optional
+            Fragment/root density matrices forwarded to :func:`get_grad_ci`.
+        h1eff : sequence, optional
+            Fragment effective one-electron Hamiltonians forwarded to
+            :func:`get_grad_ci`.
+        h2eff : ndarray, optional
+            Wannier active-space two-electron integrals forwarded to
+            :func:`get_grad_ci`.
+
+    Returns:
+        ndarray of shape (ugg.nvar_tot,)
+            Packed complex gradient with orbital variables before CI
+            variables.
+    """
+    if mo_coeff is None:
+        mo_coeff = klas.mo_coeff
+    if ci is None:
+        ci = klas.ci
+    if ugg is None:
+        ugg = klas.get_ugg(mo_coeff=mo_coeff, ci=ci)
+    gorb = klas.get_grad_orb(
+        mo_coeff_kpts=mo_coeff, ci=ci, h2eff_sub=h2eff_sub,
+        veff_kpts=veff_kpts, dm1s_kpts=dm1s_kpts,
+    )
+    gci = klas.get_grad_ci(
+        mo_coeff=mo_coeff, ci=ci, ugg=ugg, casdm1frs=casdm1frs,
+        h1eff=h1eff, h2eff=h2eff,
+    )
+    return ugg.pack(gorb, gci)
+
+
 # Install only the parameterization interface at this layer. Gradient methods
 # are registered alongside their respective function definitions.
 for _klass in (PBCLASCINoSymm, PBCLASCITransSymm):
@@ -908,3 +966,4 @@ for _klass in (PBCLASCINoSymm, PBCLASCITransSymm):
     _klass.get_ugg = get_ugg
     _klass.get_grad_ci = get_grad_ci
     _klass.get_grad_orb = get_grad_orb
+    _klass.get_grad = get_grad
