@@ -1,11 +1,15 @@
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
+from mrh.my_pyscf.pbc.mcscf import klasscf
 from mrh.my_pyscf.pbc.mcscf.klasscf import KLASSCF_HessianOperator
 
 
 class _IdentitySCF:
+
+    cell = object()
 
     @staticmethod
     def get_ovlp(kpts=None):
@@ -47,6 +51,9 @@ def make_operator(casdm2):
     operator.weights = np.array([1.0])
     operator.nroots = 1
     operator.ncastot = 2
+    operator.ncore = 1
+    operator.ncas = 1
+    operator.nocc = 2
     operator.nkpts = 2
     operator.nao = 3
     operator.nmo = 3
@@ -72,6 +79,16 @@ class _LazyERIs:
     @staticmethod
     def paaa(k1, k2, k3):
         return None
+
+
+class _RecordingERIs(_LazyERIs):
+    def __init__(self):
+        self.paaa_calls = []
+
+    def paaa(self, k1, k2, k3):
+        self.paaa_calls.append((k1, k2, k3))
+        value = 1.0 + k1 + 2.0 * k2 + 3.0 * k3
+        return value * np.arange(1, 4, dtype=float).reshape(3, 1, 1, 1)
 
 
 class KnownValues(unittest.TestCase):
@@ -154,6 +171,51 @@ class KnownValues(unittest.TestCase):
 
         with self.assertRaisesRegex(TypeError, "eris.paap must be callable"):
             operator._init_eri_(eris)
+
+    def test_orbital_fock_intermediate(self):
+        operator = make_operator(np.zeros((2,) * 4))
+        operator.h1s = np.zeros((2, 2, 3, 3), dtype=np.complex128)
+        operator.dm1s = np.zeros((2, 2, 3, 3), dtype=np.complex128)
+        operator.h1s[:, 0] = [np.eye(3), 2.0 * np.eye(3)]
+        operator.h1s[:, 1] = [3.0 * np.eye(3), 4.0 * np.eye(3)]
+        operator.dm1s[:, 0] = [0.5 * np.eye(3), 0.25 * np.eye(3)]
+        operator.dm1s[:, 1] = [0.2 * np.eye(3), 0.1 * np.eye(3)]
+        operator.cascm2 = np.zeros((2,) * 4)
+        operator.kmesh = (2, 1, 1)
+        eris = _RecordingERIs()
+        operator._init_eri_(eris)
+        mo_phase = np.array([
+            [[1.0, 1.0]],
+            [[1.0, -1.0]],
+        ], dtype=np.complex128) / np.sqrt(2.0)
+        transformed = {
+            (k1, k2, k3): np.full(
+                (1, 1, 1, 1), 0.25 + k1 + 2 * k2 + 4 * k3,
+            )
+            for k1 in range(2)
+            for k2 in range(2)
+            for k3 in range(2)
+        }
+
+        def transform(cumulant, phase, klabel):
+            return transformed[tuple(klabel[:3])]
+
+        with patch.object(
+                klasscf.kpts_helper, "get_kconserv",
+                return_value=np.zeros((2, 2, 2), dtype=int)), patch.object(
+                klasscf, "_get_casdm2_kpts", side_effect=transform):
+            operator._init_orb_(mo_phase=mo_phase)
+
+        expected = np.array([
+            np.eye(3), np.eye(3),
+        ], dtype=np.complex128)
+        expected[1] *= 1.0
+        for k1, k2, k3 in klasscf.kpts_helper.loop_kkk(2):
+            paaa = eris.paaa(k1, k2, k3).reshape(3)
+            expected[k1, :, 1] += (
+                paaa * transformed[(k1, k2, k3)].item()
+            )
+        np.testing.assert_allclose(operator.fock1, expected)
 
     def test_rejects_inconsistent_active_density_shape(self):
         operator = make_operator(np.zeros((2,) * 4))
