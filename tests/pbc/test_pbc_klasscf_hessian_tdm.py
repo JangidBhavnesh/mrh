@@ -294,6 +294,63 @@ class KnownValues(unittest.TestCase):
             tcm2, cumulant_derivative, atol=2e-9, rtol=2e-9,
         )
 
+    def test_h1eff_response_keeps_only_other_fragment_densities(self):
+        operator = KLASSCF_HessianOperator.__new__(
+            KLASSCF_HessianOperator
+        )
+        operator.nroots = 2
+        operator.ncas_sub = np.array([1, 2])
+        operator.ncastot = 3
+        rng = np.random.default_rng(103)
+        operator.eri_cas = (
+            rng.standard_normal((3,) * 4)
+            + 1j * rng.standard_normal((3,) * 4)
+        )
+        tdm1rs = np.zeros((2, 2, 3, 3), dtype=np.complex128)
+        offsets = np.array([0, 1, 3])
+        for i, j in zip(offsets[:-1], offsets[1:]):
+            block = (
+                rng.standard_normal((2, 2, j - i, j - i))
+                + 1j * rng.standard_normal((2, 2, j - i, j - i))
+            )
+            tdm1rs[:, :, i:j, i:j] = (
+                block + block.conj().transpose(0, 1, 3, 2)
+            )
+
+        actual = operator.get_h1eff_response(tdm1rs)
+
+        expected = []
+        for target, (i, j) in enumerate(zip(
+                offsets[:-1], offsets[1:])):
+            response = np.zeros(
+                (2, 2, j - i, j - i), dtype=np.complex128,
+            )
+            for source, (k, l) in enumerate(zip(
+                    offsets[:-1], offsets[1:])):
+                if source == target:
+                    continue
+                dm1rs = tdm1rs[:, :, k:l, k:l]
+                coulomb = np.tensordot(
+                    dm1rs,
+                    operator.eri_cas[k:l, k:l, i:j, i:j],
+                    axes=((2, 3), (0, 1)),
+                )
+                coulomb += coulomb[:, ::-1]
+                exchange = np.tensordot(
+                    dm1rs,
+                    operator.eri_cas[i:j, k:l, k:l, i:j],
+                    axes=((2, 3), (2, 1)),
+                )
+                response += coulomb - exchange
+            expected.append(response)
+
+        self.assertEqual(
+            [response.shape for response in actual],
+            [(2, 2, 1, 1), (2, 2, 2, 2)],
+        )
+        for actual_fragment, expected_fragment in zip(actual, expected):
+            np.testing.assert_allclose(actual_fragment, expected_fragment)
+
     def test_transition_dm1s_transforms_to_active_block_mos(self):
         operator = KLASSCF_HessianOperator.__new__(
             KLASSCF_HessianOperator
