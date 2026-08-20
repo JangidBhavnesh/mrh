@@ -2177,6 +2177,41 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
         )
         return mo1, ci1, h2eff1
 
+    def ci_response_offdiag(self, h1frs_response):
+        """Apply the different-cell blocks of the CI Hessian.
+
+        ``h1frs_response`` is the effective one-electron response returned by
+        :meth:`get_h1eff_response`. It contains no self-cell contribution.
+        """
+        if len(h1frs_response) != len(self.fciboxes):
+            msg = (
+                f"h1frs_response contains {len(h1frs_response)} cells; "
+                f"expected {len(self.fciboxes)}"
+            )
+            raise ValueError(msg)
+
+        response = []
+        for ifrag, (fcibox, norb, nelec, h1rs, ci0_r) in enumerate(zip(
+                self.fciboxes, self.ncas_sub, self.nelecas_sub,
+                h1frs_response, self.ci)):
+            h0_r = [0.0] * self.nroots
+            zero_h2 = np.zeros((norb,) * 4, dtype=self.eri_cas.dtype)
+            linkstrl = (
+                None if self.linkstrl is None else self.linkstrl[ifrag]
+            )
+            response.append(self.Hci(
+                fcibox, norb, nelec, h0_r, h1rs, zero_h2, ci0_r,
+                linkstrl=linkstrl,
+            ))
+        response = [
+            [
+                2.0 * (hc - np.vdot(c0, hc) * c0)
+                for hc, c0 in zip(response_r, ci0_r)
+            ]
+            for response_r, ci0_r in zip(response, self.ci)
+        ]
+        return response
+
     @property
     def shape(self):
         """tuple: Shape of the combined orbital/CI Hessian operator."""

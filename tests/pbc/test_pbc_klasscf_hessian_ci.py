@@ -302,6 +302,88 @@ class KnownValues(unittest.TestCase):
         self.assertIs(h2, operator.eri_cas)
         self.assertIs(ci[0][0], trial)
 
+    def test_ci_response_offdiag_contracts_and_projects_each_fragment(self):
+        operator = KLASSCF_HessianOperator.__new__(
+            KLASSCF_HessianOperator
+        )
+        boxes = [object(), object()]
+        operator.fciboxes = boxes
+        operator.ncas_sub = np.array([1, 2])
+        operator.nelecas_sub = np.array([(1, 0), (1, 1)])
+        operator.nroots = 2
+        operator.eri_cas = np.zeros((3,) * 4, dtype=np.complex128)
+        operator.linkstrl = ["links-0", "links-1"]
+        operator.ci = [
+            [
+                np.array([1.0, 0.0], dtype=np.complex128),
+                np.array([1.0, 1.0j], dtype=np.complex128) / np.sqrt(2),
+            ],
+            [
+                np.array([0.6, 0.8j], dtype=np.complex128),
+                np.array([0.0, 1.0], dtype=np.complex128),
+            ],
+        ]
+        h1_response = [
+            np.full((2, 2, 1, 1), 0.2 + 0.1j),
+            np.full((2, 2, 2, 2), -0.3j),
+        ]
+        raw_response = [
+            [
+                np.array([0.4 + 0.2j, -0.1j]),
+                np.array([0.3, -0.2 + 0.5j]),
+            ],
+            [
+                np.array([-0.1 + 0.4j, 0.7]),
+                np.array([0.2j, -0.3]),
+            ],
+        ]
+        calls = []
+
+        def apply_hamiltonian(
+                fcibox, norb, nelec, h0, h1, h2, ci, linkstrl=None):
+            ifrag = boxes.index(fcibox)
+            calls.append((
+                ifrag, norb, nelec, h0, h1, h2, ci, linkstrl,
+            ))
+            return [np.array(hc, copy=True) for hc in raw_response[ifrag]]
+
+        operator.Hci = apply_hamiltonian
+
+        actual = operator.ci_response_offdiag(h1_response)
+
+        self.assertEqual(len(calls), 2)
+        for ifrag, call in enumerate(calls):
+            _, norb, nelec, h0, h1, h2, ci, linkstrl = call
+            self.assertEqual(norb, operator.ncas_sub[ifrag])
+            np.testing.assert_array_equal(
+                nelec, operator.nelecas_sub[ifrag],
+            )
+            np.testing.assert_array_equal(h0, [0.0, 0.0])
+            self.assertIs(h1, h1_response[ifrag])
+            self.assertEqual(h2.shape, (norb,) * 4)
+            self.assertEqual(h2.dtype, operator.eri_cas.dtype)
+            np.testing.assert_array_equal(h2, 0.0)
+            self.assertIs(ci, operator.ci[ifrag])
+            self.assertEqual(linkstrl, operator.linkstrl[ifrag])
+
+            for iroot, (hc, c0) in enumerate(zip(
+                    raw_response[ifrag], operator.ci[ifrag])):
+                expected = 2.0 * (hc - np.vdot(c0, hc) * c0)
+                np.testing.assert_allclose(actual[ifrag][iroot], expected)
+                np.testing.assert_allclose(
+                    np.vdot(c0, actual[ifrag][iroot]), 0.0, atol=2e-16,
+                )
+
+    def test_ci_response_offdiag_validates_fragment_count(self):
+        operator = KLASSCF_HessianOperator.__new__(
+            KLASSCF_HessianOperator
+        )
+        operator.fciboxes = [object(), object()]
+
+        with self.assertRaisesRegex(
+                ValueError, "h1frs_response contains 1 cells; expected 2"):
+            operator.ci_response_offdiag([np.zeros(1)])
+
     def test_hci_diag_packs_nonfrozen_fragments_in_layout_order(self):
         operator, boxes = make_diagonal_operator()
 
