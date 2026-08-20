@@ -1,7 +1,9 @@
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
+from mrh.my_pyscf.pbc.mcscf import klasscf
 from mrh.my_pyscf.pbc.mcscf.klasscf import KLASSCF_HessianOperator
 
 
@@ -20,6 +22,181 @@ class _OrbitalUGG:
 
     def pack_orb(self, kappa):
         return np.asarray([kappa[0, p, q] for p, q in self.pairs])
+
+
+class _ExternalUGG:
+
+    def __init__(self, nkpts):
+        self.uniq_orb_idx = (
+            np.repeat(np.arange(nkpts), 3),
+            np.tile(np.array([1, 2, 2]), nkpts),
+            np.tile(np.array([0, 0, 1]), nkpts),
+        )
+        self.nvar_orb_external = 3 * nkpts
+
+
+class _ExternalERIs:
+
+    def __init__(self, rng, nkpts, nmo, ncore):
+        self.vhf_c = _random_hermitian(rng, (nkpts, nmo, nmo))
+        self.j_pc = _random_complex(rng, (nkpts, nmo, ncore))
+        self.k_pc = _random_complex(rng, (nkpts, nmo, ncore))
+        self.ppaa_blocks = {
+            key: _random_complex(rng, (nmo, nmo, 1, 1))
+            for key in np.ndindex((nkpts,) * 3)
+        }
+        self.papa_blocks = {
+            key: _random_complex(rng, (nmo, 1, nmo, 1))
+            for key in np.ndindex((nkpts,) * 3)
+        }
+        self.paap_blocks = {
+            key: _random_complex(rng, (nmo, 1, 1, nmo))
+            for key in np.ndindex((nkpts,) * 3)
+        }
+
+    def ppaa(self, k1, k2, k3):
+        return self.ppaa_blocks[k1, k2, k3]
+
+    def papa(self, k1, k2, k3):
+        return self.papa_blocks[k1, k2, k3]
+
+    def paap(self, k1, k2, k3):
+        return self.paap_blocks[k1, k2, k3]
+
+
+def _random_complex(rng, shape):
+    return rng.standard_normal(shape) + 1j * rng.standard_normal(shape)
+
+
+def _random_hermitian(rng, shape):
+    matrix = _random_complex(rng, shape)
+    return matrix + matrix.conj().swapaxes(-1, -2)
+
+
+def _make_external_operator():
+    rng = np.random.default_rng(149)
+    operator = KLASSCF_HessianOperator.__new__(KLASSCF_HessianOperator)
+    operator.nkpts = 2
+    operator.nmo = 3
+    operator.ncore = 1
+    operator.ncas = 1
+    operator.nocc = 2
+    operator.kpts = np.zeros((2, 3))
+    operator.las = type("LAS", (), {
+        "_scf": type("SCF", (), {"cell": object()})(),
+    })()
+    operator.hcore = _random_hermitian(rng, (2, 3, 3))
+    operator.h1s = _random_hermitian(rng, (2, 2, 3, 3))
+    operator.dm1s = _random_hermitian(rng, (2, 2, 3, 3))
+    operator.fock1 = _random_hermitian(rng, (2, 3, 3))
+    operator.casdm2 = _random_complex(rng, (2,) * 4)
+    operator.mo_phase = _random_complex(rng, (2, 1, 2))
+    operator.eris = _ExternalERIs(rng, 2, 3, 1)
+    operator.ugg = _ExternalUGG(2)
+    operator._Horb_diag_external_cache = None
+    dm2_blocks = {
+        key: _random_complex(rng, (1,) * 4)
+        for key in np.ndindex((2,) * 3)
+    }
+    return operator, dm2_blocks
+
+
+def _external_diagonal_reference(operator, dm2_blocks):
+    nkpts = operator.nkpts
+    nmo = operator.nmo
+    ncore = operator.ncore
+    nocc = operator.nocc
+    active_orbital = ncore
+    dm1 = operator.dm1s.sum(axis=0)
+    casdm1 = dm1[:, active_orbital, active_orbital]
+    vhf_ca = (operator.h1s[0] + operator.h1s[1]) / 2.0 - operator.hcore
+
+    jkcaa = np.zeros((nkpts, nocc), dtype=np.complex128)
+    for k in range(nkpts):
+        ppaa = operator.eris.ppaa_blocks[k, k, k]
+        paap = operator.eris.paap_blocks[k, k, k]
+        papa = operator.eris.papa_blocks[k, k, k]
+        for p in range(nocc):
+            bra_ket_pair = (
+                -2.0 * ppaa[p, p, 0, 0] * casdm1[k]
+                + 4.0 * paap[p, 0, 0, p] * casdm1[k]
+            )
+            jkcaa[k, p] = (
+                bra_ket_pair.real
+                + 2.0 * papa[p, 0, p, 0] * casdm1[k]
+            )
+
+    hdm2 = np.zeros((nkpts, nmo), dtype=np.complex128)
+    for k in range(nkpts):
+        for kw in range(nkpts):
+            papa = operator.eris.papa_blocks[k, kw, k]
+            ppaa = operator.eris.ppaa_blocks[k, k, kw]
+            paap = operator.eris.paap_blocks[k, kw, kw]
+            for p in range(nmo):
+                hdm2[k, p] += (
+                    papa[p, 0, p, 0] * dm2_blocks[k, kw, k].item()
+                    + (
+                        ppaa[p, p, 0, 0]
+                        * dm2_blocks[kw, kw, k].item()
+                    ).conjugate()
+                    + (
+                        paap[p, 0, 0, p]
+                        * dm2_blocks[k, kw, kw].item()
+                    ).conjugate()
+                )
+
+    hdiag = np.zeros((nkpts, nmo, nmo), dtype=np.complex128)
+    for k in range(nkpts):
+        fock_diag = operator.fock1[k].diagonal().real
+        potential_diag = vhf_ca[k].diagonal().real
+        core_eri = 6.0 * operator.eris.k_pc[k] - 2.0 * operator.eris.j_pc[k]
+        active_active = (
+            -operator.eris.vhf_c[k, active_orbital, active_orbital]
+            * casdm1[k]
+        )
+        for p in range(nmo):
+            for q in range(nmo):
+                one_body_pq = (
+                    operator.hcore[k, p, p] * dm1[k, q, q]
+                    - operator.hcore[k, p, q] * dm1[k, p, q]
+                )
+                one_body_qp = (
+                    operator.hcore[k, q, q] * dm1[k, p, p]
+                    - operator.hcore[k, q, p] * dm1[k, q, p]
+                )
+                value = one_body_pq + one_body_qp.conjugate()
+                value -= fock_diag[p] + fock_diag[q]
+                if p == q:
+                    value += 2.0 * fock_diag[p]
+                if q < ncore:
+                    value += 2.0 * potential_diag[p]
+                if p < ncore:
+                    value += 2.0 * potential_diag[q]
+                if p == q and p < ncore:
+                    value -= 4.0 * potential_diag[p]
+                if q == active_orbital:
+                    value += operator.eris.vhf_c[k, p, p] * casdm1[k]
+                if p == active_orbital:
+                    value += (
+                        operator.eris.vhf_c[k, q, q] * casdm1[k]
+                    ).conjugate()
+                if p == q == active_orbital:
+                    value += active_active + active_active.conjugate()
+                if p >= ncore and q < ncore:
+                    value += core_eri[p, q]
+                if p < ncore and q >= ncore:
+                    value += core_eri[q, p].conjugate()
+                if p < nocc and q == active_orbital:
+                    value -= jkcaa[k, p]
+                if p == active_orbital and q < nocc:
+                    value -= jkcaa[k, q].conjugate()
+                if q == active_orbital:
+                    value += hdm2[k, p]
+                if p == active_orbital:
+                    value += hdm2[k, q].conjugate()
+                hdiag[k, p, q] = value
+
+    return hdiag[operator.ugg.uniq_orb_idx] / 2.0
 
 
 class KnownValues(unittest.TestCase):
@@ -54,6 +231,48 @@ class KnownValues(unittest.TestCase):
         cached = operator._get_Horb_diag_matvec()
         np.testing.assert_allclose(cached, np.diag(hessian))
         self.assertEqual(len(calls), operator.ugg.nvar_orb)
+
+    def test_external_hdiag_matches_explicit_momentum_resolved_formula(self):
+        operator, dm2_blocks = _make_external_operator()
+        kconserv = np.fromfunction(
+            lambda k1, k2, k3: (k1 - k2 + k3) % operator.nkpts,
+            (operator.nkpts,) * 3, dtype=int,
+        ).astype(int)
+        transform_calls = []
+
+        def transform(casdm2, mo_phase, klabel):
+            self.assertIs(casdm2, operator.casdm2)
+            self.assertIs(mo_phase, operator.mo_phase)
+            klabel = tuple(klabel)
+            transform_calls.append(klabel)
+            return dm2_blocks[klabel[:3]]
+
+        with patch.object(
+                klasscf.kpts_helper, "get_kconserv",
+                return_value=kconserv), patch.object(
+                klasscf, "_get_casdm2_kpts", side_effect=transform):
+            actual = operator._get_Horb_diag_external()
+
+        expected = _external_diagonal_reference(operator, dm2_blocks)
+        np.testing.assert_allclose(actual, expected)
+        self.assertCountEqual(
+            [call[:3] for call in transform_calls],
+            list(np.ndindex((operator.nkpts,) * 3)),
+        )
+        for k1, k2, k3, k4 in transform_calls:
+            self.assertEqual(k4, kconserv[k1, k2, k3])
+
+        actual[0] = 999.0
+        cached = operator._get_Horb_diag_external()
+        np.testing.assert_allclose(cached, expected)
+        self.assertEqual(len(transform_calls), operator.nkpts ** 3)
+
+    def test_external_hdiag_rejects_core_eri_shape_mismatch(self):
+        operator, _ = _make_external_operator()
+        operator.eris.j_pc = np.zeros((2, 3, 2))
+
+        with self.assertRaisesRegex(ValueError, "j_pc has shape"):
+            operator._get_Horb_diag_external()
 
     def test_orbital_hdiag_handles_an_empty_orbital_space(self):
         operator = KLASSCF_HessianOperator.__new__(
