@@ -1,0 +1,297 @@
+import unittest
+
+import numpy as np
+
+from mrh.my_pyscf.pbc.fci import direct_spin1_cplx
+from mrh.my_pyscf.pbc.mcscf.klasscf import KLASSCF_HessianOperator
+
+
+class _TransitionFCIBox:
+    _state_args = staticmethod(lambda value: value)
+    _solver_args = staticmethod(lambda value: value)
+
+    def __init__(self):
+        self.fcisolvers = [object()]
+        self.collect_calls = 0
+        self.transition_operator = np.array(
+            [[0.7, 0.2 - 0.3j], [-0.1 + 0.4j, -0.2]],
+            dtype=np.complex128,
+        )
+        self.dm1a_operator = np.array(
+            [[1.0, 0.2j], [-0.3j, 0.4]], dtype=np.complex128,
+        )
+        self.dm1b_operator = np.array(
+            [[-0.2, 0.1 + 0.2j], [0.3j, 0.8]], dtype=np.complex128,
+        )
+        self.dm2_operator = (
+            np.arange(16, dtype=float).reshape((2,) * 4)
+            + 0.1j * np.arange(16, 0, -1).reshape((2,) * 4)
+        ) / 17.0
+        self.dm2_scales = np.array([0.5, -0.2j, 0.3j, 0.7])
+
+    @staticmethod
+    def _get_nelec(solver, nelec):
+        return tuple(nelec)
+
+    def _collect(
+            self, name, ci1, ci0, norb, nelec, link_index=None, **kwargs):
+        if name not in (
+                "trans_rdm1s", "trans_rdm1s_py",
+                "trans_rdm12s", "trans_rdm12s_py"):
+            raise AssertionError(f"unexpected contraction {name}")
+        self.collect_calls += 1
+        bra = np.asarray(ci1[0]).reshape(-1)
+        ket = np.asarray(ci0[0]).reshape(-1)
+        amplitude = np.vdot(bra, self.transition_operator @ ket)
+        dm1s = (
+            amplitude * self.dm1a_operator,
+            amplitude * self.dm1b_operator,
+        )
+        if name.startswith("trans_rdm12s"):
+            dm2s = tuple(
+                amplitude * scale * self.dm2_operator
+                for scale in self.dm2_scales
+            )
+            return [(dm1s, dm2s)]
+        return [dm1s]
+
+
+class _SingleSolverFCIBox:
+    """Minimal state-average wrapper around one complex FCI solver."""
+
+    _state_args = staticmethod(lambda value: value)
+    _solver_args = staticmethod(lambda value: value)
+
+    def __init__(self):
+        self.solver = direct_spin1_cplx.FCISolver()
+        self.fcisolvers = [self.solver]
+
+    @staticmethod
+    def _get_nelec(solver, nelec):
+        return tuple(nelec)
+
+    def _collect(
+            self, name, ci1, ci0, norb, nelec, link_index=None, **kwargs):
+        method = getattr(self.solver, name)
+        link = None if link_index is None else link_index[0]
+        return [method(
+            ci1[0], ci0[0], norb, nelec[0], link_index=link,
+        )]
+
+
+def make_operator():
+    operator = KLASSCF_HessianOperator.__new__(KLASSCF_HessianOperator)
+    operator.nroots = 1
+    operator.ncas_sub = np.array([2, 2])
+    operator.nelecas_sub = np.array([(1, 0), (1, 0)])
+    operator.ncastot = 4
+    operator.weights = np.array([1.0])
+    operator.fciboxes = [_TransitionFCIBox(), _TransitionFCIBox()]
+    operator.linkstr = [None, None]
+    operator.eri_cas = np.zeros((4,) * 4, dtype=np.complex128)
+    operator.casdm1frs = [
+        np.zeros((1, 2, 2, 2), dtype=np.complex128)
+        for _ in range(2)
+    ]
+    operator.casdm1s = np.zeros((2, 4, 4), dtype=np.complex128)
+    operator.casdm2fr = [
+        np.zeros((1, 2, 2, 2, 2), dtype=np.complex128)
+        for _ in range(2)
+    ]
+    ci_ref = np.array([[0.8], [0.6j]], dtype=np.complex128)
+    operator.ci = [[ci_ref], [ci_ref.copy()]]
+    return operator
+
+
+class KnownValues(unittest.TestCase):
+
+    def test_transition_rdm_contracts_every_fragment(self):
+        operator = make_operator()
+        trial = np.array([[0.3j], [0.4]], dtype=np.complex128)
+        ci1 = [[trial], [trial.copy()]]
+
+        tdm1rs = operator.make_tdm1s_sub(ci1)
+
+        self.assertEqual(tdm1rs.shape, (1, 2, 4, 4))
+        self.assertEqual(
+            [box.collect_calls for box in operator.fciboxes], [1, 1]
+        )
+        np.testing.assert_allclose(
+            tdm1rs[:, :, :2, :2], tdm1rs[:, :, 2:, 2:],
+        )
+        np.testing.assert_allclose(
+            tdm1rs, tdm1rs.swapaxes(-1, -2).conj(),
+        )
+
+    def test_transition_cumulant_uses_stored_state_average_casdm1s(self):
+        operator = make_operator()
+        trial = np.array([[0.3j], [0.4]], dtype=np.complex128)
+        ci1 = [[trial], [trial.copy()]]
+        operator.casdm1s[0] = np.diag([0.7, 0.2, 0.4, 0.1])
+        operator.casdm1s[1] = np.diag([0.1, 0.5, 0.2, 0.6])
+        operator.casdm1frs = [
+            np.array([[np.diag([0.6, 0.1]), np.diag([0.2, 0.4])]])
+            for _ in range(2)
+        ]
+        operator.casdm2fr = [
+            np.full(
+                (1, 2, 2, 2, 2), 0.03 * (cell + 1),
+                dtype=np.complex128,
+            )
+            for cell in range(2)
+        ]
+
+        tdm1rs, tcm2 = operator.make_tdm1s2c_sub(ci1)
+
+        tdm1rs_one_sided = np.zeros_like(tdm1rs)
+        tdm2_one_sided = np.zeros_like(tcm2)
+        for cell, box in enumerate(operator.fciboxes):
+            i, j = 2 * cell, 2 * (cell + 1)
+            c0 = operator.ci[cell][0]
+            overlap = np.vdot(trial, c0)
+            amplitude = np.vdot(
+                trial.reshape(-1),
+                box.transition_operator @ c0.reshape(-1),
+            )
+            tdm1rs_one_sided[0, :, i:j, i:j] = (
+                amplitude * np.stack(
+                    (box.dm1a_operator, box.dm1b_operator), axis=0,
+                )
+                - overlap * operator.casdm1frs[cell][0]
+            )
+            transition_dm2 = (
+                amplitude * box.dm2_scales.sum() * box.dm2_operator
+            )
+            tdm2_one_sided[i:j, i:j, i:j, i:j] = (
+                transition_dm2
+                - overlap * operator.casdm2fr[cell][0]
+            ) / 2.0
+
+        expected_tdm1rs = (
+            tdm1rs_one_sided
+            + tdm1rs_one_sided.swapaxes(-1, -2).conj()
+        )
+        expected_tdm2 = np.array(tdm2_one_sided, copy=True)
+        expected_tdm2 += expected_tdm2.conj().transpose(1, 0, 3, 2)
+        expected_tdm2 += expected_tdm2.transpose(2, 3, 0, 1)
+
+        tdm1s_0 = expected_tdm1rs[0, :, :2, :2]
+        tdm1s_1 = expected_tdm1rs[0, :, 2:, 2:]
+        dm1s_0 = operator.casdm1frs[0][0]
+        dm1s_1 = operator.casdm1frs[1][0]
+        coulomb = np.einsum(
+            "ij,kl->ijkl", tdm1s_0.sum(axis=0), dm1s_1.sum(axis=0),
+        )
+        coulomb += np.einsum(
+            "ij,kl->ijkl", dm1s_0.sum(axis=0), tdm1s_1.sum(axis=0),
+        )
+        expected_tdm2[:2, :2, 2:, 2:] = coulomb
+        expected_tdm2[2:, 2:, :2, :2] = coulomb.transpose(2, 3, 0, 1)
+        exchange = sum(
+            np.einsum("ij,kl->ilkj", tdm1s_0[spin], dm1s_1[spin])
+            + np.einsum("ij,kl->ilkj", dm1s_0[spin], tdm1s_1[spin])
+            for spin in range(2)
+        )
+        expected_tdm2[:2, 2:, 2:, :2] = -exchange
+        expected_tdm2[2:, :2, :2, 2:] = (
+            -exchange.conj().transpose(1, 0, 3, 2)
+        )
+
+        tdm1s = expected_tdm1rs[0]
+        expected_tcm2 = np.array(expected_tdm2, copy=True)
+        expected_tcm2 -= np.multiply.outer(
+            tdm1s.sum(axis=0), operator.casdm1s.sum(axis=0),
+        )
+        expected_tcm2 -= np.multiply.outer(
+            operator.casdm1s.sum(axis=0), tdm1s.sum(axis=0),
+        )
+        for spin in range(2):
+            expected_tcm2 += np.multiply.outer(
+                tdm1s[spin], operator.casdm1s[spin],
+            ).transpose(0, 3, 2, 1)
+            expected_tcm2 += np.multiply.outer(
+                operator.casdm1s[spin], tdm1s[spin],
+            ).transpose(0, 3, 2, 1)
+
+        np.testing.assert_allclose(tdm1rs, expected_tdm1rs)
+        np.testing.assert_allclose(tcm2, expected_tcm2)
+        np.testing.assert_allclose(
+            tdm1rs, tdm1rs.swapaxes(-1, -2).conj(),
+        )
+        np.testing.assert_allclose(
+            tcm2, tcm2.conj().transpose(1, 0, 3, 2),
+        )
+        np.testing.assert_allclose(
+            tcm2, tcm2.transpose(2, 3, 0, 1),
+        )
+
+    def test_complex_transition_cumulant_matches_finite_difference(self):
+        operator = KLASSCF_HessianOperator.__new__(
+            KLASSCF_HessianOperator
+        )
+        box = _SingleSolverFCIBox()
+        norb = 2
+        nelec = (1, 1)
+        rng = np.random.default_rng(91)
+        c0 = (
+            rng.standard_normal((2, 2))
+            + 1j * rng.standard_normal((2, 2))
+        )
+        c0 /= np.linalg.norm(c0)
+        c1 = (
+            rng.standard_normal((2, 2))
+            + 1j * rng.standard_normal((2, 2))
+        )
+        c1 -= np.vdot(c0, c1) * c0
+        c1 /= np.linalg.norm(c1)
+
+        dm1s_ref = np.asarray(box.solver.make_rdm1s(c0, norb, nelec))
+        dm2_ref = np.asarray(box.solver.make_rdm12(c0, norb, nelec)[1])
+        operator.nroots = 1
+        operator.ncastot = norb
+        operator.ncas_sub = np.array([norb])
+        operator.nelecas_sub = np.array([nelec])
+        operator.weights = np.array([1.0])
+        operator.fciboxes = [box]
+        operator.linkstr = [None]
+        operator.ci = [[c0]]
+        operator.eri_cas = np.zeros((norb,) * 4, dtype=np.complex128)
+        operator.casdm1frs = [dm1s_ref[None]]
+        operator.casdm1s = dm1s_ref
+        operator.casdm2fr = [dm2_ref[None]]
+
+        tdm1rs, tcm2 = operator.make_tdm1s2c_sub([[c1]])
+
+        def make_cumulant(c):
+            dm1s = np.asarray(box.solver.make_rdm1s(c, norb, nelec))
+            dm2 = np.asarray(box.solver.make_rdm12(c, norb, nelec)[1])
+            dm1 = dm1s.sum(axis=0)
+            cumulant = dm2 - np.multiply.outer(dm1, dm1)
+            for spin in range(2):
+                cumulant += np.multiply.outer(
+                    dm1s[spin], dm1s[spin],
+                ).transpose(0, 3, 2, 1)
+            return dm1s, cumulant
+
+        step = 1e-5
+        c_plus = c0 + step * c1
+        c_plus /= np.linalg.norm(c_plus)
+        c_minus = c0 - step * c1
+        c_minus /= np.linalg.norm(c_minus)
+        dm1s_plus, cumulant_plus = make_cumulant(c_plus)
+        dm1s_minus, cumulant_minus = make_cumulant(c_minus)
+        dm1s_derivative = (dm1s_plus - dm1s_minus) / (2.0 * step)
+        cumulant_derivative = (
+            cumulant_plus - cumulant_minus
+        ) / (2.0 * step)
+
+        np.testing.assert_allclose(
+            tdm1rs[0], dm1s_derivative, atol=2e-9, rtol=2e-9,
+        )
+        np.testing.assert_allclose(
+            tcm2, cumulant_derivative, atol=2e-9, rtol=2e-9,
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()
