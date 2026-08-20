@@ -43,6 +43,20 @@ class _RecordingGradientUGG:
         return np.concatenate(([gorb[0, 1, 0]], *ci_flat))
 
 
+class _RecordingStepUGG:
+
+    nvar_tot = 3
+
+    def __init__(self, kappa, dci):
+        self.kappa = kappa
+        self.dci = dci
+        self.calls = []
+
+    def unpack(self, step):
+        self.calls.append(np.array(step, copy=True))
+        return self.kappa, self.dci
+
+
 def make_diagonal_operator():
     operator = KLASSCF_HessianOperator.__new__(KLASSCF_HessianOperator)
     boxes = [
@@ -73,6 +87,53 @@ def make_diagonal_operator():
 
 
 class KnownValues(unittest.TestCase):
+
+    def test_combined_update_dispatches_packed_orbital_and_ci_rotations(self):
+        operator = KLASSCF_HessianOperator.__new__(
+            KLASSCF_HessianOperator
+        )
+        kappa = np.array([[[0.0, -0.2j], [-0.2j, 0.0]]])
+        dci = [[np.array([0.1, -0.1j])]]
+        operator.ugg = _RecordingStepUGG(kappa, dci)
+        mo_result = np.array([[[1.0, 0.2j], [0.1, 0.9]]])
+        ci_result = [[np.array([0.8, 0.6j])]]
+        calls = []
+
+        def update_mo(actual):
+            calls.append(("mo", actual))
+            return mo_result
+
+        def update_ci(actual):
+            calls.append(("ci", actual))
+            return ci_result
+
+        operator._update_mo = update_mo
+        operator._update_ci = update_ci
+        step = np.array([[0.2 + 0.1j], [-0.3j], [0.4]])
+
+        mo1, ci1 = operator.update_mo_ci(step)
+
+        self.assertIs(mo1, mo_result)
+        self.assertIs(ci1, ci_result)
+        self.assertEqual([name for name, _ in calls], ["mo", "ci"])
+        self.assertIs(calls[0][1], kappa)
+        self.assertIs(calls[1][1], dci)
+        self.assertEqual(len(operator.ugg.calls), 1)
+        np.testing.assert_array_equal(operator.ugg.calls[0], step.reshape(-1))
+
+    def test_combined_update_rejects_packed_step_size_mismatch(self):
+        operator = KLASSCF_HessianOperator.__new__(
+            KLASSCF_HessianOperator
+        )
+        operator.ugg = type("UGG", (), {
+            "nvar_tot": 2,
+            "unpack": staticmethod(lambda step: self.fail(
+                "invalid step should not be unpacked"
+            )),
+        })()
+
+        with self.assertRaisesRegex(ValueError, "step_vector has shape"):
+            operator.update_mo_ci(np.zeros(3))
 
     def test_periodic_ci_update_rotates_complex_projected_tangents(self):
         operator = KLASSCF_HessianOperator.__new__(
