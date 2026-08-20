@@ -1626,6 +1626,52 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
             )
         return fock_response
 
+    def get_h1eff_response(self, tdm1rs):
+        """Build the effective one-electron response from other cells.
+
+        This linearizes the Coulomb/exchange part of the fragment projection.
+        For each output cell, its own transition-density contribution is
+        subtracted, leaving the different-cell CI response.
+        """
+        tdm1rs = np.asarray(tdm1rs)
+        _check_shape(
+            tdm1rs, (self.nroots, 2, self.ncastot, self.ncastot),
+            label="tdm1rs",
+        )
+
+        eri = self.eri_cas
+        v1rs = np.tensordot(
+            tdm1rs, eri, axes=((2, 3), (0, 1)),
+        )
+        v1rs += v1rs[:, ::-1]
+        v1rs -= np.tensordot(
+            tdm1rs, eri, axes=((2, 3), (2, 1)),
+        )
+
+        h1frs = []
+        for ifrag, norb in enumerate(self.ncas_sub):
+            i = int(np.sum(self.ncas_sub[:ifrag]))
+            j = i + int(norb)
+            dm1rs_i = tdm1rs[:, :, i:j, i:j]
+
+            v1rs_i = np.tensordot(
+                dm1rs_i,
+                eri[i:j, i:j, :, :],
+                axes=((2, 3), (0, 1)),
+            )
+            v1rs_i += v1rs_i[:, ::-1]
+            v1rs_i -= np.tensordot(
+                dm1rs_i,
+                eri[:, i:j, i:j, :],
+                axes=((2, 3), (2, 1)),
+            )
+
+            h1frs.append(
+                v1rs[:, :, i:j, i:j] - v1rs_i[:, :, i:j, i:j]
+            )
+
+        return h1frs
+
     @property
     def shape(self):
         """tuple: Shape of the combined orbital/CI Hessian operator."""
