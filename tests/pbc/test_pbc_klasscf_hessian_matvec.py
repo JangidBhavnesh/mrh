@@ -88,9 +88,12 @@ def _set_toy_matvec_pipeline(operator):
 
     operator.make_tdm1s2c_sub = make_tdm1s2c_sub
 
-    def orbital_ci_response(tdm1rs, tcm2):
+    def orbital_ci_response(
+            tdm1rs, tcm2, tdm1s_block=None, veff_ci=None):
         assert tdm1rs == "tdm"
         assert tcm2 == "tcm2"
+        assert tdm1s_block == "tdm-block"
+        assert veff_ci == "veff"
         value = operator._last_ci1[0][0][0, 0]
         response = np.zeros((1, 2, 2), dtype=np.complex128)
         response[0, 1, 0] = 2.0 * value
@@ -98,7 +101,11 @@ def _set_toy_matvec_pipeline(operator):
         return response
 
     operator._orbital_ci_hessian_response = orbital_ci_response
-    operator.get_h1eff_response = lambda tdm: "h1-response"
+    operator._transition_dm1s_to_block = lambda tdm: "tdm-block"
+    operator._get_ci_veff_response = lambda tdm: "veff"
+    operator.get_h1eff_response = (
+        lambda tdm, tdm1s_block=None, veff_block=None: "h1-response"
+    )
     operator.ci_response_diag = lambda ci1: [
         [2.0 * trial for trial in trial_r] for trial_r in ci1
     ]
