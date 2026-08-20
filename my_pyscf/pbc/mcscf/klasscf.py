@@ -2051,6 +2051,82 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
             mo1[k] = mo_coeff[k] @ linalg.expm(kappa[k] / 2.0)
         return mo1
 
+    def _update_ci(self, dci):
+        """Apply complex CI tangent rotations on normalized CI spheres.
+
+        The component of each trial vector parallel to its reference is
+        removed with the complex inner product. The remaining tangent is
+        applied through the same great-circle update as molecular LASSCF,
+        generalized here to complex determinant coefficients.
+        """
+        if len(dci) != len(self.ci):
+            msg = (
+                f"CI step contains {len(dci)} cells; expected "
+                f"{len(self.ci)}"
+            )
+            raise ValueError(msg)
+
+        ci1 = []
+        for ifrag, (ci0_r, dci_r) in enumerate(zip(self.ci, dci)):
+            if len(dci_r) != len(ci0_r):
+                msg = (
+                    f"CI step for cell {ifrag} contains {len(dci_r)} roots; "
+                    f"expected {len(ci0_r)}"
+                )
+                raise ValueError(msg)
+            ci1_r = []
+            for iroot, (ci0, dc) in enumerate(zip(ci0_r, dci_r)):
+                ci0 = np.asarray(ci0)
+                dc = np.asarray(dc)
+                _check_shape(
+                    dc, ci0.shape,
+                    label=f"dci_{ifrag}_{iroot}",
+                )
+                if not np.all(np.isfinite(ci0)):
+                    msg = (
+                        f"reference CI vector for cell {ifrag}, root "
+                        f"{iroot} must contain only finite values"
+                    )
+                    raise ValueError(msg)
+                if not np.all(np.isfinite(dc)):
+                    msg = (
+                        f"CI step for cell {ifrag}, root {iroot} must "
+                        "contain only finite values"
+                    )
+                    raise ValueError(msg)
+
+                dtype = np.result_type(ci0.dtype, dc.dtype)
+                reference = np.asarray(ci0, dtype=dtype).reshape(-1)
+                tangent = np.asarray(dc, dtype=dtype).reshape(-1)
+                reference_norm = np.linalg.norm(reference)
+                if not np.isclose(
+                        reference_norm, 1.0, atol=1e-8, rtol=1e-8):
+                    msg = (
+                        f"reference CI vector for cell {ifrag}, root "
+                        f"{iroot} has norm {reference_norm}; expected 1"
+                    )
+                    raise ValueError(msg)
+
+                tangent = tangent - reference * np.vdot(
+                    reference, tangent,
+                )
+                tangent_norm = np.linalg.norm(tangent)
+                c1 = (
+                    np.cos(tangent_norm) * reference
+                    + np.sinc(tangent_norm / np.pi) * tangent
+                )
+                c1_norm = np.linalg.norm(c1)
+                if not np.isfinite(c1_norm) or c1_norm < 1e-14:
+                    msg = (
+                        f"CI rotation failed for cell {ifrag}, root "
+                        f"{iroot}"
+                    )
+                    raise ValueError(msg)
+                c1 = (c1 / c1_norm).reshape(ci0.shape)
+                ci1_r.append(c1)
+            ci1.append(ci1_r)
+        return ci1
+
     @property
     def shape(self):
         """tuple: Shape of the combined orbital/CI Hessian operator."""
