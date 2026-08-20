@@ -12,6 +12,7 @@ from mrh.my_pyscf.pbc.mcscf.klas_ao2mo import _ERIS
 from mrh.my_pyscf.pbc.mcscf.klasci import (
     PBCLASCINoSymm,
     PBCLASCITransSymm,
+    _convert_h1e_mo_k_to_wann,
 )
 from mrh.my_pyscf.pbc.mcscf.mc1step import _get_casdm2_kpts
 from mrh.my_pyscf.pbc.util.wannier import get_wannier_orbs
@@ -1654,12 +1655,15 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
             )
         return fock_response
 
-    def get_h1eff_response(self, tdm1rs):
+    def get_h1eff_response(
+            self, tdm1rs, tdm1s_block=None, veff_block=None):
         """Build the effective one-electron response from other cells.
 
-        This linearizes the Coulomb/exchange part of the fragment projection.
-        For each output cell, its own transition-density contribution is
-        subtracted, leaving the different-cell CI response.
+        This follows :func:`pbc.mcscf.klasci.h1e_for_las` term by term.  The
+        state-averaged transition density first passes through the periodic
+        AO JK builder.  Root-specific deviations from that average and the
+        final self-fragment subtraction are then contracted with the Wannier
+        active-space ERIs.
         """
         tdm1rs = np.asarray(tdm1rs)
         _check_shape(
@@ -1667,35 +1671,53 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
             label="tdm1rs",
         )
 
+        active = slice(self.ncore, self.nocc)
+        if tdm1s_block is None:
+            tdm1s_block = self._transition_dm1s_to_block(tdm1rs)
+        if veff_block is None:
+            veff_block = self._get_ci_veff_response(tdm1s_block)
+        veff_wannier = np.asarray([
+            _convert_h1e_mo_k_to_wann(
+                self.las._scf, self.kmesh,
+                veff_block[spin, :, active, active],
+            )
+            for spin in range(2)
+        ])
+
+        weights = np.asarray(self.weights)
+        tdm1s_average = np.einsum(
+            "r,rspq->spq", weights, tdm1rs, optimize=True,
+        )
+        tdm1rs_delta = tdm1rs - tdm1s_average[None]
         eri = self.eri_cas
         v1rs = np.tensordot(
-            tdm1rs, eri, axes=((2, 3), (0, 1)),
+            tdm1rs_delta, eri, axes=((2, 3), (2, 3)),
         )
         v1rs += v1rs[:, ::-1]
         v1rs -= np.tensordot(
-            tdm1rs, eri, axes=((2, 3), (2, 1)),
+            tdm1rs_delta, eri, axes=((2, 3), (2, 1)),
         )
+        v1rs += veff_wannier[None]
 
         h1frs = []
         for ifrag, norb in enumerate(self.ncas_sub):
             i = int(np.sum(self.ncas_sub[:ifrag]))
             j = i + int(norb)
             dm1rs_i = tdm1rs[:, :, i:j, i:j]
+            h2_i = eri[i:j, i:j, i:j, i:j]
 
             v1rs_i = np.tensordot(
-                dm1rs_i,
-                eri[i:j, i:j, :, :],
-                axes=((2, 3), (0, 1)),
+                dm1rs_i, h2_i,
+                axes=((2, 3), (2, 3)),
             )
             v1rs_i += v1rs_i[:, ::-1]
             v1rs_i -= np.tensordot(
-                dm1rs_i,
-                eri[:, i:j, i:j, :],
+                dm1rs_i, h2_i,
                 axes=((2, 3), (2, 1)),
             )
 
             h1frs.append(
-                v1rs[:, :, i:j, i:j] - v1rs_i[:, :, i:j, i:j]
+                v1rs[:, :, i:j, i:j] - v1rs_i
             )
 
         return h1frs

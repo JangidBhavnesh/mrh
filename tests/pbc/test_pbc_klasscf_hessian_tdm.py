@@ -294,13 +294,19 @@ class KnownValues(unittest.TestCase):
             tcm2, cumulant_derivative, atol=2e-9, rtol=2e-9,
         )
 
-    def test_h1eff_response_keeps_only_other_fragment_densities(self):
+    def test_h1eff_response_follows_periodic_las_projection(self):
         operator = KLASSCF_HessianOperator.__new__(
             KLASSCF_HessianOperator
         )
         operator.nroots = 2
         operator.ncas_sub = np.array([1, 2])
         operator.ncastot = 3
+        operator.ncore = 0
+        operator.nocc = 3
+        operator.nkpts = 1
+        operator.kmesh = (1, 1, 1)
+        operator.weights = np.array([0.25, 0.75])
+        operator.las = type("FakeLAS", (), {"_scf": object()})()
         rng = np.random.default_rng(103)
         operator.eri_cas = (
             rng.standard_normal((3,) * 4)
@@ -317,32 +323,47 @@ class KnownValues(unittest.TestCase):
                 block + block.conj().transpose(0, 1, 3, 2)
             )
 
-        actual = operator.get_h1eff_response(tdm1rs)
+        veff_wannier = (
+            rng.standard_normal((2, 3, 3))
+            + 1j * rng.standard_normal((2, 3, 3))
+        )
+        operator._transition_dm1s_to_block = lambda value: np.zeros(
+            (2, 1, 3, 3), dtype=value.dtype,
+        )
+        operator._get_ci_veff_response = lambda value: (
+            veff_wannier[:, None]
+        )
+        with patch.object(
+                klasscf, "_convert_h1e_mo_k_to_wann",
+                side_effect=lambda scf, kmesh, value: value[0]):
+            actual = operator.get_h1eff_response(tdm1rs)
 
+        average = np.einsum(
+            "r,rspq->spq", operator.weights, tdm1rs,
+        )
+        delta = tdm1rs - average[None]
+        response_all = np.tensordot(
+            delta, operator.eri_cas, axes=((2, 3), (2, 3)),
+        )
+        response_all += response_all[:, ::-1]
+        response_all -= np.tensordot(
+            delta, operator.eri_cas, axes=((2, 3), (2, 1)),
+        )
+        response_all += veff_wannier[None]
         expected = []
-        for target, (i, j) in enumerate(zip(
-                offsets[:-1], offsets[1:])):
-            response = np.zeros(
-                (2, 2, j - i, j - i), dtype=np.complex128,
+        for i, j in zip(offsets[:-1], offsets[1:]):
+            dm1rs = tdm1rs[:, :, i:j, i:j]
+            h2 = operator.eri_cas[i:j, i:j, i:j, i:j]
+            response_self = np.tensordot(
+                dm1rs, h2, axes=((2, 3), (2, 3)),
             )
-            for source, (k, l) in enumerate(zip(
-                    offsets[:-1], offsets[1:])):
-                if source == target:
-                    continue
-                dm1rs = tdm1rs[:, :, k:l, k:l]
-                coulomb = np.tensordot(
-                    dm1rs,
-                    operator.eri_cas[k:l, k:l, i:j, i:j],
-                    axes=((2, 3), (0, 1)),
-                )
-                coulomb += coulomb[:, ::-1]
-                exchange = np.tensordot(
-                    dm1rs,
-                    operator.eri_cas[i:j, k:l, k:l, i:j],
-                    axes=((2, 3), (2, 1)),
-                )
-                response += coulomb - exchange
-            expected.append(response)
+            response_self += response_self[:, ::-1]
+            response_self -= np.tensordot(
+                dm1rs, h2, axes=((2, 3), (2, 1)),
+            )
+            expected.append(
+                response_all[:, :, i:j, i:j] - response_self
+            )
 
         self.assertEqual(
             [response.shape for response in actual],
