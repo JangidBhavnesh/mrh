@@ -2,6 +2,8 @@
 
 import numpy as np
 
+from mrh.my_pyscf.pbc.fci import cplx_csf_helper
+from mrh.my_pyscf.pbc.util.wannier import get_wannier_orbs
 
 # Author: Bhavnesh Jangid
 
@@ -288,5 +290,338 @@ class ActiveActiveRotationMap:
         )
         kappa_active[self.block_pair_idx] = self.basis @ coordinates
         return kappa_active - kappa_active.conj().transpose(0, 2, 1)
+
+
+class KLASSCF_UnitaryGroupGenerators:
+    """Pack and unpack the k-LASSCF orbital and CI variables.
+
+    Orbital variables are ordered in two sections. The ordinary nonredundant
+    core-active, core-virtual, and active-virtual rotations are stored first,
+    grouped by k-point. They are followed by the independent active-active
+    rotations obtained from :class:`ActiveActiveRotationMap`. CI variables
+    come last, ordered by fragment and root and represented in the complex CSF
+    basis.
+
+    Args:
+        klas : object
+            Periodic LAS object supplying the orbital-space dimensions,
+            fragment solvers, electron counts, and optional frozen variables.
+        mo_coeff : ndarray of shape (nkpts, nao, nmo), optional
+            Bloch-MO coefficients. Defaults to ``klas.mo_coeff``.
+        ci : sequence, optional
+            Nested ``[fragment][root]`` determinant-basis CI vectors. Defaults
+            to ``klas.ci``.
+        mo_phase : ndarray of shape (nkpts, ncas, nkpts*ncas), optional
+            Bloch-active to Wannier-active transformation. It defaults to
+            ``klas.mo_phase`` when available and is otherwise constructed from
+            the active MOs.
+
+    Attributes:
+        uniq_orb_idx : ndarray of bool
+            Mask selecting ordinary nonredundant orbital rotations at every
+            k-point.
+        active_active_map : ActiveActiveRotationMap
+            Projection defining the independent inter-fragment active-active
+            rotations.
+        ci_transformers : list
+            CSF transformers corresponding to each fragment and CI root.
+    """
+
+    def __init__(self, klas, mo_coeff=None, ci=None, mo_phase=None):
+        if mo_coeff is None:
+            mo_coeff = klas.mo_coeff
+        if ci is None:
+            ci = klas.ci
+        mo_coeff = np.asarray(mo_coeff)
+        self.nkpts = len(klas.kpts)
+        self.nmo = mo_coeff.shape[-1]
+
+        if mo_coeff.ndim != 3:
+            msg = (
+                "mo_coeff must have shape (nkpts, nao, nmo); "
+                f"got {mo_coeff.shape}"
+            )
+            raise ValueError(msg)
+
+        _check_shape(
+            mo_coeff,
+            (self.nkpts, mo_coeff.shape[1], mo_coeff.shape[2]),
+            label="mo_coeff",
+        )
+
+        ncore = klas.ncore
+        ncas = klas.ncas
+        self.ncore = ncore
+        nocc = ncore + ncas
+        orb_idx = np.zeros((self.nmo, self.nmo), dtype=bool)
+        orb_idx[ncore:nocc, :ncore] = True
+        orb_idx[nocc:, :nocc] = True
+        nonfrozen = np.ones(self.nmo, dtype=bool)
+
+        # Keep the molecular frozen-orbital convention. This path has not yet
+        # been exercised by the periodic optimizer.
+        frozen = getattr(klas, "frozen", None)
+        if frozen is not None:
+            if isinstance(frozen, (int, np.integer)):
+                orb_idx[:frozen, :] = False
+                orb_idx[:, :frozen] = False
+                nonfrozen[:frozen] = False
+            else:
+                frozen = np.asarray(frozen)
+                orb_idx[frozen, :] = False
+                orb_idx[:, frozen] = False
+                nonfrozen[frozen] = False
+
+        self.uniq_orb_idx = np.broadcast_to(
+            orb_idx, (self.nkpts, self.nmo, self.nmo),
+        ).copy()
+        if mo_phase is None:
+            mo_phase = getattr(klas, "mo_phase", None)
+        if mo_phase is None:
+            mo_act_kpts = mo_coeff[:, :, ncore:nocc]
+            mo_phase = get_wannier_orbs(
+                klas._scf, klas.kmesh, mo_act_kpts,
+            )[-1]
+        self.mo_phase = np.asarray(mo_phase)
+        _check_shape(
+            self.mo_phase, (self.nkpts, ncas, self.nkpts * ncas),
+            label="mo_phase",
+        )
+
+        active_nonfrozen = nonfrozen[ncore:nocc]
+        active_pair_mask = np.broadcast_to(
+            np.tril(np.ones((ncas, ncas), dtype=bool), -1),
+            (self.nkpts, ncas, ncas),
+        ).copy()
+        active_pair_mask &= active_nonfrozen[None, :, None]
+        active_pair_mask &= active_nonfrozen[None, None, :]
+        self.active_active_map = ActiveActiveRotationMap(
+            self.mo_phase, klas.ncas_sub,
+            block_pair_mask=active_pair_mask,
+        )
+        self.frozen_ci = set(getattr(klas, "frozen_ci", None) or [])
+        self.ci = ci
+        self.ci_transformers = []
+        for ifrag, (fcibox, norb, nelec, ci_r) in enumerate(zip(
+                klas.fciboxes, klas.ncas_sub, klas.nelecas_sub, ci)):
+            if len(fcibox.fcisolvers) != len(ci_r):
+                msg = (
+                    f"cell {ifrag} has {len(fcibox.fcisolvers)} solvers for "
+                    f"{len(ci_r)} CI roots"
+                )
+                raise ValueError(msg)
+            transformers = []
+            for solver in fcibox.fcisolvers:
+                solver.norb = norb
+                solver.nelec = fcibox._get_nelec(solver, nelec)
+                solver.check_transformer_cache()
+                transformers.append(solver.transformer)
+            self.ci_transformers.append(transformers)
+
+    @property
+    def nvar_orb_external(self):
+        """int: Number of ordinary block-diagonal orbital variables."""
+        return int(np.count_nonzero(self.uniq_orb_idx))
+
+    @property
+    def nvar_orb_active_active(self):
+        """int: Number of projected active-active orbital variables."""
+        return self.active_active_map.nvar
+
+    @property
+    def nvar_orb(self):
+        """int: Total number of independent orbital variables."""
+        return self.nvar_orb_external + self.nvar_orb_active_active
+
+    @property
+    def ncsf_sub(self):
+        """ndarray: Numbers of CSFs for the nonfrozen fragment roots."""
+        return np.asarray([
+            [transformer.ncsf for transformer in transformers]
+            for ifrag, transformers in enumerate(self.ci_transformers)
+            if ifrag not in self.frozen_ci
+        ], dtype=int)
+
+    @property
+    def nvar_ci(self):
+        """int: Total number of nonfrozen complex CI variables."""
+        return int(self.ncsf_sub.sum())
+
+    @property
+    def nvar_tot(self):
+        """int: Total number of orbital and CI variables."""
+        return self.nvar_orb + self.nvar_ci
+
+    def get_gx_idx(self):
+        """Return the mask for orbital variables excluded from optimization.
+
+        Returns:
+            ndarray of bool, shape (nkpts, nmo, nmo)
+                An all-false mask because k-LASSCF currently optimizes every
+                orbital variable selected by this generator.
+        """
+        return np.zeros_like(self.uniq_orb_idx)
+
+    def pack_orb(self, kappa):
+        """Pack Bloch orbital rotations into independent coordinates.
+
+        Args:
+            kappa : ndarray of shape (nkpts, nmo, nmo)
+                Orbital-rotation matrices. The selected lower-pair entries are
+                read; redundant entries are ignored.
+
+        Returns:
+            ndarray of shape (nvar_orb,)
+                Ordinary orbital variables followed by projected
+                active-active variables.
+        """
+        kappa = np.asarray(kappa)
+        _check_shape(kappa, (self.nkpts, self.nmo, self.nmo), label="kappa")
+        x_external = np.asarray(kappa[self.uniq_orb_idx]).reshape(-1)
+        active = slice(
+            self.ncore, self.ncore + self.active_active_map.ncas,
+        )
+        x_active_active = self.active_active_map.pack(
+            kappa[:, active, active],
+        )
+        return np.concatenate((x_external, x_active_active))
+
+    def unpack_orb(self, x_orb):
+        """Unpack independent coordinates as anti-Hermitian rotations.
+
+        Args:
+            x_orb : array-like of shape (nvar_orb,)
+                Packed complex orbital coordinates.
+
+        Returns:
+            ndarray of shape (nkpts, nmo, nmo)
+                Anti-Hermitian orbital-rotation matrix for each k-point.
+        """
+        x_orb = np.asarray(x_orb).reshape(-1)
+        if x_orb.size != self.nvar_orb:
+            msg = (
+                f"orbital vector has size {x_orb.size}; "
+                f"expected {self.nvar_orb}"
+            )
+            raise ValueError(msg)
+        dtype = np.result_type(
+            x_orb.dtype, self.active_active_map.basis.dtype,
+        )
+        kappa = np.zeros(
+            (self.nkpts, self.nmo, self.nmo), dtype=dtype,
+        )
+        nvar_external = self.nvar_orb_external
+        kappa[self.uniq_orb_idx] = x_orb[:nvar_external]
+        kappa -= kappa.conj().transpose(0, 2, 1)
+        active = slice(
+            self.ncore, self.ncore + self.active_active_map.ncas,
+        )
+        kappa[:, active, active] += self.active_active_map.unpack(
+            x_orb[nvar_external:],
+        )
+        return kappa
+
+    def pack_ci(self, ci):
+        """Pack determinant-basis CI vectors in the complex CSF basis.
+
+        Args:
+            ci : sequence
+                Nested ``[fragment][root]`` determinant-basis CI vectors.
+
+        Returns:
+            ndarray of shape (nvar_ci,)
+                Flattened CSF coefficients for all nonfrozen fragments.
+        """
+        if len(ci) != len(self.ci_transformers):
+            msg = "CI input must contain one entry per cell"
+            raise ValueError(msg)
+        vectors = []
+        for ifrag, (transformers, ci_r) in enumerate(zip(
+                self.ci_transformers, ci)):
+            if len(ci_r) != len(transformers):
+                msg = (
+                    f"cell {ifrag} has {len(ci_r)} CI vectors; "
+                    f"expected {len(transformers)}"
+                )
+                raise ValueError(msg)
+            if ifrag in self.frozen_ci:
+                continue
+            for transformer, c in zip(transformers, ci_r):
+                c_csf = cplx_csf_helper.vec_det2csf_cplx(
+                    transformer, c, normalize=False,
+                )
+                vectors.append(np.asarray(c_csf).reshape(-1))
+        if not vectors:
+            return np.empty(0, dtype=np.complex128)
+        return np.concatenate(vectors)
+
+    def unpack_ci(self, x_ci):
+        """Unpack complex CSF coordinates into determinant-basis vectors.
+
+        Frozen fragments are represented by zero response vectors with the
+        same shapes as their reference CI vectors.
+
+        Args:
+            x_ci : array-like of shape (nvar_ci,)
+                Packed CSF coefficients for the nonfrozen fragments.
+
+        Returns:
+            list
+                Nested ``[fragment][root]`` determinant-basis CI responses.
+        """
+        x_ci = np.asarray(x_ci).reshape(-1)
+        if x_ci.size != self.nvar_ci:
+            msg = (
+                f"CI vector has size {x_ci.size}; expected {self.nvar_ci}"
+            )
+            raise ValueError(msg)
+        ci = []
+        offset = 0
+        for ifrag, (transformers, ci_ref_r) in enumerate(zip(
+                self.ci_transformers, self.ci)):
+            ci_r = []
+            for transformer, c_ref in zip(transformers, ci_ref_r):
+                if ifrag in self.frozen_ci:
+                    dtype = np.result_type(c_ref, x_ci.dtype)
+                    ci_r.append(np.zeros(np.shape(c_ref), dtype=dtype))
+                    continue
+                ncsf = transformer.ncsf
+                c = cplx_csf_helper.vec_csf2det_cplx(
+                    transformer, x_ci[offset:offset + ncsf],
+                    normalize=False,
+                )
+                ci_r.append(np.asarray(c).reshape(np.shape(c_ref)))
+                offset += ncsf
+            ci.append(ci_r)
+        if offset != x_ci.size:
+            msg = (
+                f"consumed {offset} CI variables from a vector of size "
+                f"{x_ci.size}"
+            )
+            raise ValueError(msg)
+        return ci
+
+    def pack(self, kappa, ci):
+        """Pack orbital and CI variables into one complex vector."""
+        x_orb = self.pack_orb(kappa)
+        x_ci = self.pack_ci(ci)
+        dtype = np.result_type(x_orb.dtype, x_ci.dtype)
+        x = np.empty(self.nvar_tot, dtype=dtype)
+        x[:self.nvar_orb] = x_orb
+        x[self.nvar_orb:] = x_ci
+        return x
+
+    def unpack(self, x):
+        """Unpack a combined vector into orbital and CI variables."""
+        x = np.asarray(x).reshape(-1)
+        if x.size != self.nvar_tot:
+            msg = (
+                f"combined vector has size {x.size}; expected {self.nvar_tot}"
+            )
+            raise ValueError(msg)
+        return (
+            self.unpack_orb(x[:self.nvar_orb]),
+            self.unpack_ci(x[self.nvar_orb:]),
+        )
 
 
