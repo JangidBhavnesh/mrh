@@ -384,6 +384,92 @@ class KnownValues(unittest.TestCase):
                 ValueError, "h1frs_response contains 1 cells; expected 2"):
             operator.ci_response_offdiag([np.zeros(1)])
 
+    def test_ci_hessian_response_builds_densities_and_combines_blocks(self):
+        operator = KLASSCF_HessianOperator.__new__(
+            KLASSCF_HessianOperator
+        )
+        ci1 = [
+            [np.array([0.2 + 0.1j]), np.array([-0.4j])],
+            [np.array([0.3, -0.2j])],
+        ]
+        tdm1rs = [object(), object()]
+        h1frs_response = [object(), object()]
+        diagonal = [
+            [np.array([0.7 - 0.1j]), np.array([0.2 + 0.5j])],
+            [np.array([-0.3j, 0.4])],
+        ]
+        offdiagonal = [
+            [np.array([-0.2 + 0.4j]), np.array([0.6 - 0.1j])],
+            [np.array([0.1 + 0.2j, -0.5j])],
+        ]
+        calls = []
+
+        def make_tdm(actual_ci1):
+            calls.append(("tdm", actual_ci1))
+            return tdm1rs
+
+        def get_h1eff(actual_tdm1rs):
+            calls.append(("h1eff", actual_tdm1rs))
+            return h1frs_response
+
+        def diagonal_response(actual_ci1):
+            calls.append(("diag", actual_ci1))
+            return diagonal
+
+        def offdiagonal_response(actual_h1frs):
+            calls.append(("offdiag", actual_h1frs))
+            return offdiagonal
+
+        operator.make_tdm1s_sub = make_tdm
+        operator.get_h1eff_response = get_h1eff
+        operator.ci_response_diag = diagonal_response
+        operator.ci_response_offdiag = offdiagonal_response
+
+        actual = operator._ci_hessian_response(ci1)
+
+        self.assertEqual(
+            [name for name, _ in calls],
+            ["tdm", "h1eff", "diag", "offdiag"],
+        )
+        self.assertIs(calls[0][1], ci1)
+        self.assertIs(calls[1][1], tdm1rs)
+        self.assertIs(calls[2][1], ci1)
+        self.assertIs(calls[3][1], h1frs_response)
+        for actual_r, diagonal_r, offdiagonal_r in zip(
+                actual, diagonal, offdiagonal):
+            for result, diag, offdiag in zip(
+                    actual_r, diagonal_r, offdiagonal_r):
+                np.testing.assert_allclose(result, diag + offdiag)
+
+    def test_ci_hessian_response_reuses_supplied_densities(self):
+        operator = KLASSCF_HessianOperator.__new__(
+            KLASSCF_HessianOperator
+        )
+        ci1 = [[np.array([0.2j])]]
+        tdm1rs = [object()]
+        h1frs_response = [object()]
+        density_calls = []
+
+        operator.make_tdm1s_sub = lambda actual_ci1: self.fail(
+            "supplied transition densities should be reused"
+        )
+
+        def get_h1eff(actual_tdm1rs):
+            density_calls.append(actual_tdm1rs)
+            return h1frs_response
+
+        operator.get_h1eff_response = get_h1eff
+        operator.ci_response_diag = lambda actual_ci1: [[np.array([0.3])]]
+        operator.ci_response_offdiag = (
+            lambda actual_h1frs: [[np.array([-0.1j])]]
+        )
+
+        actual = operator._ci_hessian_response(ci1, tdm1rs=tdm1rs)
+
+        self.assertEqual(len(density_calls), 1)
+        self.assertIs(density_calls[0], tdm1rs)
+        np.testing.assert_allclose(actual[0][0], [0.3 - 0.1j])
+
     def test_hci_diag_packs_nonfrozen_fragments_in_layout_order(self):
         operator, boxes = make_diagonal_operator()
 
