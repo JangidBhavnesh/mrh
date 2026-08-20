@@ -2161,6 +2161,22 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
         kappa, dci = self.ugg.unpack(x)
         return self._update_mo(kappa), self._update_ci(dci)
 
+    def update_mo_ci_eri(self, x, h2eff_sub=None):
+        """Apply a rotation and rebuild Wannier active-space integrals.
+
+        ``h2eff_sub`` is accepted for compatibility with the molecular
+        optimizer interface. Periodic active-space integrals cannot generally
+        be updated from that old tensor after external orbital rotations, so
+        they are recomputed from the updated block MOs. The disk-backed ERI
+        blocks are rebuilt when the next periodic Hessian is constructed.
+        """
+        mo1, ci1 = self.update_mo_ci(x)
+        h2eff1 = np.asarray(self.las.get_h2cas(mo1))
+        _check_shape(
+            h2eff1, (self.ncastot,) * 4, label="updated_h2eff_sub",
+        )
+        return mo1, ci1, h2eff1
+
     @property
     def shape(self):
         """tuple: Shape of the combined orbital/CI Hessian operator."""
