@@ -3,6 +3,7 @@
 import sys
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 from pyscf import lib
@@ -21,6 +22,21 @@ class FakeFCIBox:
 
 
 class KnownValuesKLASSCFKeyframe(unittest.TestCase):
+
+    def test_optimizer_metric_accepts_only_one_unit_weight(self):
+        ugg = SimpleNamespace(nvar_tot=3)
+        metric = klasscf._optimizer_metric(
+            SimpleNamespace(weights=[1.0], nroots=1), ugg,
+        )
+        np.testing.assert_allclose(metric, np.ones(3))
+        with self.assertRaisesRegex(NotImplementedError, "state-averaged"):
+            klasscf._optimizer_metric(
+                SimpleNamespace(weights=[0.5, 0.5], nroots=2), ugg,
+            )
+        with self.assertRaisesRegex(ValueError, "weights has size"):
+            klasscf._optimizer_metric(
+                SimpleNamespace(weights=[1.0], nroots=2), ugg,
+            )
 
     def test_missing_ci_guess_detects_nested_none(self):
         self.assertTrue(klasscf._ci_guess_is_missing(None))
@@ -127,6 +143,67 @@ class KnownValuesKLASSCFKeyframe(unittest.TestCase):
         np.testing.assert_allclose(energies, [-0.4, 0.0])
         self.assertEqual([len(box.calls) for box in boxes], [1, 0])
         self.assertIs(ci1[1], ci0[1])
+
+    def test_fixed_ci_energies_preserve_root_and_cell_normalization(self):
+        boxes = [
+            SimpleNamespace(fcisolvers=["a0", "a1"]),
+            SimpleNamespace(fcisolvers=["b0", "b1"]),
+        ]
+
+        class FakeLAS:
+            nroots = 2
+            nfrags = 2
+            nkpts = 2
+            ncas = 2
+            ncore = 0
+            ncas_sub = [1, 1]
+            nelecas_sub = [(1, 0), (0, 1)]
+            weights = np.array([0.25, 0.75])
+            fciboxes = boxes
+            stdout = sys.stdout
+
+            def h1e_for_cas(self, **kwargs):
+                return np.ones((2, 2)), 4.0
+
+        ci = [
+            [np.array([1.0]), np.array([2.0])],
+            [np.array([3.0]), np.array([4.0])],
+        ]
+        active_energies = iter([2.0, 6.0])
+        solver_calls = []
+
+        class FakeProductSolver:
+            def __init__(self, fcisolvers, **kwargs):
+                solver_calls.append((fcisolvers, kwargs))
+
+            def energy_elec(self, *args, **kwargs):
+                return next(active_energies)
+
+        with patch.object(
+                klasscf, "ImpureProductStateFCISolver", FakeProductSolver):
+            e_tot, e_states, e_cas, e_lexc = klasscf._fixed_ci_energies(
+                FakeLAS(), np.ones((1, 2, 2)), ci,
+                np.ones((2, 2, 2, 2)),
+            )
+
+        np.testing.assert_allclose(e_cas, [1.0, 3.0])
+        np.testing.assert_allclose(e_states, [3.0, 5.0])
+        np.testing.assert_allclose(e_tot, 4.5)
+        self.assertEqual(solver_calls[0][0], ["a0", "b0"])
+        self.assertEqual(solver_calls[1][0], ["a1", "b1"])
+        self.assertEqual(len(e_lexc), 2)
+        self.assertEqual([len(roots) for roots in e_lexc], [2, 2])
+
+    def test_mo_energies_are_spin_averaged_fock_diagonals(self):
+        h1s = np.array([
+            [[[1.0, 2.0], [3.0, 4.0]]],
+            [[[5.0, 6.0], [7.0, 8.0]]],
+        ])
+        actual = klasscf._get_mo_energy(SimpleNamespace(h1s=h1s))
+        np.testing.assert_allclose(actual, [[3.0, 6.0]])
+        self.assertIsNone(
+            klasscf._get_mo_energy(SimpleNamespace(h1s=None))
+        )
 
 
 if __name__ == "__main__":
