@@ -274,6 +274,78 @@ class KnownValues(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "j_pc has shape"):
             operator._get_Horb_diag_external()
 
+    def test_active_active_hessian_keeps_direct_and_conjugate_blocks(self):
+        operator = KLASSCF_HessianOperator.__new__(
+            KLASSCF_HessianOperator
+        )
+        operator.ugg = type("UGG", (), {
+            "nvar_orb_active_active": 2,
+        })()
+        operator.mo_coeff = np.zeros((1, 1, 1), dtype=np.complex128)
+        operator._Horb_active_active_cache = None
+        direct = np.array([
+            [1.2 + 0.1j, -0.3j],
+            [0.4 - 0.2j, 0.7],
+        ])
+        conjugate = np.array([
+            [0.25, 0.1 + 0.15j],
+            [-0.2j, -0.35 + 0.05j],
+        ])
+        calls = []
+
+        def apply(coordinates):
+            calls.append(np.array(coordinates, copy=True))
+            return (
+                direct @ coordinates
+                + conjugate @ coordinates.conj()
+            )
+
+        operator._apply_Horb_active_active = apply
+
+        actual_direct, actual_conjugate = (
+            operator._get_Horb_active_active()
+        )
+
+        np.testing.assert_allclose(actual_direct, direct)
+        np.testing.assert_allclose(actual_conjugate, conjugate)
+        np.testing.assert_allclose(calls, [
+            [1.0, 0.0], [1.0j, 0.0],
+            [0.0, 1.0], [0.0, 1.0j],
+        ])
+        probe = np.array([0.2 - 0.4j, -0.1 + 0.3j])
+        np.testing.assert_allclose(
+            actual_direct @ probe + actual_conjugate @ probe.conj(),
+            direct @ probe + conjugate @ probe.conj(),
+        )
+
+        actual_direct[0, 0] = 999.0
+        cached_direct, cached_conjugate = (
+            operator._get_Horb_active_active()
+        )
+        np.testing.assert_allclose(cached_direct, direct)
+        np.testing.assert_allclose(cached_conjugate, conjugate)
+        self.assertEqual(len(calls), 4)
+
+    def test_active_active_hessian_handles_empty_projected_space(self):
+        operator = KLASSCF_HessianOperator.__new__(
+            KLASSCF_HessianOperator
+        )
+        operator.ugg = type("UGG", (), {
+            "nvar_orb_active_active": 0,
+        })()
+        operator.mo_coeff = np.zeros((1, 1, 1))
+        operator._Horb_active_active_cache = None
+        operator._apply_Horb_active_active = lambda vector: self.fail(
+            "active-active response should not be evaluated"
+        )
+
+        direct, conjugate = operator._get_Horb_active_active()
+
+        self.assertEqual(direct.shape, (0, 0))
+        self.assertEqual(conjugate.shape, (0, 0))
+        self.assertEqual(direct.dtype, np.dtype(np.complex128))
+        self.assertEqual(conjugate.dtype, np.dtype(np.complex128))
+
     def test_orbital_hdiag_handles_an_empty_orbital_space(self):
         operator = KLASSCF_HessianOperator.__new__(
             KLASSCF_HessianOperator
