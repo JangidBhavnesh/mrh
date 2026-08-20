@@ -3549,35 +3549,24 @@ class KLASSCF_TransSymmHessianOperator(KLASSCF_HessianOperator):
             tdm1rs[:, :, i:j, i:j] = tdm1_ref
         return tdm1rs
 
-    def get_h1eff_response(self, tdm1rs):
+    def get_h1eff_response(
+            self, tdm1rs, tdm1s_block=None, veff_block=None):
         """Build one translated effective-Hamiltonian response and copy it."""
-        tdm1rs = np.asarray(tdm1rs)
-        _check_shape(
-            tdm1rs, (self.nroots, 2, self.ncastot, self.ncastot),
-            label="tdm1rs"
+        h1frs = KLASSCF_HessianOperator.get_h1eff_response(
+            self, tdm1rs, tdm1s_block=tdm1s_block,
+            veff_block=veff_block,
         )
-
-        eri = self.eri_cas
-        v1rs = np.tensordot(tdm1rs, eri, axes=((2, 3), (0, 1)))
-        v1rs += v1rs[:, ::-1]
-        v1rs -= np.tensordot(
-            tdm1rs, eri, axes=((2, 3), (2, 1)),
-        )
-
         ref = self.ref_cell
-        i = int(np.sum(self.ncas_sub[:ref]))
-        j = i + int(self.ncas_sub[ref])
-        dm1rs_ref = tdm1rs[:, :, i:j, i:j]
-        v1rs_ref = np.tensordot(
-            dm1rs_ref, eri[i:j, i:j, :, :],
-            axes=((2, 3), (0, 1)),
-        )
-        v1rs_ref += v1rs_ref[:, ::-1]
-        v1rs_ref -= np.tensordot(
-            dm1rs_ref, eri[:, i:j, i:j, :],
-            axes=((2, 3), (2, 1)),
-        )
-        h1_ref = v1rs[:, :, i:j, i:j] - v1rs_ref[:, :, i:j, i:j]
+        h1_ref = np.asarray(h1frs[ref])
+        if self.validate_trans_symmetry:
+            for h1 in h1frs:
+                if not np.allclose(
+                        h1, h1_ref, atol=self.trans_sym_tol,
+                        rtol=self.trans_sym_tol):
+                    raise ValueError(
+                        "effective-Hamiltonian response is not translation "
+                        "symmetric"
+                    )
         return [np.array(h1_ref, copy=True) for _ in range(self.ncell)]
 
     def ci_response_diag(self, ci1):
