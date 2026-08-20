@@ -973,6 +973,92 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
     implementation layers.
     """
 
+    def _init_dms_(self, casdm1frs, casdm2fr=None, dm1s_kpts=None):
+        """Initialize reference density matrices in their natural bases.
+
+        ``casdm1s``, ``casdm2``, and ``cascm2`` are retained in the complete
+        Wannier active space. ``dm1s_kpts`` is spin resolved in the AO basis,
+        while ``dm1s`` is its block-MO representation.
+        """
+        if casdm1frs is None:
+            casdm1frs = self.las.states_make_casdm1s_sub(
+                ci=self.ci,
+                ncas_sub=self.ncas_sub,
+                nelecas_sub=self.nelecas_sub,
+            )
+
+        self.casdm1frs = casdm1frs
+        self.casdm1fs = self.las.make_casdm1s_sub(
+            casdm1frs=casdm1frs,
+        )
+        self.casdm1rs = self.las.states_make_casdm1s(
+            casdm1frs=casdm1frs,
+        )
+        self.casdm1s = np.einsum(
+            "r,rsij->sij", self.weights, self.casdm1rs,
+        )
+
+        if casdm2fr is None:
+            casdm2fr = self.las.states_make_casdm2_sub(
+                ci=self.ci,
+                ncas_sub=self.ncas_sub,
+                nelecas_sub=self.nelecas_sub,
+            )
+        self.casdm2fr = casdm2fr
+        self.casdm2 = self.las.make_casdm2(
+            ci=self.ci,
+            ncas_sub=self.ncas_sub,
+            nelecas_sub=self.nelecas_sub,
+            casdm1frs=self.casdm1frs,
+            casdm2fr=self.casdm2fr,
+        )
+        _check_shape(
+            self.casdm1s, (2, self.ncastot, self.ncastot),
+            label="casdm1s",
+        )
+        _check_shape(
+            self.casdm2, (self.ncastot,) * 4, label="casdm2",
+        )
+
+        casdm1a, casdm1b = self.casdm1s
+        casdm1 = casdm1a + casdm1b
+        self.cascm2 = self.casdm2 - np.multiply.outer(casdm1, casdm1)
+        self.cascm2 += np.multiply.outer(
+            casdm1a, casdm1a,
+        ).transpose(0, 3, 2, 1)
+        self.cascm2 += np.multiply.outer(
+            casdm1b, casdm1b,
+        ).transpose(0, 3, 2, 1)
+
+        if dm1s_kpts is None:
+            dm1s_kpts = self.las.make_rdm1s(
+                mo_coeff=self.mo_coeff,
+                ci=self.ci,
+                casdm1s_sub=self.casdm1fs,
+            )
+        self.dm1s_kpts = np.asarray(dm1s_kpts)
+        _check_shape(
+            self.dm1s_kpts, (2, self.nkpts, self.nao, self.nao),
+            label="dm1s_kpts",
+        )
+
+        ovlp_kpts = np.asarray(self.las._scf.get_ovlp(kpts=self.kpts))
+        _check_shape(
+            ovlp_kpts, (self.nkpts, self.nao, self.nao),
+            label="ovlp_kpts",
+        )
+        dtype = np.result_type(
+            self.mo_coeff.dtype, self.dm1s_kpts.dtype, ovlp_kpts.dtype,
+        )
+        self.dm1s = np.empty(
+            (2, self.nkpts, self.nmo, self.nmo), dtype=dtype,
+        )
+        for k in range(self.nkpts):
+            smo_coeff = ovlp_kpts[k] @ self.mo_coeff[k]
+            self.dm1s[:, k] = (
+                smo_coeff.conj().T @ self.dm1s_kpts[:, k] @ smo_coeff
+            )
+
     @property
     def shape(self):
         """tuple: Shape of the combined orbital/CI Hessian operator."""
