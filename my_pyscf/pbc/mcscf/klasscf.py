@@ -3,6 +3,10 @@
 import numpy as np
 
 from mrh.my_pyscf.pbc.fci import cplx_csf_helper
+from mrh.my_pyscf.pbc.mcscf.klasci import (
+    PBCLASCINoSymm,
+    PBCLASCITransSymm,
+)
 from mrh.my_pyscf.pbc.util.wannier import get_wannier_orbs
 
 # Author: Bhavnesh Jangid
@@ -625,3 +629,37 @@ class KLASSCF_UnitaryGroupGenerators:
         )
 
 
+def get_ugg(klas, mo_coeff=None, ci=None, mo_phase=None):
+    """Construct the unitary-group generator used by k-LASSCF.
+
+    The construction is dispatched through ``klas._ugg`` so that periodic
+    LAS subclasses can replace the parameterization without overriding this
+    convenience method.
+
+    Args:
+        klas : object
+            Periodic LAS object for which the parameterization is built.
+        mo_coeff : ndarray of shape (nkpts, nao, nmo), optional
+            Bloch-MO coefficients. Defaults to ``klas.mo_coeff`` in the
+            generator constructor.
+        ci : sequence, optional
+            Nested ``[fragment][root]`` determinant-basis CI vectors. Defaults
+            to ``klas.ci`` in the generator constructor.
+        mo_phase : ndarray of shape (nkpts, ncas, nkpts*ncas), optional
+            Bloch-active to Wannier-active transformation. When omitted, the
+            generator obtains or constructs it from ``klas``.
+
+    Returns:
+        KLASSCF_UnitaryGroupGenerators
+            Orbital/CI parameterization associated with the supplied state.
+    """
+    return klas._ugg(
+        klas, mo_coeff=mo_coeff, ci=ci, mo_phase=mo_phase,
+    )
+
+
+# Install only the parameterization interface at this layer. Gradient methods
+# are registered alongside their respective function definitions.
+for _klass in (PBCLASCINoSymm, PBCLASCITransSymm):
+    _klass._ugg = KLASSCF_UnitaryGroupGenerators
+    _klass.get_ugg = get_ugg
