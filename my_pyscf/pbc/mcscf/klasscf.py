@@ -1131,6 +1131,25 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
         self.h1frs = h1eff
         self.eri_cas = h2eff
 
+    def _init_eri_(self, eris=None):
+        """Attach lazy block-MO ERI accessors for orbital response.
+
+        The default periodic ERI object stores ``ppaa``, ``papa``, and
+        ``paap`` blocks on disk. ``eri_paaa`` remains an accessor rather than
+        a materialized supercell tensor. Level one also constructs the compact
+        core-orbital intermediates used by the analytic Hessian diagonal.
+        """
+        if eris is None:
+            eris = _ERIS(
+                self.las, self.mo_coeff, method="disk", level=1,
+            )
+        for name in ("ppaa", "papa", "paap", "paaa"):
+            if not callable(getattr(eris, name, None)):
+                raise TypeError(f"eris.{name} must be callable")
+        self.cas_type_eris = eris
+        self.eris = eris
+        self.eri_paaa = eris.paaa
+
     @property
     def shape(self):
         """tuple: Shape of the combined orbital/CI Hessian operator."""

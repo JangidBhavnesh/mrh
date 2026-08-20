@@ -55,6 +55,25 @@ def make_operator(casdm2):
     return operator
 
 
+class _LazyERIs:
+
+    @staticmethod
+    def ppaa(k1, k2, k3):
+        return None
+
+    @staticmethod
+    def papa(k1, k2, k3):
+        return None
+
+    @staticmethod
+    def paap(k1, k2, k3):
+        return None
+
+    @staticmethod
+    def paaa(k1, k2, k3):
+        return None
+
+
 class KnownValues(unittest.TestCase):
 
     def test_density_and_cumulant_intermediates(self):
@@ -117,6 +136,24 @@ class KnownValues(unittest.TestCase):
         )
         np.testing.assert_allclose(operator.eri_cas, h2eff)
         self.assertIs(operator.h1frs, h1eff)
+
+    def test_lazy_eri_accessors_are_attached(self):
+        operator = make_operator(np.zeros((2,) * 4))
+        eris = _LazyERIs()
+
+        operator._init_eri_(eris)
+
+        self.assertIs(operator.cas_type_eris, eris)
+        self.assertIs(operator.eris, eris)
+        self.assertEqual(operator.eri_paaa(0, 0, 0), None)
+
+    def test_rejects_missing_eri_accessor(self):
+        operator = make_operator(np.zeros((2,) * 4))
+        eris = _LazyERIs()
+        eris.paap = None
+
+        with self.assertRaisesRegex(TypeError, "eris.paap must be callable"):
+            operator._init_eri_(eris)
 
     def test_rejects_inconsistent_active_density_shape(self):
         operator = make_operator(np.zeros((2,) * 4))
