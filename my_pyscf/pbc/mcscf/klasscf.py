@@ -1059,6 +1059,78 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
                 smo_coeff.conj().T @ self.dm1s_kpts[:, k] @ smo_coeff
             )
 
+    def _init_ham_(self, h1eff, h2eff, veff_kpts=None):
+        """Initialize block-MO and Wannier-basis Hamiltonians.
+
+        ``h1frs[f][r]`` is the spin-resolved effective one-electron
+        Hamiltonian for fragment ``f`` and root ``r``. ``eri_cas`` contains
+        the two-electron integrals over the complete Wannier active space.
+        ``hcore`` and ``h1s`` retain a k-point axis and use the block-MO basis.
+        """
+        if h2eff is None:
+            h2eff = self.las.get_h2cas(self.mo_coeff)
+        h2eff = np.asarray(h2eff)
+        _check_shape(h2eff, (self.ncastot,) * 4, label="h2eff")
+
+        if veff_kpts is None:
+            veff_kpts = self.las.get_veff(
+                self.las._scf.cell, dm_kpts=self.dm1s_kpts,
+            )
+        self.veff_kpts = np.asarray(veff_kpts)
+        _check_shape(
+            self.veff_kpts, (2, self.nkpts, self.nao, self.nao),
+            label="veff_kpts",
+        )
+
+        hcore_kpts = np.asarray(self.las.get_hcore(kpts=self.kpts))
+        _check_shape(
+            hcore_kpts, (self.nkpts, self.nao, self.nao),
+            label="hcore_kpts",
+        )
+        dtype = np.result_type(
+            self.mo_coeff.dtype, self.veff_kpts.dtype, hcore_kpts.dtype,
+        )
+        self.hcore = np.empty(
+            (self.nkpts, self.nmo, self.nmo), dtype=dtype,
+        )
+        self.h1s = np.empty(
+            (2, self.nkpts, self.nmo, self.nmo), dtype=dtype,
+        )
+        for k in range(self.nkpts):
+            mo_coeff = self.mo_coeff[k]
+            mo_coeff_h = mo_coeff.conj().T
+            self.hcore[k] = mo_coeff_h @ hcore_kpts[k] @ mo_coeff
+            self.h1s[:, k] = (
+                mo_coeff_h
+                @ (hcore_kpts[k][None] + self.veff_kpts[:, k])
+                @ mo_coeff
+            )
+
+        if h1eff is None:
+            h1eff = self.las.h1e_for_las(
+                mo_coeff=self.mo_coeff,
+                ci=self.ci,
+                ncas_sub=self.ncas_sub,
+                nelecas_sub=self.nelecas_sub,
+                casdm1s_sub=self.casdm1fs,
+                casdm1frs=self.casdm1frs,
+                eri_cas=h2eff,
+                veff=self.veff_kpts,
+            )
+
+        if len(h1eff) != len(self.ncas_sub):
+            raise ValueError(
+                "h1eff must contain one block for every fragment/cell"
+            )
+        for ifrag, (h1fr, ncas) in enumerate(zip(h1eff, self.ncas_sub)):
+            _check_shape(
+                h1fr, (self.nroots, 2, ncas, ncas),
+                label=f"h1fr_{ifrag}",
+            )
+
+        self.h1frs = h1eff
+        self.eri_cas = h2eff
+
     @property
     def shape(self):
         """tuple: Shape of the combined orbital/CI Hessian operator."""
