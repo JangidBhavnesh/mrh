@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 
 import numpy as np
+from scipy import linalg
 from pyscf.pbc.lib import kpts_helper
 
 from mrh.my_pyscf.mcscf.lasscf_sync_o0 import (
@@ -2012,6 +2013,43 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
             gradient, (self.ugg.nvar_tot,), label="gradient",
         )
         return gradient
+
+    def _update_mo(self, kappa):
+        """Apply one packed-coordinate orbital step at every k-point.
+
+        ``ugg.unpack_orb`` returns the full anti-Hermitian matrix associated
+        with the independent lower-triangular coordinates. As in molecular
+        LASSCF, the corresponding orbital generator is ``kappa / 2``; using
+        the full matrix in the exponential would apply twice the requested
+        step.
+        """
+        kappa = np.asarray(kappa)
+        _check_shape(
+            kappa, (self.nkpts, self.nmo, self.nmo), label="kappa",
+        )
+        if not np.all(np.isfinite(kappa)):
+            raise ValueError("kappa must contain only finite values")
+        antihermitian_error = np.linalg.norm(
+            kappa + kappa.conj().transpose(0, 2, 1)
+        )
+        antihermitian_scale = max(np.linalg.norm(kappa), 1.0)
+        if antihermitian_error > 1e-10 * antihermitian_scale:
+            msg = (
+                "kappa must be anti-Hermitian; relative residual is "
+                f"{antihermitian_error / antihermitian_scale:.3e}"
+            )
+            raise ValueError(msg)
+
+        mo_coeff = np.asarray(self.mo_coeff)
+        _check_shape(
+            mo_coeff, (self.nkpts, self.nao, self.nmo),
+            label="mo_coeff",
+        )
+        dtype = np.result_type(mo_coeff.dtype, kappa.dtype)
+        mo1 = np.empty(mo_coeff.shape, dtype=dtype)
+        for k in range(self.nkpts):
+            mo1[k] = mo_coeff[k] @ linalg.expm(kappa[k] / 2.0)
+        return mo1
 
     @property
     def shape(self):
