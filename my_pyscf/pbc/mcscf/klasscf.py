@@ -19,6 +19,9 @@ from mrh.my_pyscf.pbc.mcscf.mc1step import _get_casdm2_kpts
 from mrh.my_pyscf.pbc.mcscf.productstate import (
     ImpureProductStateFCISolver,
 )
+from mrh.my_pyscf.pbc.mcscf.real_linear_solvers import (
+    SolveScipyMINRESForCplx,
+)
 from mrh.my_pyscf.pbc.util.wannier import get_wannier_orbs
 
 # Author: Bhavnesh Jangid
@@ -3783,6 +3786,197 @@ def _get_mo_energy(hop):
         return None
     fock = np.asarray(h1s).sum(axis=0) / 2.0
     return np.diagonal(fock, axis1=-2, axis2=-1).real.copy()
+
+
+def kernel(
+        klas, mo_coeff=None, ci0=None, conv_tol_grad=None, verbose=None):
+    """Run the k-LASSCF macro/micro optimization.
+
+    Each macroiteration refreshes the local CI vectors and constructs a new
+    orbital/CI Hessian keyframe.  MINRES solves the Newton equation in doubled
+    real coordinates for at most ``max_cycle_micro`` iterations.  The complex
+    step is restricted to the trust region and retracted into new orbitals and
+    normalized CI vectors before the next keyframe.
+
+    State-averaged optimization is intentionally disabled until its CI weights
+    are incorporated in the real optimizer metric.
+    """
+    if mo_coeff is None:
+        mo_coeff = klas.mo_coeff
+    else:
+        mo_coeff = np.asarray(mo_coeff)
+    ci = klas.ci if ci0 is None else ci0
+    if conv_tol_grad is None:
+        conv_tol_grad = klas.conv_tol_grad
+    if verbose is None:
+        verbose = klas.verbose
+
+    conv_tol_grad = float(conv_tol_grad)
+    if not np.isfinite(conv_tol_grad) or conv_tol_grad < 0.0:
+        raise ValueError("conv_tol_grad must be finite and nonnegative")
+    max_macro = int(klas.max_cycle_macro)
+    max_micro = int(klas.max_cycle_micro)
+    min_macro = int(klas.min_cycle_macro)
+    if max_macro < 0 or max_micro < 0 or min_macro < 0:
+        raise ValueError("macro and micro cycle counts must be nonnegative")
+    trust_radius = float(klas.trust_radius)
+    if not np.isfinite(trust_radius) or trust_radius <= 0.0:
+        raise ValueError("trust_radius must be finite and positive")
+
+    log = lib.logger.new_logger(klas, verbose)
+    log.debug("Start k-LASSCF")
+    t0 = (lib.logger.process_clock(), lib.logger.perf_counter())
+    converged = False
+    final_hop = None
+    e_tot = e_states = e_cas = e_lexc = None
+    norm_gorb = norm_gci = 0.0
+
+    h2eff = klas.get_h2cas(mo_coeff)
+    if _ci_guess_is_missing(ci):
+        ci = klas.get_init_guess_ci(
+            mo_coeff, ci0=ci, eri_cas=h2eff,
+        )
+    if _ci_guess_is_missing(ci):
+        raise RuntimeError("failed to populate the initial CI vectors")
+    (
+        casdm1frs, casdm1s_sub, dm1s_kpts, veff_kpts,
+    ) = _make_keyframe_densities(klas, mo_coeff, ci)
+
+    # The extra keyframe evaluates the gradient after the final allowed step.
+    for imacro in range(max_macro + 1):
+        e_sub, ci = ci_cycle(
+            klas, mo_coeff, ci, veff_kpts, h2eff, casdm1frs, log,
+        )
+        log.info("k-LASSCF subspace CI energies: %s", e_sub)
+        (
+            casdm1frs, casdm1s_sub, dm1s_kpts, veff_kpts,
+        ) = _make_keyframe_densities(klas, mo_coeff, ci)
+        e_tot, e_states, e_cas, e_lexc = _fixed_ci_energies(
+            klas, mo_coeff, ci, h2eff,
+        )
+
+        # The active-active rotation map depends on the current Wannier
+        # transformation, so optimizer coordinates are rebuilt per keyframe.
+        ugg = klas.get_ugg(mo_coeff=mo_coeff, ci=ci)
+        metric = _optimizer_metric(klas, ugg)
+        final_hop = klas.get_hop(
+            mo_coeff=mo_coeff, ci=ci, ugg=ugg,
+            casdm1frs=casdm1frs, h2eff=h2eff,
+            veff_kpts=veff_kpts, dm1s_kpts=dm1s_kpts,
+        )
+        gradient = np.asarray(final_hop.get_grad()).reshape(-1)
+        if gradient.size != ugg.nvar_tot:
+            raise ValueError(
+                f"gradient has size {gradient.size}; expected {ugg.nvar_tot}"
+            )
+
+        norm_gorb = float(np.linalg.norm(gradient[:ugg.nvar_orb]))
+        norm_gci = float(np.linalg.norm(gradient[ugg.nvar_orb:]))
+        log.info(
+            "k-LASSCF macro %d : E = %.15g ; |g_orb| = %.6g ; "
+            "|g_ci| = %.6g",
+            imacro, np.real(e_tot), norm_gorb, norm_gci,
+        )
+
+        gradient_is_converged = (
+            norm_gorb < conv_tol_grad and norm_gci < conv_tol_grad
+        )
+        if gradient_is_converged and imacro >= min_macro:
+            converged = True
+            break
+        if imacro == max_macro or max_micro == 0 or gradient.size == 0:
+            break
+
+        def metric_hessian(vector):
+            return metric * np.asarray(final_hop._matvec(vector))
+
+        weighted_gradient = metric * gradient
+        rhs_norm = float(np.linalg.norm(weighted_gradient))
+        micro_rtol = min(
+            0.5,
+            max(1e-12, conv_tol_grad / max(rhs_norm, 1e-30)),
+        )
+        micro_count = [0]
+
+        def micro_callback(step):
+            micro_count[0] += 1
+            norm_xorb = np.linalg.norm(step[:ugg.nvar_orb])
+            norm_xci = np.linalg.norm(step[ugg.nvar_orb:])
+            if log.verbose > lib.logger.INFO:
+                hessian_step = np.asarray(final_hop._matvec(step))
+                residual = gradient + hessian_step
+                model_energy = e_tot + np.real(np.vdot(
+                    step,
+                    metric * (gradient + 0.5 * hessian_step),
+                ))
+                log.info(
+                    "k-LASSCF micro %d : E = %.15g ; |r_orb| = %.6g ; "
+                    "|r_ci| = %.6g ; |x_orb| = %.6g ; |x_ci| = %.6g",
+                    micro_count[0], np.real(model_energy),
+                    np.linalg.norm(residual[:ugg.nvar_orb]),
+                    np.linalg.norm(residual[ugg.nvar_orb:]),
+                    norm_xorb, norm_xci,
+                )
+            else:
+                log.info(
+                    "k-LASSCF micro %d : |x_orb| = %.6g ; |x_ci| = %.6g",
+                    micro_count[0], norm_xorb, norm_xci,
+                )
+
+        solver_class = getattr(
+            klas, "micro_solver", SolveScipyMINRESForCplx,
+        )
+        solver_kwargs = {
+            "rtol": micro_rtol,
+            "maxiter": max_micro,
+            "callback": micro_callback,
+        }
+        if getattr(klas, "micro_solver_compute_residual", False):
+            solver_kwargs["compute_residual"] = True
+        solver = solver_class(metric_hessian, **solver_kwargs)
+        step, info = solver(weighted_gradient)
+        if info:
+            solver_name = getattr(solver_class, "__name__", "micro solver")
+            log.warn(
+                "k-LASSCF %s stopped with info=%s after %d "
+                "microiterations",
+                solver_name, info, micro_count[0],
+            )
+
+        step_norm = float(np.linalg.norm(step))
+        max_coordinate = float(np.max(np.abs(step), initial=0.0))
+        scale = 1.0
+        if step_norm > trust_radius:
+            scale = min(scale, trust_radius / step_norm)
+        if max_coordinate > np.pi / 2.0:
+            scale = min(scale, (np.pi / 2.0) / max_coordinate)
+        if scale < 1.0:
+            log.info("Scaling k-LASSCF step by %.6g", scale)
+            step = step * scale
+
+        mo_coeff, ci, h2eff = final_hop.update_mo_ci_eri(step, h2eff)
+        (
+            casdm1frs, casdm1s_sub, dm1s_kpts, veff_kpts,
+        ) = _make_keyframe_densities(klas, mo_coeff, ci)
+
+    if final_hop is None:
+        raise RuntimeError("k-LASSCF failed to build a Hessian keyframe")
+
+    mo_energy = _get_mo_energy(final_hop)
+    veff = veff_kpts
+    log.info(
+        "k-LASSCF %s after %d macro keyframes",
+        "converged" if converged else "not converged", imacro + 1,
+    )
+    log.info(
+        "k-LASSCF E = %.15g ; |g_orb| = %.6g ; |g_ci| = %.6g",
+        np.real(e_tot), norm_gorb, norm_gci,
+    )
+    log.timer("k-LASSCF kernel", *t0)
+    return (
+        converged, e_tot, e_states, mo_energy, mo_coeff, e_cas, e_lexc,
+        ci, h2eff, veff,
+    )
 
 # Install the gradient and Hessian interfaces on the periodic LAS variants.
 # Each variant selects the Hessian operator matching its CI layout.
