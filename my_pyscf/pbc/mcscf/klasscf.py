@@ -1958,6 +1958,39 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
         self._Horb_diag_external_cache = np.array(diagonal, copy=True)
         return diagonal
 
+    def _get_Horb_active_active(self):
+        """Return the projected complex active-active Hessian blocks.
+
+        For complex orbital coordinates the orbital-orbital response is
+        real-linear rather than complex-linear. The returned pair
+        ``(H, H_conj)`` represents
+        ``H @ x + H_conj @ x.conj()`` exactly. Both blocks are evaluated in
+        the projected UGG active-active coordinate basis.
+        """
+        cached = getattr(self, "_Horb_active_active_cache", None)
+        if cached is not None:
+            return tuple(np.array(block, copy=True) for block in cached)
+
+        nvar = self.ugg.nvar_orb_active_active
+        dtype = np.result_type(self.mo_coeff.dtype, np.complex128)
+        response_real = np.empty((nvar, nvar), dtype=dtype)
+        response_imag = np.empty((nvar, nvar), dtype=dtype)
+        unit = np.zeros(nvar, dtype=dtype)
+        for index in range(nvar):
+            unit[index] = 1.0
+            response_real[:, index] = self._apply_Horb_active_active(unit)
+            unit[index] = 1.0j
+            response_imag[:, index] = self._apply_Horb_active_active(unit)
+            unit[index] = 0.0
+
+        hessian = (response_real - 1.0j * response_imag) / 2.0
+        hessian_conj = (response_real + 1.0j * response_imag) / 2.0
+        self._Horb_active_active_cache = (
+            np.array(hessian, copy=True),
+            np.array(hessian_conj, copy=True),
+        )
+        return hessian, hessian_conj
+
     @property
     def shape(self):
         """tuple: Shape of the combined orbital/CI Hessian operator."""
