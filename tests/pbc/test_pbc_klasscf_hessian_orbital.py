@@ -346,6 +346,65 @@ class KnownValues(unittest.TestCase):
         self.assertEqual(direct.dtype, np.dtype(np.complex128))
         self.assertEqual(conjugate.dtype, np.dtype(np.complex128))
 
+    def test_horb_diag_combines_external_and_active_slices(self):
+        operator = KLASSCF_HessianOperator.__new__(
+            KLASSCF_HessianOperator
+        )
+        operator.ugg = type("UGG", (), {
+            "nvar_orb": 4,
+            "nvar_orb_external": 2,
+            "nvar_orb_active_active": 2,
+        })()
+        operator._get_Horb_diag_external = lambda: np.array(
+            [1.0, 2.0], dtype=np.complex128,
+        )
+        direct = np.array([
+            [3.0, 0.2j],
+            [-0.1j, 4.0],
+        ])
+        conjugate = np.array([
+            [0.5, 0.1],
+            [0.2, -0.25],
+        ])
+        operator._get_Horb_active_active = lambda: (direct, conjugate)
+
+        diagonal = operator._get_Horb_diag()
+
+        np.testing.assert_allclose(diagonal, [1.0, 2.0, 3.5, 3.75])
+
+    def test_horb_diag_skips_an_empty_active_active_slice(self):
+        operator = KLASSCF_HessianOperator.__new__(
+            KLASSCF_HessianOperator
+        )
+        operator.ugg = type("UGG", (), {
+            "nvar_orb": 2,
+            "nvar_orb_external": 2,
+            "nvar_orb_active_active": 0,
+        })()
+        external = np.array([1.5, -0.25], dtype=np.complex128)
+        operator._get_Horb_diag_external = lambda: external
+        operator._get_Horb_active_active = lambda: self.fail(
+            "active-active diagonal should not be evaluated"
+        )
+
+        diagonal = operator._get_Horb_diag()
+
+        np.testing.assert_allclose(diagonal, external)
+
+    def test_horb_diag_rejects_combined_layout_mismatch(self):
+        operator = KLASSCF_HessianOperator.__new__(
+            KLASSCF_HessianOperator
+        )
+        operator.ugg = type("UGG", (), {
+            "nvar_orb": 3,
+            "nvar_orb_active_active": 0,
+        })()
+        operator._get_Horb_diag_external = lambda: np.array([1.0, 2.0])
+
+        with self.assertRaisesRegex(
+                ValueError, "orbital_hessian_diagonal has shape"):
+            operator._get_Horb_diag()
+
     def test_orbital_hdiag_handles_an_empty_orbital_space(self):
         operator = KLASSCF_HessianOperator.__new__(
             KLASSCF_HessianOperator

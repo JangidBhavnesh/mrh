@@ -1991,6 +1991,27 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
         )
         return hessian, hessian_conj
 
+    def _get_Horb_diag(self):
+        """Return the orbital diagonal in packed UGG ordering.
+
+        Core-active, core-virtual, and active-virtual rotations use the
+        analytic momentum-resolved block-MO diagonal. The projected
+        active-active slice uses the analytic Wannier Hessian transformed
+        into UGG coordinates. :meth:`_get_Horb_diag_matvec` remains available
+        as an independent regression reference.
+        """
+        pieces = [self._get_Horb_diag_external()]
+        nvar_active = getattr(self.ugg, "nvar_orb_active_active", 0)
+        if nvar_active:
+            hessian, hessian_conj = self._get_Horb_active_active()
+            pieces.append(np.diag(hessian + hessian_conj))
+        diagonal = np.concatenate(pieces)
+        _check_shape(
+            diagonal, (self.ugg.nvar_orb,),
+            label="orbital_hessian_diagonal",
+        )
+        return diagonal
+
     @property
     def shape(self):
         """tuple: Shape of the combined orbital/CI Hessian operator."""
