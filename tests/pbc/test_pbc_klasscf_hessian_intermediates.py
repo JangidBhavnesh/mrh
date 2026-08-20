@@ -100,7 +100,73 @@ class _LinkFCIBox:
         return f"links-{norb}-{tuple(nelec)}"
 
 
+class _ConstructorTransformer:
+    ncsf = 2
+
+
+class _ConstructorUGG:
+    nvar_tot = 8
+    ci_transformers = [
+        [_ConstructorTransformer()],
+        [_ConstructorTransformer()],
+    ]
+    frozen_ci = set()
+
+
+class _ConstructorLAS:
+    def __init__(self):
+        self.kpts = np.zeros((2, 3))
+        self.kmesh = (2, 1, 1)
+        self.mo_coeff = np.broadcast_to(np.eye(3), (2, 3, 3)).copy()
+        self.ci = [
+            [np.array([1.0, 0.0])],
+            [np.array([1.0, 0.0])],
+        ]
+        self.ah_level_shift = 1e-8
+        self.ncore = 1
+        self.ncas = 1
+        self.ncas_sub = np.array([1, 1])
+        self.nelecas_sub = np.array([(1, 0), (1, 0)])
+        self.fciboxes = [object(), object()]
+        self.nroots = 1
+        self.weights = np.array([1.0])
+
+
 class KnownValues(unittest.TestCase):
+
+    def test_constructor_validates_layout_and_dispatches_initializers(self):
+        las = _ConstructorLAS()
+        ugg = _ConstructorUGG()
+        with patch.object(
+                KLASSCF_HessianOperator, "_init_dms_"
+        ) as init_dms, patch.object(
+                KLASSCF_HessianOperator, "_init_ham_"
+        ) as init_ham, patch.object(
+                KLASSCF_HessianOperator, "_init_eri_"
+        ) as init_eri, patch.object(
+                KLASSCF_HessianOperator, "_init_orb_"
+        ) as init_orb, patch.object(
+                KLASSCF_HessianOperator, "_init_ci_"
+        ) as init_ci:
+            operator = KLASSCF_HessianOperator(las, ugg)
+
+        self.assertEqual(operator.ncell, 2)
+        self.assertEqual(operator.ncastot, 2)
+        self.assertEqual(operator.nvar_ci, 4)
+        self.assertEqual(operator.shape, (ugg.nvar_tot, ugg.nvar_tot))
+        init_dms.assert_called_once_with(None, None, None)
+        init_ham.assert_called_once_with(None, None, None)
+        init_eri.assert_called_once_with(None)
+        init_orb.assert_called_once_with(None)
+        init_ci.assert_called_once_with()
+        self.assertIsNone(operator._Horb_diag_matvec_cache)
+        self.assertIsNone(operator._Horb_active_active_cache)
+
+    def test_constructor_rejects_inconsistent_kmesh(self):
+        las = _ConstructorLAS()
+        las.kmesh = (3, 1, 1)
+        with self.assertRaisesRegex(ValueError, "kpts and kmesh"):
+            KLASSCF_HessianOperator(las, _ConstructorUGG())
 
     def test_density_and_cumulant_intermediates(self):
         casdm1frs = [
