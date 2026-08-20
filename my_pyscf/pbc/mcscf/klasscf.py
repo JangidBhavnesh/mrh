@@ -2000,6 +2000,19 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
         )
         return diagonal
 
+    def get_grad(self):
+        """Return the periodic complex gradient in packed UGG ordering."""
+        gorb = self.fock1 - self.fock1.conj().transpose(0, 2, 1)
+        gci = [
+            [2.0 * residual for residual in residual_r]
+            for residual_r in self.hci0
+        ]
+        gradient = np.asarray(self.ugg.pack(gorb, gci)).reshape(-1)
+        _check_shape(
+            gradient, (self.ugg.nvar_tot,), label="gradient",
+        )
+        return gradient
+
     @property
     def shape(self):
         """tuple: Shape of the combined orbital/CI Hessian operator."""
