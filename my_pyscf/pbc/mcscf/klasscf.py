@@ -1781,6 +1781,156 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
         self._Horb_diag_matvec_cache = np.array(diagonal, copy=True)
         return diagonal
 
+    def _get_Horb_diag_external(self):
+        """Return analytic diagonals for block-MO external rotations.
+
+        This is the momentum-resolved counterpart of the molecular
+        core-active, core-virtual, and active-virtual diagonal formulas. It
+        follows the complex periodic construction in ``mc1step.gen_g_hop``
+        but contracts only the ``(p,u,p,u)`` elements needed by the diagonal,
+        rather than materializing its three large ``hdm2`` tensors.
+
+        The returned vector follows the external prefix of the UGG ordering.
+        Active-active coordinates are handled separately.
+        """
+        cached = getattr(self, "_Horb_diag_external_cache", None)
+        if cached is not None:
+            return np.array(cached, copy=True)
+
+        nkpts = self.nkpts
+        nmo = self.nmo
+        ncore = self.ncore
+        nocc = self.nocc
+        ncas = self.ncas
+        active = slice(ncore, nocc)
+        dtype = np.result_type(
+            self.hcore.dtype, self.h1s.dtype, self.dm1s.dtype,
+            self.fock1.dtype, self.casdm2.dtype, np.complex128,
+        )
+
+        dm1 = np.asarray(self.dm1s.sum(axis=0), dtype=dtype)
+        casdm1_kpts = dm1[:, active, active]
+        vhf_c = np.asarray(self.eris.vhf_c, dtype=dtype)
+        _check_shape(vhf_c, (nkpts, nmo, nmo), label="vhf_c")
+        # The spin average is J[D] - K[D]/2, which is the spin-free potential
+        # entering the periodic CASSCF diagonal even when the stored LASSCF
+        # effective potentials are spin resolved.
+        vhf_ca = (self.h1s[0] + self.h1s[1]) / 2.0 - self.hcore
+
+        j_pc = np.asarray(self.eris.j_pc, dtype=dtype)
+        k_pc = np.asarray(self.eris.k_pc, dtype=dtype)
+        _check_shape(j_pc, (nkpts, nmo, ncore), label="j_pc")
+        _check_shape(k_pc, (nkpts, nmo, ncore), label="k_pc")
+
+        kconserv = kpts_helper.get_kconserv(
+            self.las._scf.cell, self.kpts,
+        )
+        casdm2_kpts = {}
+
+        def get_casdm2(k1, k2, k3):
+            key = (k1, k2, k3)
+            if key not in casdm2_kpts:
+                k4 = kconserv[k1, k2, k3]
+                casdm2_kpts[key] = _get_casdm2_kpts(
+                    self.casdm2, self.mo_phase, (k1, k2, k3, k4),
+                )
+            return casdm2_kpts[key]
+
+        jkcaa = np.zeros((nkpts, nocc, ncas), dtype=dtype)
+        for k in range(nkpts):
+            ppaa = self.eris.ppaa(k, k, k)[:nocc, :nocc]
+            paap = self.eris.paap(k, k, k)[:nocc, :, :, :nocc]
+            papa = self.eris.papa(k, k, k)[:nocc, :, :nocc]
+            bra_ket_pair = -2.0 * np.einsum(
+                "ppuv,uv->pu", ppaa, casdm1_kpts[k], optimize=True,
+            )
+            bra_ket_pair += 4.0 * np.einsum(
+                "puvp,uv->pu", paap, casdm1_kpts[k], optimize=True,
+            )
+            # For complex Bloch orbitals, the two members of the conjugate
+            # bra/ket pair contribute through their Hermitian average.
+            jkcaa[k] += bra_ket_pair.real
+            jkcaa[k] += 2.0 * np.einsum(
+                "pupv,uv->pv", papa, casdm1_kpts[k], optimize=True,
+            )
+
+        hdm2_diag = np.zeros((nkpts, nmo, ncas), dtype=dtype)
+        for k in range(nkpts):
+            for kw in range(nkpts):
+                # papa[p,w,q,x] D2[u,w,v,x] -> (p,u,q,v), with
+                # k labels (k,kw,k,kw).
+                papa = self.eris.papa(k, kw, k)
+                dm2 = get_casdm2(k, kw, k)
+                hdm2_diag[k] += np.einsum(
+                    "pwpx,uwux->pu", papa, dm2, optimize=True,
+                )
+
+                # ppaa[k,k,kw,kw] D2[kw,kw,k,k] -> (p,u,q,v).
+                ppaa = self.eris.ppaa(k, k, kw)
+                dm2 = get_casdm2(kw, kw, k)
+                hdm2_diag[k] += np.einsum(
+                    "ppwx,wxuu->pu", ppaa, dm2, optimize=True,
+                ).conj()
+
+                # paap[p,w,x,q] D2[u,w,x,v] -> (p,u,q,v), with
+                # k labels (k,kw,kw,k).
+                paap = self.eris.paap(k, kw, kw)
+                dm2 = get_casdm2(k, kw, kw)
+                hdm2_diag[k] += np.einsum(
+                    "pwxp,uwxu->pu", paap, dm2, optimize=True,
+                ).conj()
+
+        hdiag = np.zeros((nkpts, nmo, nmo), dtype=dtype)
+        for k in range(nkpts):
+            one_body = np.einsum(
+                "ii,jj->ij", self.hcore[k], dm1[k], optimize=True,
+            )
+            one_body -= self.hcore[k] * dm1[k]
+            hdiag[k] = one_body + one_body.conj().T
+
+            fock_diag = self.fock1[k].diagonal().real
+            hdiag[k] -= fock_diag + fock_diag[:, None]
+            diagonal_indices = np.arange(nmo)
+            hdiag[k][diagonal_indices, diagonal_indices] += 2.0 * fock_diag
+
+            potential_diag = vhf_ca[k].diagonal().real
+            hdiag[k][:, :ncore] += 2.0 * potential_diag[:, None]
+            hdiag[k][:ncore] += 2.0 * potential_diag
+            core_indices = np.arange(ncore)
+            hdiag[k][core_indices, core_indices] -= (
+                4.0 * potential_diag[:ncore]
+            )
+
+            core_active = np.einsum(
+                "ii,jj->ij", vhf_c[k], casdm1_kpts[k],
+                optimize=True,
+            )
+            hdiag[k][:, active] += core_active
+            hdiag[k][active, :] += core_active.conj().T
+            active_active = -vhf_c[k][active, active] * casdm1_kpts[k]
+            hdiag[k][active, active] += (
+                active_active + active_active.conj().T
+            )
+
+            core_eri = 6.0 * k_pc[k] - 2.0 * j_pc[k]
+            hdiag[k][ncore:, :ncore] += core_eri[ncore:]
+            hdiag[k][:ncore, ncore:] += core_eri[ncore:].conj().T
+
+            hdiag[k][:nocc, active] -= jkcaa[k]
+            hdiag[k][active, :nocc] -= jkcaa[k].conj().T
+            hdiag[k][:, active] += hdm2_diag[k]
+            hdiag[k][active, :] += hdm2_diag[k].conj().T
+
+        diagonal = np.asarray(
+            hdiag[self.ugg.uniq_orb_idx], dtype=dtype,
+        ).reshape(-1) / 2.0
+        _check_shape(
+            diagonal, (self.ugg.nvar_orb_external,),
+            label="external_orbital_hessian_diagonal",
+        )
+        self._Horb_diag_external_cache = np.array(diagonal, copy=True)
+        return diagonal
+
     @property
     def shape(self):
         """tuple: Shape of the combined orbital/CI Hessian operator."""
