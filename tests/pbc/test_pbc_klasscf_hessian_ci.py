@@ -135,6 +135,63 @@ class KnownValues(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "step_vector has shape"):
             operator.update_mo_ci(np.zeros(3))
 
+    def test_combined_update_rebuilds_periodic_active_integrals(self):
+        operator = KLASSCF_HessianOperator.__new__(
+            KLASSCF_HessianOperator
+        )
+        operator.ncastot = 2
+        step = np.array([0.2 + 0.1j, -0.3j])
+        mo1 = np.array([[
+            [1.0, 0.2j],
+            [0.1 - 0.1j, 0.9],
+        ]])
+        ci1 = [[np.array([0.8, 0.6j])]]
+        update_calls = []
+
+        def update(step_vector):
+            update_calls.append(step_vector)
+            return mo1, ci1
+
+        operator.update_mo_ci = update
+        new_h2 = np.full((2,) * 4, 0.4 - 0.2j)
+
+        class RecordingLAS:
+            def __init__(self):
+                self.calls = []
+
+            def get_h2cas(self, mo_coeff):
+                self.calls.append(mo_coeff)
+                return new_h2
+
+        operator.las = RecordingLAS()
+        old_h2 = np.full((2,) * 4, 9.0)
+
+        actual_mo, actual_ci, actual_h2 = operator.update_mo_ci_eri(
+            step, h2eff_sub=old_h2,
+        )
+
+        self.assertIs(actual_mo, mo1)
+        self.assertIs(actual_ci, ci1)
+        self.assertIs(actual_h2, new_h2)
+        self.assertEqual(len(update_calls), 1)
+        self.assertIs(update_calls[0], step)
+        self.assertEqual(len(operator.las.calls), 1)
+        self.assertIs(operator.las.calls[0], mo1)
+        np.testing.assert_array_equal(old_h2, 9.0)
+
+    def test_combined_update_rejects_rebuilt_integral_shape(self):
+        operator = KLASSCF_HessianOperator.__new__(
+            KLASSCF_HessianOperator
+        )
+        operator.ncastot = 2
+        operator.update_mo_ci = lambda step: (np.eye(2)[None], [[np.ones(1)]])
+        operator.las = type("LAS", (), {
+            "get_h2cas": staticmethod(lambda mo_coeff: np.zeros((2,) * 3)),
+        })()
+
+        with self.assertRaisesRegex(ValueError, "updated_h2eff_sub has shape"):
+            operator.update_mo_ci_eri(np.zeros(1))
+
     def test_periodic_ci_update_rotates_complex_projected_tangents(self):
         operator = KLASSCF_HessianOperator.__new__(
             KLASSCF_HessianOperator
