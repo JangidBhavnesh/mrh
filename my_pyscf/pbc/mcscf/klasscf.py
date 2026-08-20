@@ -2289,11 +2289,13 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
             return np.empty(0, dtype=np.complex128)
         return np.concatenate(vectors)
 
-    def _ci_hessian_response(self, ci1, tdm1rs=None):
+    def _ci_hessian_response(
+            self, ci1, tdm1rs=None, h1frs_response=None):
         """Apply the implemented CI-CI Hessian block to determinant vectors."""
         if tdm1rs is None:
             tdm1rs = self.make_tdm1s_sub(ci1)
-        h1frs_response = self.get_h1eff_response(tdm1rs)
+        if h1frs_response is None:
+            h1frs_response = self.get_h1eff_response(tdm1rs)
         ci2_diag = self.ci_response_diag(ci1)
         ci2_offdiag = self.ci_response_offdiag(h1frs_response)
 
@@ -2305,7 +2307,8 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
             for diag_r, offdiag_r in zip(ci2_diag, ci2_offdiag)
         ]
 
-    def _orbital_ci_hessian_response(self, tdm1rs, tcm2):
+    def _orbital_ci_hessian_response(
+            self, tdm1rs, tcm2, tdm1s_block=None, veff_ci=None):
         """Apply the orbital-output/CI-input Hessian block.
 
         The transition densities supplied here are already Hermitian
@@ -2316,8 +2319,10 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
         packs the combined Hessian vector, matching the molecular LASSCF
         convention.
         """
-        tdm1s_block = self._transition_dm1s_to_block(tdm1rs)
-        veff_ci = self._get_ci_veff_response(tdm1s_block)
+        if tdm1s_block is None:
+            tdm1s_block = self._transition_dm1s_to_block(tdm1rs)
+        if veff_ci is None:
+            veff_ci = self._get_ci_veff_response(tdm1s_block)
         cumulant_fock = self._transition_cumulant_to_block_fock(tcm2)
         _check_shape(
             cumulant_fock,
@@ -3196,10 +3201,20 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
 
         if not self._ci_step_is_zero(ci1):
             tdm1rs, tcm2 = self.make_tdm1s2c_sub(ci1)
+            tdm1s_block = self._transition_dm1s_to_block(tdm1rs)
+            veff_ci = self._get_ci_veff_response(tdm1s_block)
             kappa2 = kappa2 + self._orbital_ci_hessian_response(
-                tdm1rs, tcm2,
+                tdm1rs, tcm2, tdm1s_block=tdm1s_block,
+                veff_ci=veff_ci,
             )
-            ci2_ci = self._ci_hessian_response(ci1, tdm1rs=tdm1rs)
+            h1frs_response = self.get_h1eff_response(
+                tdm1rs, tdm1s_block=tdm1s_block,
+                veff_block=veff_ci,
+            )
+            ci2_ci = self._ci_hessian_response(
+                ci1, tdm1rs=tdm1rs,
+                h1frs_response=h1frs_response,
+            )
             ci2 = [
                 [
                     orbital_response + ci_response
