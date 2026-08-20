@@ -3,6 +3,9 @@
 import numpy as np
 from pyscf.pbc.lib import kpts_helper
 
+from mrh.my_pyscf.mcscf.lasscf_sync_o0 import (
+    LASSCF_HessianOperator as molLASSCF_HessianOperator,
+)
 from mrh.my_pyscf.pbc.fci import cplx_csf_helper
 from mrh.my_pyscf.pbc.mcscf.klas_ao2mo import _ERIS
 from mrh.my_pyscf.pbc.mcscf.klasci import (
@@ -929,6 +932,116 @@ def get_grad(
         h1eff=h1eff, h2eff=h2eff,
     )
     return ugg.pack(gorb, gci)
+
+
+class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
+    """Matrix-free orbital/CI Hessian operator for k-LASSCF.
+
+    The periodic operator retains one determinant-basis CI vector per
+    fragment and root internally. Its external vector layout is delegated to
+    the k-LASSCF unitary-group generator.
+
+    This initial interface provides the common vector-layout helpers. The
+    response blocks and their intermediates are supplied by subsequent
+    implementation layers.
+    """
+
+    @property
+    def shape(self):
+        """tuple: Shape of the combined orbital/CI Hessian operator."""
+        return self.ugg.nvar_tot, self.ugg.nvar_tot
+
+    def _unpack_ci_vector(self, x):
+        """Transform packed complex CSF coefficients to determinant arrays.
+
+        Frozen fragments receive zero determinant response vectors with the
+        shapes of their reference CI vectors.
+
+        Args:
+            x : array-like of shape (nvar_ci,)
+                Packed CSF response coefficients for nonfrozen fragments.
+
+        Returns:
+            list
+                Nested ``[fragment][root]`` determinant-basis responses.
+        """
+        x_flat = np.asarray(x).reshape(-1)
+        if x_flat.size != self.nvar_ci:
+            raise ValueError(
+                f"trial vector has size {x_flat.size}; expected "
+                f"{self.nvar_ci}"
+            )
+
+        ci1 = []
+        offset = 0
+        for ifrag, (transformers, ci0_r) in enumerate(zip(
+                self.ci_transformers, self.ci)):
+            ci1_r = []
+            for transformer, c0 in zip(transformers, ci0_r):
+                if ifrag in self.frozen_ci:
+                    ci1_r.append(np.zeros_like(c0))
+                    continue
+                ncsf = transformer.ncsf
+                c1 = cplx_csf_helper.vec_csf2det_cplx(
+                    transformer, x_flat[offset:offset + ncsf],
+                    normalize=False,
+                )
+                ci1_r.append(np.asarray(c1).reshape(np.shape(c0)))
+                offset += ncsf
+            ci1.append(ci1_r)
+        if offset != x_flat.size:
+            raise ValueError(
+                f"consumed {offset} CSF coefficients from a vector of size "
+                f"{x_flat.size}"
+            )
+        return ci1
+
+    def _flatten_ci_vector(self, ci):
+        """Transform determinant-array responses to packed complex CSFs.
+
+        Args:
+            ci : sequence
+                Nested ``[fragment][root]`` determinant-basis responses.
+
+        Returns:
+            ndarray of shape (nvar_ci,)
+                Packed CSF coefficients with frozen fragments omitted.
+        """
+        if len(ci) != len(self.ci_transformers):
+            raise ValueError("CI response must contain one entry per cell")
+        vectors = []
+        for ifrag, (transformers, ci_r) in enumerate(zip(
+                self.ci_transformers, ci)):
+            if len(transformers) != len(ci_r):
+                raise ValueError(
+                    f"cell {ifrag} has {len(ci_r)} CI responses for "
+                    f"{len(transformers)} roots"
+                )
+            if ifrag in self.frozen_ci:
+                continue
+            for transformer, c0 in zip(transformers, ci_r):
+                c0_csf = cplx_csf_helper.vec_det2csf_cplx(
+                    transformer, c0, normalize=False,
+                )
+                vectors.append(np.asarray(c0_csf).reshape(-1))
+        if not vectors:
+            return np.empty(0, dtype=np.complex128)
+        return np.concatenate(vectors)
+
+    def _zero_ci_step(self, dtype):
+        """Return zero determinant vectors with the reference CI layout."""
+        return [
+            [
+                np.zeros_like(c0, dtype=np.result_type(c0, dtype))
+                for c0 in ci0_r
+            ]
+            for ci0_r in self.ci
+        ]
+
+    @staticmethod
+    def _ci_step_is_zero(ci1):
+        """Return whether every determinant coefficient in ``ci1`` is zero."""
+        return not any(np.any(c1) for ci1_r in ci1 for c1 in ci1_r)
 
 
 # Install only the parameterization interface at this layer. Gradient methods
