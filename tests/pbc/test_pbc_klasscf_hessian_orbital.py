@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import patch
 
 import numpy as np
+from scipy import linalg
 
 from mrh.my_pyscf.pbc.mcscf import klasscf
 from mrh.my_pyscf.pbc.mcscf.klasscf import KLASSCF_HessianOperator
@@ -200,6 +201,67 @@ def _external_diagonal_reference(operator, dm2_blocks):
 
 
 class KnownValues(unittest.TestCase):
+
+    def test_periodic_orbital_update_uses_half_generator_per_kpoint(self):
+        rng = np.random.default_rng(311)
+        operator = KLASSCF_HessianOperator.__new__(
+            KLASSCF_HessianOperator
+        )
+        operator.nkpts = 3
+        operator.nao = 4
+        operator.nmo = 3
+        operator.mo_coeff = np.asarray([
+            np.linalg.qr(
+                rng.standard_normal((4, 3))
+                + 1j * rng.standard_normal((4, 3))
+            )[0]
+            for _ in range(operator.nkpts)
+        ])
+        mo0 = np.array(operator.mo_coeff, copy=True)
+        kappa = (
+            rng.standard_normal((3, 3, 3))
+            + 1j * rng.standard_normal((3, 3, 3))
+        )
+        kappa = kappa - kappa.conj().transpose(0, 2, 1)
+        kappa *= 0.2 / np.linalg.norm(kappa)
+
+        mo1 = operator._update_mo(kappa)
+
+        expected = np.asarray([
+            mo_k @ linalg.expm(kappa_k / 2.0)
+            for mo_k, kappa_k in zip(mo0, kappa)
+        ])
+        np.testing.assert_allclose(mo1, expected, atol=2e-14, rtol=2e-14)
+        np.testing.assert_array_equal(operator.mo_coeff, mo0)
+        for k in range(operator.nkpts):
+            np.testing.assert_allclose(
+                mo1[k].conj().T @ mo1[k],
+                mo0[k].conj().T @ mo0[k],
+                atol=2e-13,
+                rtol=2e-13,
+            )
+
+    def test_periodic_orbital_update_rejects_invalid_generators(self):
+        operator = KLASSCF_HessianOperator.__new__(
+            KLASSCF_HessianOperator
+        )
+        operator.nkpts = 1
+        operator.nao = 2
+        operator.nmo = 2
+        operator.mo_coeff = np.eye(2, dtype=np.complex128)[None]
+
+        with self.assertRaisesRegex(ValueError, "kappa has shape"):
+            operator._update_mo(np.zeros((2, 2)))
+
+        nonfinite = np.zeros((1, 2, 2), dtype=np.complex128)
+        nonfinite[0, 1, 0] = np.nan
+        with self.assertRaisesRegex(ValueError, "only finite values"):
+            operator._update_mo(nonfinite)
+
+        nonantihermitian = np.zeros((1, 2, 2), dtype=np.complex128)
+        nonantihermitian[0, 1, 0] = 0.1 + 0.2j
+        with self.assertRaisesRegex(ValueError, "must be anti-Hermitian"):
+            operator._update_mo(nonantihermitian)
 
     def test_orbital_hdiag_matches_unit_matvecs_and_is_cached(self):
         operator = KLASSCF_HessianOperator.__new__(
