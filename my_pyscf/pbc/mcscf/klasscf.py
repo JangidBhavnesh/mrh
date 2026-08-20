@@ -2154,6 +2154,13 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
             ci1.append(ci1_r)
         return ci1
 
+    def update_mo_ci(self, x):
+        """Apply a combined periodic orbital/CI step without rebuilding ERIs."""
+        x = np.asarray(x).reshape(-1)
+        _check_shape(x, (self.ugg.nvar_tot,), label="step_vector")
+        kappa, dci = self.ugg.unpack(x)
+        return self._update_mo(kappa), self._update_ci(dci)
+
     @property
     def shape(self):
         """tuple: Shape of the combined orbital/CI Hessian operator."""
