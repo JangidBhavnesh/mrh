@@ -160,10 +160,15 @@ def _set_toy_matvec_pipeline(operator):
         return "tdm", "tcm2"
 
     operator.make_tdm1s2c_sub = make_tdm1s2c_sub
+    operator._transition_dm1s_to_block = lambda tdm: "tdm-block"
+    operator._get_ci_veff_response = lambda tdm: "veff"
     operator._orbital_ci_hessian_response = (
-        lambda tdm1rs, tcm2: np.zeros((1, 0, 0), dtype=np.complex128)
+        lambda tdm1rs, tcm2, tdm1s_block=None, veff_ci=None:
+        np.zeros((1, 0, 0), dtype=np.complex128)
     )
-    operator.get_h1eff_response = lambda tdm: "h1-response"
+    operator.get_h1eff_response = (
+        lambda tdm, tdm1s_block=None, veff_block=None: "h1-response"
+    )
     operator.ci_response_diag = lambda ci1: [
         [2.0 * trial for trial in trial_r] for trial_r in ci1
     ]
