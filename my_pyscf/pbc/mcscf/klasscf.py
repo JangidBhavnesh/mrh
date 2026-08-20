@@ -2,6 +2,7 @@
 
 import numpy as np
 from scipy import linalg
+from pyscf import lib
 from pyscf.pbc.lib import kpts_helper
 
 from mrh.my_pyscf.mcscf.lasscf_sync_o0 import (
@@ -3630,6 +3631,74 @@ def get_hop(klas, mo_coeff=None, ci=None, ugg=None, **kwargs):
         ugg = klas.get_ugg(mo_coeff=mo_coeff, ci=ci)
     hop = getattr(klas, "_hop", KLASSCF_HessianOperator)
     return hop(klas, ugg, mo_coeff=mo_coeff, ci=ci, **kwargs)
+
+
+def _ci_guess_is_missing(ci):
+    """Return whether a nested fragment/root CI guess is incomplete."""
+    if ci is None:
+        return True
+    return any(
+        roots is None or any(c is None for c in roots)
+        for roots in ci
+    )
+
+
+def _make_keyframe_densities(klas, mo_coeff, ci):
+    """Build CI/AO densities and the periodic effective potential."""
+    casdm1frs = klas.states_make_casdm1s_sub(ci=ci)
+    casdm1s_sub = klas.make_casdm1s_sub(
+        ci=ci, casdm1frs=casdm1frs,
+    )
+    dm1s_kpts = klas.make_rdm1s(
+        mo_coeff=mo_coeff, ci=ci, casdm1s_sub=casdm1s_sub,
+    )
+    veff_kpts = klas.get_veff(
+        klas._scf.cell, dm_kpts=dm1s_kpts,
+    )
+    return casdm1frs, casdm1s_sub, dm1s_kpts, veff_kpts
+
+
+def ci_cycle(
+        klas, mo_coeff, ci0, veff_kpts, h2eff, casdm1frs, log):
+    """Solve every local CI problem once in the current LAS environment.
+
+    Each fragment Hamiltonian is built from the densities at the start of
+    the keyframe, and each unfrozen ``fcibox`` is diagonalized exactly once.
+    This is the synchronous LASSCF CI refresh, not the outer product-state
+    fixed-point solver used by standalone k-LASCI.
+    """
+    h1eff = klas.h1e_for_las(
+        mo_coeff=mo_coeff,
+        ci=ci0,
+        veff=veff_kpts,
+        eri_cas=h2eff,
+        casdm1frs=casdm1frs,
+    )
+    frozen_ci = set(getattr(klas, "frozen_ci", None) or [])
+    e_sub = []
+    ci1 = []
+    offset = 0
+    for ifrag, (fcibox, norb, nelec, h1e, c0) in enumerate(zip(
+            klas.fciboxes, klas.ncas_sub, klas.nelecas_sub, h1eff, ci0)):
+        stop = offset + int(norb)
+        h2frag = h2eff[
+            offset:stop, offset:stop, offset:stop, offset:stop
+        ]
+        if ifrag in frozen_ci:
+            energy = 0.0
+            c1 = c0
+        else:
+            max_memory = max(
+                400, klas.max_memory - lib.current_memory()[0],
+            )
+            energy, c1 = fcibox.kernel(
+                h1e, h2frag, norb, nelec,
+                ci0=c0, verbose=log, max_memory=max_memory,
+            )
+        e_sub.append(energy)
+        ci1.append(c1)
+        offset = stop
+    return e_sub, ci1
 
 # Install the gradient and Hessian interfaces on the periodic LAS variants.
 # Each variant selects the Hessian operator matching its CI layout.
