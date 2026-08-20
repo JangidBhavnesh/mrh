@@ -74,6 +74,76 @@ def make_diagonal_operator():
 
 class KnownValues(unittest.TestCase):
 
+    def test_periodic_ci_update_rotates_complex_projected_tangents(self):
+        operator = KLASSCF_HessianOperator.__new__(
+            KLASSCF_HessianOperator
+        )
+        ci00 = np.array([[1.0], [1.0j]]) / np.sqrt(2.0)
+        ci10 = np.array([[0.5, -0.5j, np.sqrt(0.5)]])
+        operator.ci = [[ci00], [ci10]]
+        dci = [
+            [np.array([[0.3 + 0.1j], [-0.2 + 0.4j]])],
+            [np.array([[0.1j, 0.25, -0.35j]])],
+        ]
+        dci0 = [
+            [np.array(dc, copy=True) for dc in dc_r]
+            for dc_r in dci
+        ]
+
+        ci1 = operator._update_ci(dci)
+
+        for ifrag, (ci0_r, dc_r, ci1_r) in enumerate(zip(
+                operator.ci, dci, ci1)):
+            for iroot, (ci0, dc, c1) in enumerate(zip(
+                    ci0_r, dc_r, ci1_r)):
+                reference = ci0.reshape(-1)
+                tangent = dc.reshape(-1)
+                tangent = tangent - reference * np.vdot(
+                    reference, tangent,
+                )
+                tangent_norm = np.linalg.norm(tangent)
+                expected = (
+                    np.cos(tangent_norm) * reference
+                    + np.sinc(tangent_norm / np.pi) * tangent
+                ).reshape(ci0.shape)
+                with self.subTest(cell=ifrag, root=iroot):
+                    np.testing.assert_allclose(c1, expected, atol=2e-14)
+                    np.testing.assert_allclose(np.linalg.norm(c1), 1.0)
+                    np.testing.assert_allclose(
+                        np.vdot(reference, tangent), 0.0, atol=2e-16,
+                    )
+                    np.testing.assert_array_equal(dc, dci0[ifrag][iroot])
+
+        parallel_step = [
+            [(0.2 - 0.3j) * ci00],
+            [np.zeros_like(ci10)],
+        ]
+        parallel_result = operator._update_ci(parallel_step)
+        np.testing.assert_allclose(parallel_result[0][0], ci00)
+        np.testing.assert_allclose(parallel_result[1][0], ci10)
+
+    def test_periodic_ci_update_validates_layout_and_vectors(self):
+        operator = KLASSCF_HessianOperator.__new__(
+            KLASSCF_HessianOperator
+        )
+        ci0 = np.array([1.0, 0.0], dtype=np.complex128)
+        operator.ci = [[ci0]]
+
+        with self.assertRaisesRegex(ValueError, "contains 0 cells; expected 1"):
+            operator._update_ci([])
+        with self.assertRaisesRegex(ValueError, "contains 0 roots; expected 1"):
+            operator._update_ci([[]])
+        with self.assertRaisesRegex(ValueError, "dci_0_0 has shape"):
+            operator._update_ci([[np.zeros((2, 1))]])
+
+        nonfinite = np.array([np.nan, 0.0])
+        with self.assertRaisesRegex(ValueError, "must contain only finite"):
+            operator._update_ci([[nonfinite]])
+
+        operator.ci = [[2.0 * ci0]]
+        with self.assertRaisesRegex(ValueError, "has norm 2.0; expected 1"):
+            operator._update_ci([[np.zeros_like(ci0)]])
+
     def test_ci_response_diag_uses_hermitian_projection(self):
         operator = KLASSCF_HessianOperator.__new__(
             KLASSCF_HessianOperator
