@@ -91,6 +91,15 @@ class _RecordingERIs(_LazyERIs):
         return value * np.arange(1, 4, dtype=float).reshape(3, 1, 1, 1)
 
 
+class _LinkFCIBox:
+    def __init__(self):
+        self.calls = []
+
+    def states_gen_linkstr(self, norb, nelec, tril):
+        self.calls.append((norb, tuple(nelec), tril))
+        return f"links-{norb}-{tuple(nelec)}"
+
+
 class KnownValues(unittest.TestCase):
 
     def test_density_and_cumulant_intermediates(self):
@@ -216,6 +225,30 @@ class KnownValues(unittest.TestCase):
                 paaa * transformed[(k1, k2, k3)].item()
             )
         np.testing.assert_allclose(operator.fock1, expected)
+
+    def test_ci_reference_actions_and_residuals(self):
+        operator = make_operator(np.zeros((2,) * 4))
+        operator.fciboxes = [_LinkFCIBox(), _LinkFCIBox()]
+        operator.h1frs = [object(), object()]
+        operator.eri_cas = object()
+        operator.ci = [
+            [np.array([1.0, 0.0], dtype=np.complex128)],
+            [np.array([0.0, 1.0], dtype=np.complex128)],
+        ]
+        hc0 = [
+            [np.array([2.0, 0.3j])],
+            [np.array([-0.2j, 3.0])],
+        ]
+        operator.Hci_all = lambda *args: hc0
+
+        operator._init_ci_()
+
+        self.assertEqual(operator.linkstrl, operator.linkstr)
+        for fcibox in operator.fciboxes:
+            self.assertFalse(fcibox.calls[0][2])
+        np.testing.assert_allclose(operator.e0, [[2.0], [3.0]])
+        np.testing.assert_allclose(operator.hci0[0][0], [0.0, 0.3j])
+        np.testing.assert_allclose(operator.hci0[1][0], [-0.2j, 0.0])
 
     def test_rejects_inconsistent_active_density_shape(self):
         operator = make_operator(np.zeros((2,) * 4))
