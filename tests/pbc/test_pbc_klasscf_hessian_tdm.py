@@ -1,8 +1,10 @@
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
 from mrh.my_pyscf.pbc.fci import direct_spin1_cplx
+from mrh.my_pyscf.pbc.mcscf import klasscf
 from mrh.my_pyscf.pbc.mcscf.klasscf import KLASSCF_HessianOperator
 
 
@@ -291,6 +293,133 @@ class KnownValues(unittest.TestCase):
         np.testing.assert_allclose(
             tcm2, cumulant_derivative, atol=2e-9, rtol=2e-9,
         )
+
+    def test_transition_dm1s_transforms_to_active_block_mos(self):
+        operator = KLASSCF_HessianOperator.__new__(
+            KLASSCF_HessianOperator
+        )
+        operator.nroots = 2
+        operator.weights = np.array([0.3, 0.7])
+        operator.nkpts = 2
+        operator.ncas = 2
+        operator.ncastot = 4
+        operator.ncore = 1
+        operator.nocc = 3
+        operator.nmo = 5
+        operator.mo_phase = np.zeros((2, 2, 4), dtype=np.complex128)
+        fourier = np.array([[1.0, 1.0], [1.0, -1.0]]) / np.sqrt(2.0)
+        for k in range(2):
+            for cell in range(2):
+                for band in range(2):
+                    operator.mo_phase[k, band, 2 * cell + band] = (
+                        fourier[k, cell]
+                    )
+
+        rng = np.random.default_rng(113)
+        tdm1rs = (
+            rng.standard_normal((2, 2, 4, 4))
+            + 1j * rng.standard_normal((2, 2, 4, 4))
+        )
+        tdm1rs += tdm1rs.swapaxes(-1, -2).conj()
+
+        actual = operator._transition_dm1s_to_block(tdm1rs)
+
+        averaged = np.einsum(
+            "r,rspq->spq", operator.weights, tdm1rs, optimize=True,
+        )
+        expected_active = np.asarray([
+            [
+                operator.mo_phase[k] @ averaged[spin]
+                @ operator.mo_phase[k].conj().T
+                for k in range(operator.nkpts)
+            ]
+            for spin in range(2)
+        ])
+        expected = np.zeros((2, 2, 5, 5), dtype=np.complex128)
+        expected[:, :, 1:3, 1:3] = expected_active
+
+        np.testing.assert_allclose(actual, expected)
+        np.testing.assert_allclose(
+            actual, actual.conj().transpose(0, 1, 3, 2),
+        )
+        np.testing.assert_allclose(actual[:, :, :1], 0.0)
+        np.testing.assert_allclose(actual[:, :, 3:], 0.0)
+        np.testing.assert_allclose(actual[:, :, :, :1], 0.0)
+        np.testing.assert_allclose(actual[:, :, :, 3:], 0.0)
+
+    def test_transition_cumulant_uses_bra_ket_momentum_blocks(self):
+        operator = KLASSCF_HessianOperator.__new__(
+            KLASSCF_HessianOperator
+        )
+        nkpts = 3
+        operator.nkpts = nkpts
+        operator.ncas = 1
+        operator.ncastot = nkpts
+        operator.ncore = 1
+        operator.nocc = 2
+        operator.nmo = 3
+        operator.kpts = np.zeros((nkpts, 3))
+        operator.las = type("LAS", (), {
+            "_scf": type("SCF", (), {"cell": object()})(),
+        })()
+        phase = np.exp(
+            2j * np.pi * np.arange(nkpts)[:, None]
+            * np.arange(nkpts)[None, :] / nkpts
+        ) / np.sqrt(nkpts)
+        operator.mo_phase = phase[:, None, :]
+        operator.eri_cas = np.zeros((nkpts,) * 4, dtype=np.complex128)
+        rng = np.random.default_rng(127)
+        tcm2 = (
+            rng.standard_normal((nkpts,) * 4)
+            + 1j * rng.standard_normal((nkpts,) * 4)
+        )
+        paaa = {
+            key: (
+                rng.standard_normal((operator.nmo, 1, 1, 1))
+                + 1j * rng.standard_normal((operator.nmo, 1, 1, 1))
+            )
+            for key in np.ndindex((nkpts,) * 3)
+        }
+        calls = []
+
+        def get_paaa(k1, k2, k3):
+            calls.append((k1, k2, k3))
+            return paaa[k1, k2, k3]
+
+        operator.eri_paaa = get_paaa
+        kconserv = np.fromfunction(
+            lambda k1, k2, k3: (k1 - k2 + k3) % nkpts,
+            (nkpts,) * 3, dtype=int,
+        ).astype(int)
+
+        expected = np.zeros(
+            (nkpts, operator.nmo, operator.nmo), dtype=np.complex128,
+        )
+        for k1, k2, k3 in np.ndindex((nkpts,) * 3):
+            k4 = kconserv[k1, k2, k3]
+            transformed = np.einsum(
+                "iP,jQ,PQRS,kR,lS->ijkl",
+                operator.mo_phase[k1].conj(),
+                operator.mo_phase[k2],
+                tcm2,
+                operator.mo_phase[k3].conj(),
+                operator.mo_phase[k4],
+                optimize=True,
+            )
+            expected[k1, :, 1:2] += np.tensordot(
+                paaa[k1, k2, k3], transformed,
+                axes=((1, 2, 3), (1, 2, 3)),
+            )
+
+        with patch.object(
+                klasscf.kpts_helper, "get_kconserv",
+                return_value=kconserv):
+            actual = operator._transition_cumulant_to_block_fock(tcm2)
+
+        np.testing.assert_allclose(actual, expected)
+        np.testing.assert_allclose(actual[:, :, :1], 0.0)
+        np.testing.assert_allclose(actual[:, :, 2:], 0.0)
+        self.assertCountEqual(calls, list(np.ndindex((nkpts,) * 3)))
 
 
 if __name__ == "__main__":
