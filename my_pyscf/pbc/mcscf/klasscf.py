@@ -973,6 +973,116 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
     implementation layers.
     """
 
+    def __init__(
+            self, las, ugg, mo_coeff=None, ci=None, casdm1frs=None,
+            h1eff=None, h2eff=None, kpts=None, kmesh=None, casdm2fr=None,
+            eris=None, veff_kpts=None, dm1s_kpts=None, mo_phase=None):
+        """Initialize the periodic Hessian intermediates.
+
+        Args:
+            las : object
+                Periodic LASCI object defining the reference state.
+            ugg : KLASSCF_UnitaryGroupGenerators
+                Orbital/CI parameterization for external trial vectors.
+            mo_coeff, ci : optional
+                Reference orbitals and CI vectors. They default to the
+                corresponding attributes of ``las``.
+            casdm1frs, casdm2fr : optional
+                Precomputed fragment density matrices in the Wannier basis.
+            h1eff, h2eff : optional
+                Precomputed local one-electron Hamiltonians and full Wannier
+                active-space two-electron integrals.
+            kpts, kmesh : optional
+                BvK k-points and three-dimensional k-point mesh.
+            eris : optional
+                Lazy block-MO periodic ERI object.
+            veff_kpts, dm1s_kpts : optional
+                Spin-resolved AO potential and density at every k-point.
+            mo_phase : optional
+                Wannier-to-Bloch active-space transformation.
+        """
+        if mo_coeff is None:
+            mo_coeff = las.mo_coeff
+        if ci is None:
+            ci = las.ci
+        if kpts is None:
+            kpts = las.kpts
+        if kmesh is None:
+            kmesh = las.kmesh
+        kpts = np.asarray(kpts)
+        kmesh = tuple(int(n) for n in kmesh)
+
+        if len(kmesh) != 3 or any(n <= 0 for n in kmesh):
+            raise ValueError("kmesh must contain three positive integers")
+        ncell = int(np.prod(kmesh))
+        if len(kpts) != ncell:
+            raise ValueError(
+                f"kpts and kmesh are inconsistent: {len(kpts)} != {ncell}"
+            )
+
+        self.las = las
+        self.ugg = ugg
+        self.mo_coeff = np.asarray(mo_coeff)
+        self.ci = ci
+        self.kpts = kpts
+        self.kmesh = kmesh
+        self.nkpts = len(kpts)
+        self.ncell = ncell
+
+        self.level_shift = las.ah_level_shift
+        self.ncore = las.ncore
+        self.ncas_sub = np.asarray(las.ncas_sub)
+        self.nelecas_sub = np.asarray(las.nelecas_sub)
+        self.ncas = int(las.ncas)
+        self.ncastot = self.ncas * self.nkpts
+        self.nao = self.mo_coeff.shape[-2]
+        self.nmo = self.mo_coeff.shape[-1]
+        self.nocc = self.ncore + self.ncas
+        if np.sum(self.ncas_sub) != self.ncastot:
+            msg = (
+                "Wannier and block-MO active spaces are inconsistent: "
+                f"sum(ncas_sub)={np.sum(self.ncas_sub)}, but ncastot="
+                f"ncas*nkpts={self.ncastot}"
+            )
+            raise ValueError(msg)
+        if self.nocc > self.nmo:
+            msg = (
+                "mo_coeff does not contain the full core and active spaces: "
+                f"ncore+ncas={self.nocc}, nmo={self.nmo}"
+            )
+            raise ValueError(msg)
+        self.fciboxes = las.fciboxes
+        self.nroots = las.nroots
+        self.weights = las.weights
+        self.ci_transformers = ugg.ci_transformers
+        self.frozen_ci = set(getattr(ugg, "frozen_ci", None) or [])
+        if len(self.ci_transformers) != len(self.ci):
+            raise ValueError(
+                "ugg.ci_transformers must contain one entry per CI cell"
+            )
+        self.nvar_ci = 0
+        for ifrag, (transformers, ci0_r) in enumerate(zip(
+                self.ci_transformers, self.ci)):
+            if len(transformers) != len(ci0_r):
+                msg = (
+                    f"cell {ifrag} has {len(transformers)} CSF transformers "
+                    f"for {len(ci0_r)} CI roots"
+                )
+                raise ValueError(msg)
+            if ifrag not in self.frozen_ci:
+                self.nvar_ci += sum(t.ncsf for t in transformers)
+
+        self._init_dms_(casdm1frs, casdm2fr, dm1s_kpts)
+        self._init_ham_(h1eff, h2eff, veff_kpts)
+        self._init_eri_(eris)
+        self._init_orb_(mo_phase)
+        self._init_ci_()
+        self._Horb_diag_matvec_cache = None
+        self._Horb_diag_external_cache = None
+        self._Horb_active_active_cache = None
+        self._active_wannier_intermediates_cache = None
+        self._Horb_external_active_cross_cache = None
+
     def _init_dms_(self, casdm1frs, casdm2fr=None, dm1s_kpts=None):
         """Initialize reference density matrices in their natural bases.
 
