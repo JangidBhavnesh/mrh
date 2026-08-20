@@ -2310,6 +2310,860 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
             for diag_r, offdiag_r in zip(ci2_diag, ci2_offdiag)
         ]
 
+    def _orbital_ci_hessian_response(self, tdm1rs, tcm2):
+        """Apply the orbital-output/CI-input Hessian block.
+
+        The transition densities supplied here are already Hermitian
+        completed.  The three terms are the one-electron response,
+        CI-induced JK response acting on the reference density, and the
+        transition-cumulant contraction.  The factor of two belongs here:
+        :meth:`_matvec` divides the unpacked orbital response by two when it
+        packs the combined Hessian vector, matching the molecular LASSCF
+        convention.
+        """
+        tdm1s_block = self._transition_dm1s_to_block(tdm1rs)
+        veff_ci = self._get_ci_veff_response(tdm1s_block)
+        cumulant_fock = self._transition_cumulant_to_block_fock(tcm2)
+        _check_shape(
+            cumulant_fock,
+            (self.nkpts, self.nmo, self.nmo),
+            label="transition_cumulant_fock",
+        )
+
+        dtype = np.result_type(
+            tdm1s_block.dtype, veff_ci.dtype, cumulant_fock.dtype,
+            self.h1s.dtype, self.dm1s.dtype,
+        )
+        fock_ci = np.array(cumulant_fock, dtype=dtype, copy=True)
+        for k in range(self.nkpts):
+            for spin in range(2):
+                fock_ci[k] += (
+                    self.h1s[spin, k] @ tdm1s_block[spin, k]
+                )
+                fock_ci[k] += (
+                    veff_ci[spin, k] @ self.dm1s[spin, k]
+                )
+
+        return 2.0 * (
+            fock_ci - fock_ci.conj().transpose(0, 2, 1)
+        )
+
+    def _orbital_hamiltonian_response(self, kappa):
+        """Differentiate the fragment CI Hamiltonians with the orbitals.
+
+        External rotations are evaluated with the momentum-resolved
+        block-MO intermediates and then transformed to the complete Wannier
+        active space.  Projected active-active rotations are evaluated
+        directly in that Wannier space, where the LAS fragment partition is
+        defined.  The returned one- and two-electron operators are the full
+        Hermitian first derivatives used by the CI gradient response.
+        """
+        kappa = np.asarray(kappa)
+        _check_shape(
+            kappa, (self.nkpts, self.nmo, self.nmo), label="kappa",
+        )
+        active = slice(self.ncore, self.nocc)
+        dtype = np.result_type(
+            kappa.dtype, self.h1s.dtype, self.eri_cas.dtype,
+            self.mo_phase.dtype, np.complex128,
+        )
+        h1s_prime = np.zeros(
+            (2, self.ncastot, self.ncastot), dtype=dtype,
+        )
+        h2_prime = np.zeros((self.ncastot,) * 4, dtype=dtype)
+
+        kappa_external = np.array(kappa, copy=True)
+        kappa_external[:, active, active] = 0.0
+        if np.any(kappa_external):
+            odm1s = -np.einsum(
+                "skpr,krq->skpq",
+                self.dm1s, kappa_external, optimize=True,
+            )
+            veff_prime = self._get_veff_response(odm1s)
+            h1s_block_prime = np.empty(
+                (2, self.nkpts, self.ncas, self.ncas), dtype=dtype,
+            )
+            for spin in range(2):
+                for k in range(self.nkpts):
+                    h1s_block_prime[spin, k] = (
+                        kappa_external[k].conj().T @ self.h1s[spin, k]
+                        + self.h1s[spin, k] @ kappa_external[k]
+                        + veff_prime[spin, k]
+                    )[active, active]
+            h1s_prime += np.einsum(
+                "kaP,skab,kbQ->sPQ",
+                self.mo_phase.conj(), h1s_block_prime, self.mo_phase,
+                optimize=True,
+            )
+
+            kconserv = kpts_helper.get_kconserv(
+                self.las._scf.cell, self.kpts,
+            )
+            for k1, k2, k3 in kpts_helper.loop_kkk(self.nkpts):
+                k4 = kconserv[k1, k2, k3]
+                ppaa = self.eris.ppaa(k1, k2, k3)
+                papa = self.eris.papa(k1, k2, k3)
+                paap = self.eris.paap(k1, k2, k3)
+                _check_shape(
+                    ppaa,
+                    (self.nmo, self.nmo, self.ncas, self.ncas),
+                    label=f"ppaa[{k1},{k2},{k3}]",
+                )
+                _check_shape(
+                    papa,
+                    (self.nmo, self.ncas, self.nmo, self.ncas),
+                    label=f"papa[{k1},{k2},{k3}]",
+                )
+                _check_shape(
+                    paap,
+                    (self.nmo, self.ncas, self.ncas, self.nmo),
+                    label=f"paap[{k1},{k2},{k3}]",
+                )
+
+                eri_block_prime = np.einsum(
+                    "pa,pbcd->abcd",
+                    kappa_external[k1, :, active].conj(),
+                    ppaa[:, active], optimize=True,
+                )
+                eri_block_prime += np.einsum(
+                    "pb,apcd->abcd",
+                    kappa_external[k2, :, active],
+                    ppaa[active], optimize=True,
+                )
+                eri_block_prime += np.einsum(
+                    "pc,abpd->abcd",
+                    kappa_external[k3, :, active].conj(),
+                    papa[active], optimize=True,
+                )
+                eri_block_prime += np.einsum(
+                    "pd,abcp->abcd",
+                    kappa_external[k4, :, active],
+                    paap[active], optimize=True,
+                )
+                h2_prime += np.einsum(
+                    "aP,bQ,abcd,cR,dS->PQRS",
+                    self.mo_phase[k1].conj(), self.mo_phase[k2],
+                    eri_block_prime,
+                    self.mo_phase[k3].conj(), self.mo_phase[k4],
+                    optimize=True,
+                )
+
+        kappa_active = kappa[:, active, active]
+        if np.any(kappa_active):
+            rotation_map = self.ugg.active_active_map
+            kappa_wannier = rotation_map.block_to_wannier(kappa_active)
+            h1_wannier = self._active_wannier_intermediates()[0]
+            h1_prime = (
+                kappa_wannier.conj().T @ h1_wannier
+                + h1_wannier @ kappa_wannier
+            )
+            eri = self.eri_cas
+            eri_prime = np.einsum(
+                "ap,aqrs->pqrs", kappa_wannier.conj(), eri,
+                optimize=True,
+            )
+            eri_prime += np.einsum(
+                "bq,pbrs->pqrs", kappa_wannier, eri,
+                optimize=True,
+            )
+            eri_prime += np.einsum(
+                "cr,pqcs->pqrs", kappa_wannier.conj(), eri,
+                optimize=True,
+            )
+            eri_prime += np.einsum(
+                "ds,pqrd->pqrs", kappa_wannier, eri,
+                optimize=True,
+            )
+            coulomb_prime = np.tensordot(
+                self.casdm1s, eri_prime, axes=((1, 2), (2, 3)),
+            )
+            exchange_prime = np.tensordot(
+                self.casdm1s, eri_prime, axes=((1, 2), (2, 1)),
+            )
+            h1s_prime += (
+                h1_prime[None] + coulomb_prime
+                + coulomb_prime[::-1] - exchange_prime
+            )
+            h2_prime += eri_prime
+
+        # Differentiate the same state- and fragment-resolved mean-field
+        # construction used by pbc.klasci.h1e_for_las.
+        h1rs_prime = np.empty(
+            (self.nroots, 2, self.ncastot, self.ncastot), dtype=dtype,
+        )
+        for iroot in range(self.nroots):
+            dm1s = self.casdm1rs[iroot] - self.casdm1s
+            coulomb = np.tensordot(
+                dm1s, h2_prime, axes=((1, 2), (2, 3)),
+            )
+            exchange = np.tensordot(
+                dm1s, h2_prime, axes=((1, 2), (2, 1)),
+            )
+            h1rs_prime[iroot] = (
+                h1s_prime + coulomb + coulomb[::-1] - exchange
+            )
+
+        h1frs_prime = []
+        offsets = np.cumsum(np.concatenate(([0], self.ncas_sub))).astype(int)
+        for ifrag in range(len(self.ncas_sub)):
+            i, j = offsets[ifrag:ifrag + 2]
+            dm1s = np.asarray(self.casdm1frs[ifrag])
+            h2_fragment = h2_prime[i:j, i:j, i:j, i:j]
+            coulomb = np.tensordot(
+                dm1s, h2_fragment, axes=((2, 3), (2, 3)),
+            )
+            exchange = np.tensordot(
+                dm1s, h2_fragment, axes=((2, 3), (2, 1)),
+            )
+            h1frs_prime.append(
+                h1rs_prime[:, :, i:j, i:j]
+                - coulomb - coulomb[:, ::-1] + exchange
+            )
+
+        return h1frs_prime, h2_prime
+
+    def _ci_orbital_hessian_response(self, kappa):
+        """Apply the CI-output/orbital-input Hessian block."""
+        h1frs_prime, h2_prime = self._orbital_hamiltonian_response(kappa)
+        hc = self.Hci_all(None, h1frs_prime, h2_prime, self.ci)
+        return [
+            [
+                2.0 * (hc0 - np.vdot(c0, hc0) * c0)
+                for hc0, c0 in zip(hc_r, ci0_r)
+            ]
+            for hc_r, ci0_r in zip(hc, self.ci)
+        ]
+
+    def _orbital_hessian_response_block(self, kappa1):
+        """Apply the block-MO response contractions without AA correction."""
+        odm1s, ocm2 = self._make_orbital_response_dm(kappa1)
+        veff_prime = self._get_veff_response(odm1s)
+        return self.orbital_response(
+            kappa1, odm1s, ocm2, veff_prime,
+        )
+
+    def _orbital_hessian_response(self, kappa1):
+        """Apply the orbital-orbital Hessian block to ``kappa1``.
+
+        The general block-MO contractions are retained for all external
+        sectors.  The contribution from a projected active-active input to
+        the active-active output is evaluated by the exact complex Wannier
+        formula and replaces the real-orbital one-sided completion in that
+        block.
+        """
+        active = slice(self.ncore, self.nocc)
+        kappa_active = np.asarray(kappa1)[:, active, active]
+        if not np.any(kappa_active):
+            return self._orbital_hessian_response_block(kappa1)
+
+        rotation_map = self.ugg.active_active_map
+        kappa_wannier = rotation_map.block_to_wannier(kappa_active)
+        response_wannier = (
+            self._orbital_hessian_response_active_active_wannier(
+                kappa_wannier,
+            )
+        )
+        response_active = rotation_map.wannier_to_block(response_wannier)
+
+        kappa_external = np.array(kappa1, copy=True)
+        kappa_external[:, active, active] = 0.0
+        if np.any(kappa_external):
+            response_external = self._orbital_hessian_response_block(
+                kappa_external,
+            )
+        else:
+            response_external = np.zeros_like(kappa1)
+        response_active += response_external[:, active, active]
+
+        active_coordinates = rotation_map.pack(kappa_active)
+        response_cross = self._apply_Horb_active_external_cross(
+            active_coordinates,
+        )
+        x_cross = np.zeros(self.ugg.nvar_orb, dtype=response_cross.dtype)
+        x_cross[:self.ugg.nvar_orb_external] = response_cross
+        response = response_external + 2.0 * self.ugg.unpack_orb(x_cross)
+        response[:, active, active] = response_active
+        return response
+
+    def _get_Horb_external_active_cross(self):
+        """Return the AA-input/external-output real-coordinate Hessian.
+
+        Complex orbital Hessians are real-linear.  The established block-MO
+        response is finite-difference verified for external inputs, including
+        its projected active output.  This routine builds that reciprocal
+        external-to-active block in real coordinates and transposes it to
+        obtain the active-to-external block required for complex AA inputs.
+        """
+        cached = getattr(self, "_Horb_external_active_cross_cache", None)
+        if cached is not None:
+            return np.array(cached, copy=True)
+
+        nvar_external = self.ugg.nvar_orb_external
+        nvar_active = self.ugg.nvar_orb_active_active
+        active_start = nvar_external
+        active_stop = active_start + nvar_active
+        external_to_active = np.empty(
+            (2 * nvar_active, 2 * nvar_external), dtype=float,
+        )
+        unit = np.zeros(self.ugg.nvar_orb, dtype=np.complex128)
+        for index in range(nvar_external):
+            unit[index] = 1.0
+            kappa = self.ugg.unpack_orb(unit)
+            response = self._orbital_hessian_response_block(kappa)
+            active_response = self.ugg.pack_orb(
+                response / 2.0,
+            )[active_start:active_stop]
+            external_to_active[:nvar_active, index] = active_response.real
+            external_to_active[nvar_active:, index] = active_response.imag
+
+            unit[index] = 1.0j
+            kappa = self.ugg.unpack_orb(unit)
+            response = self._orbital_hessian_response_block(kappa)
+            active_response = self.ugg.pack_orb(
+                response / 2.0,
+            )[active_start:active_stop]
+            column = nvar_external + index
+            external_to_active[:nvar_active, column] = active_response.real
+            external_to_active[nvar_active:, column] = active_response.imag
+            unit[index] = 0.0
+
+        active_to_external = external_to_active.T
+        self._Horb_external_active_cross_cache = np.array(
+            active_to_external, copy=True,
+        )
+        return active_to_external
+
+    def _apply_Horb_active_external_cross_reference(self, coordinates):
+        """Apply the column-built AA-input/external-output reference."""
+        coordinates = np.asarray(coordinates).reshape(-1)
+        nvar_active = self.ugg.nvar_orb_active_active
+        if coordinates.size != nvar_active:
+            msg = (
+                f"active-active vector has size {coordinates.size}; "
+                f"expected {nvar_active}"
+            )
+            raise ValueError(msg)
+        real_coordinates = np.concatenate((
+            coordinates.real, coordinates.imag,
+        ))
+        response = self._get_Horb_external_active_cross() @ real_coordinates
+        nvar_external = self.ugg.nvar_orb_external
+        return response[:nvar_external] + 1.0j * response[nvar_external:]
+
+    def _apply_Horb_active_external_cross(self, coordinates):
+        """Apply the AA-input/external-output cross block directly.
+
+        The validated forward map takes one block-MO external rotation to a
+        projected active-active response.  This routine applies its adjoint
+        to the supplied active coordinates without constructing that map one
+        external column at a time.  The adjoint is taken with the doubled-real
+        optimizer metric; it is not a complex conjugate transpose.
+
+        All two-electron tensors retain bra-ket-bra-ket order.  An ERI block
+        requested as ``(k1, k2, k3)`` therefore has fourth momentum
+        ``k4 = kconserv[k1, k2, k3]`` and obeys
+        ``k1 - k2 + k3 - k4 = G``.  The three reverse contractions accumulate
+        the response at ``k2``, ``k3``, and ``k4``, respectively.
+        """
+        coordinates = np.asarray(coordinates).reshape(-1)
+        rotation_map = self.ugg.active_active_map
+        nvar_active = self.ugg.nvar_orb_active_active
+        if coordinates.size != nvar_active:
+            msg = (
+                f"active-active vector has size {coordinates.size}; "
+                f"expected {nvar_active}"
+            )
+            raise ValueError(msg)
+
+        active = slice(self.ncore, self.nocc)
+        dtype = np.result_type(
+            coordinates.dtype, rotation_map.basis.dtype, self.fock1.dtype,
+        )
+        dual = np.zeros(
+            (self.nkpts, self.nmo, self.nmo), dtype=dtype,
+        )
+        # Orbital Hessian responses are packed as kappa2/2.  Supplying half
+        # the unpacked active direction is therefore the correct adjoint seed
+        # for the full anti-Hermitian response matrix.
+        dual[:, active, active] = rotation_map.unpack(coordinates) / 2.0
+        adjoint = np.zeros_like(dual)
+
+        # Adjoint of the one-body and JK response.  The periodic Coulomb and
+        # exchange map is self-adjoint in the uniform k-point trace metric, so
+        # its reverse action is another call to the same spin-resolved map.
+        potential_seed = np.empty(
+            (2, self.nkpts, self.nmo, self.nmo), dtype=dtype,
+        )
+        dm1s_h = self.dm1s.conj().transpose(0, 1, 3, 2)
+        for spin in range(2):
+            seed = dual @ dm1s_h[spin]
+            potential_seed[spin] = (
+                seed + seed.conj().transpose(0, 2, 1)
+            ) / 2.0
+        veff_adjoint = self._get_veff_from_block_dm1s(potential_seed)
+
+        for spin in range(2):
+            density_seed = (
+                self.h1s[spin].conj().transpose(0, 2, 1) @ dual
+                + veff_adjoint[spin]
+            )
+            adjoint += density_seed @ dm1s_h[spin]
+            adjoint -= dm1s_h[spin] @ density_seed
+
+        fock1_h = self.fock1.conj().transpose(0, 2, 1)
+        adjoint += (fock1_h @ dual - dual @ fock1_h) / 2.0
+
+        fock1_one_body = sum(
+            self.h1s[spin] @ self.dm1s[spin] for spin in range(2)
+        )
+        fock1_cumulant_h = (
+            self.fock1 - fock1_one_body
+        ).conj().transpose(0, 2, 1)
+        adjoint -= fock1_cumulant_h @ dual
+
+        kconserv = kpts_helper.get_kconserv(
+            self.las._scf.cell, self.kpts,
+        )
+        for k1, k2, k3 in kpts_helper.loop_kkk(self.nkpts):
+            k4 = kconserv[k1, k2, k3]
+            cascm2_kpts = _get_casdm2_kpts(
+                self.cascm2, self.mo_phase, (k1, k2, k3, k4),
+            )
+            ppaa = self.eris.ppaa(k1, k2, k3)
+            papa = self.eris.papa(k1, k2, k3)
+            paap = self.eris.paap(k1, k2, k3)
+            dual_active = dual[k1][:, active]
+
+            # Adjoint of ppaa[p,x,s,t] kappa[k2,x,r] L[q,r,s,t].
+            adjoint[k2][:, active] += np.einsum(
+                "pq,pxst,qrst->xr",
+                dual_active, ppaa.conj(), cascm2_kpts.conj(),
+                optimize=True,
+            )
+            # Adjoint of -kappa[k3,s,x] papa[p,r,x,t] L[q,r,s,t].
+            adjoint[k3][active, :] -= np.einsum(
+                "pq,prxt,qrst->sx",
+                dual_active, papa.conj(), cascm2_kpts.conj(),
+                optimize=True,
+            )
+            # Adjoint of paap[p,r,s,x] kappa[k4,x,t] L[q,r,s,t].
+            adjoint[k4][:, active] += np.einsum(
+                "pq,prsx,qrst->xt",
+                dual_active, paap.conj(), cascm2_kpts.conj(),
+                optimize=True,
+            )
+
+        response = adjoint - adjoint.conj().transpose(0, 2, 1)
+        packed = np.asarray(self.ugg.pack_orb(response)).reshape(-1)
+        nvar_external = self.ugg.nvar_orb_external
+        return packed[:nvar_external]
+
+    def _active_wannier_intermediates(self):
+        """Return active-only Hessian intermediates in the Wannier basis."""
+        cached = getattr(self, "_active_wannier_intermediates_cache", None)
+        if cached is not None:
+            return tuple(np.array(item, copy=True) for item in cached)
+
+        rotation_map = self.ugg.active_active_map
+        if not np.allclose(
+                rotation_map.mo_phase, self.mo_phase,
+                atol=1e-10, rtol=1e-10):
+            raise ValueError(
+                "UGG and Hessian operator use different Wannier/block maps"
+            )
+
+        h1_wannier = np.asarray(self.las.h1e_for_cas(
+            mo_coeff=self.mo_coeff, ncas=self.ncas, ncore=self.ncore,
+        )[0])
+        _check_shape(
+            h1_wannier, (self.ncastot, self.ncastot),
+            label="h1_wannier",
+        )
+        coulomb = np.tensordot(
+            self.casdm1s, self.eri_cas, axes=((1, 2), (2, 3)),
+        )
+        exchange = np.tensordot(
+            self.casdm1s, self.eri_cas, axes=((1, 2), (2, 1)),
+        )
+        h1s_wannier = h1_wannier[None] + coulomb + coulomb[::-1] - exchange
+
+        active = slice(self.ncore, self.nocc)
+        h1s_block_wannier = np.asarray([
+            rotation_map.block_to_wannier(self.h1s[spin, :, active, active])
+            for spin in range(2)
+        ])
+        if not np.allclose(
+                h1s_wannier, h1s_block_wannier,
+                atol=2e-8, rtol=2e-8):
+            error = np.max(np.abs(h1s_wannier - h1s_block_wannier))
+            raise ValueError(
+                "Wannier and block active one-electron intermediates differ; "
+                f"maximum error is {error:.3e}"
+            )
+
+        fock1_wannier = sum(
+            h1s_wannier[spin] @ self.casdm1s[spin]
+            for spin in range(2)
+        )
+        fock1_wannier += np.tensordot(
+            self.eri_cas, self.cascm2,
+            axes=((1, 2, 3), (1, 2, 3)),
+        )
+        self._active_wannier_intermediates_cache = (
+            np.array(h1_wannier, copy=True),
+            np.array(fock1_wannier, copy=True),
+        )
+        return h1_wannier, fock1_wannier
+
+    def _orbital_hessian_response_active_active_wannier(
+            self, kappa_wannier):
+        """Apply the analytic active-active Hessian in Wannier form.
+
+        This is the active-only specialization of the molecular LASSCF OO
+        response.  All RDMs and two-electron integrals remain in the complete
+        Wannier active space.  The response includes the covariant
+        half-commutator used by :meth:`_orbital_hessian_response`.
+        """
+        kappa_wannier = np.asarray(kappa_wannier)
+        _check_shape(
+            kappa_wannier, (self.ncastot, self.ncastot),
+            label="kappa_wannier",
+        )
+        h1_wannier, fock1_wannier = (
+            self._active_wannier_intermediates()
+        )
+
+        # Differentiate U^dagger h U and the four orbital coefficients of
+        # (pq|rs) directly.  This is valid for a general complex
+        # anti-Hermitian kappa and avoids real-orbital transpose shortcuts.
+        h1_prime = (
+            h1_wannier @ kappa_wannier
+            - kappa_wannier @ h1_wannier
+        )
+        eri = self.eri_cas
+        eri_prime = np.einsum(
+            "ap,aqrs->pqrs", kappa_wannier.conj(), eri,
+            optimize=True,
+        )
+        eri_prime += np.einsum(
+            "bq,pbrs->pqrs", kappa_wannier, eri,
+            optimize=True,
+        )
+        eri_prime += np.einsum(
+            "cr,pqcs->pqrs", kappa_wannier.conj(), eri,
+            optimize=True,
+        )
+        eri_prime += np.einsum(
+            "ds,pqrd->pqrs", kappa_wannier, eri,
+            optimize=True,
+        )
+
+        coulomb_prime = np.tensordot(
+            self.casdm1s, eri_prime, axes=((1, 2), (2, 3)),
+        )
+        exchange_prime = np.tensordot(
+            self.casdm1s, eri_prime, axes=((1, 2), (2, 1)),
+        )
+        h1s_prime = (
+            h1_prime[None] + coulomb_prime + coulomb_prime[::-1]
+            - exchange_prime
+        )
+        fock1_prime = sum(
+            h1s_prime[spin] @ self.casdm1s[spin]
+            for spin in range(2)
+        )
+        fock1_prime += np.tensordot(
+            eri_prime, self.cascm2,
+            axes=((1, 2, 3), (1, 2, 3)),
+        )
+
+        gradient_prime = fock1_prime - fock1_prime.conj().T
+        connection = (
+            fock1_wannier @ kappa_wannier
+            - kappa_wannier @ fock1_wannier
+        ) / 2.0
+        connection -= connection.conj().T
+        return gradient_prime - connection
+
+    def _apply_Horb_active_active(self, coordinates):
+        """Apply the analytic Wannier AA Hessian in projected coordinates."""
+        rotation_map = self.ugg.active_active_map
+        coordinates = np.asarray(coordinates).reshape(-1)
+        if coordinates.size != rotation_map.nvar:
+            msg = (
+                f"active-active vector has size {coordinates.size}; "
+                f"expected {rotation_map.nvar}"
+            )
+            raise ValueError(msg)
+        kappa_block = rotation_map.unpack(coordinates)
+        kappa_wannier = rotation_map.block_to_wannier(kappa_block)
+        response_wannier = (
+            self._orbital_hessian_response_active_active_wannier(
+                kappa_wannier,
+            )
+        )
+        response_block = rotation_map.wannier_to_block(response_wannier)
+        return rotation_map.pack(response_block / 2.0)
+
+    def _make_orbital_response_dm(self, kappa):
+        """Build one-sided 1-RDM and cumulant responses.
+
+        ``odm1s`` is in the block-MO basis.  ``ocm2[k1,k2,k3]`` has three
+        active indices at ``k1``, ``k2``, and ``k3`` and one general orbital
+        index at ``k4``.  These are bra-ket-bra-ket tensor indices, so their
+        momentum rule is ``k1 - k2 + k3 - k4 = G``.
+        """
+        _check_shape(
+            kappa, (self.nkpts, self.nmo, self.nmo), label="kappa",
+        )
+        odm1s = -np.einsum(
+            "skpr,krq->skpq", self.dm1s, kappa, optimize=True,
+        )
+
+        dtype = np.result_type(self.cascm2.dtype, kappa.dtype)
+        ocm2 = np.empty(
+            (self.nkpts, self.nkpts, self.nkpts)
+            + (self.ncas, self.ncas, self.ncas, self.nmo),
+            dtype=dtype,
+        )
+        kconserv = kpts_helper.get_kconserv(
+            self.las._scf.cell, self.kpts,
+        )
+        active = slice(self.ncore, self.nocc)
+        for k1, k2, k3 in kpts_helper.loop_kkk(self.nkpts):
+            k4 = kconserv[k1, k2, k3]
+            cascm2_kpts = _get_casdm2_kpts(
+                self.cascm2, self.mo_phase, (k1, k2, k3, k4),
+            )
+            ocm2[k1, k2, k3] = -np.einsum(
+                "abcd,dp->abcp",
+                cascm2_kpts, kappa[k4, active, :],
+                optimize=True,
+            )
+        return odm1s, ocm2
+
+    def _get_veff_response(self, odm1s):
+        """Return spin-resolved JK response in the block-MO basis."""
+        _check_shape(
+            odm1s,
+            (2, self.nkpts, self.nmo, self.nmo),
+            label="odm1s",
+        )
+        # odm1s = -D kappa is the ket-side response.  Because D is Hermitian
+        # and kappa is anti-Hermitian, its bra-side partner is
+        # (-D kappa)^dagger = kappa D.  Thus this adjoint is the actual
+        # first-order Hermitian density, not a real-orbital transpose shortcut.
+        dm1s_mo = odm1s + odm1s.conj().transpose(0, 1, 3, 2)
+        return self._get_veff_from_block_dm1s(dm1s_mo)
+
+    def _get_ci_veff_response(self, tdm1s_block):
+        """Return JK response to a full Hermitian CI transition density.
+
+        ``tdm1s_block`` is already Hermitian and must not be completed a
+        second time.  This helper is normalization neutral: it returns the
+        response to exactly the density supplied by its caller.
+        """
+        _check_shape(
+            tdm1s_block,
+            (2, self.nkpts, self.nmo, self.nmo),
+            label="transition_dm1s_block",
+        )
+        return self._get_veff_from_block_dm1s(tdm1s_block)
+
+    def _get_veff_from_block_dm1s(self, dm1s_mo):
+        """Transform a Hermitian block-MO density through the AO JK map."""
+        dm1s_mo = np.asarray(dm1s_mo)
+        _check_shape(
+            dm1s_mo,
+            (2, self.nkpts, self.nmo, self.nmo),
+            label="dm1s_mo_response",
+        )
+        dtype = np.result_type(dm1s_mo.dtype, self.mo_coeff.dtype)
+        dm1s_ao = np.empty(
+            (2, self.nkpts, self.nao, self.nao), dtype=dtype,
+        )
+        for k in range(self.nkpts):
+            mo_coeff = self.mo_coeff[k]
+            dm1s_ao[:, k] = (
+                mo_coeff @ dm1s_mo[:, k] @ mo_coeff.conj().T
+            )
+
+        veff_ao = np.asarray(self.las.get_veff(
+            self.las._scf.cell, dm_kpts=dm1s_ao,
+            hermi=1, kpts=self.kpts,
+        ))
+        _check_shape(
+            veff_ao,
+            (2, self.nkpts, self.nao, self.nao),
+            label="veff_prime_ao",
+        )
+        veff_mo = np.empty(
+            (2, self.nkpts, self.nmo, self.nmo),
+            dtype=np.result_type(veff_ao.dtype, self.mo_coeff.dtype),
+        )
+        for k in range(self.nkpts):
+            mo_coeff = self.mo_coeff[k]
+            veff_mo[:, k] = (
+                mo_coeff.conj().T @ veff_ao[:, k] @ mo_coeff
+            )
+        return veff_mo
+
+    def _symmetrize_active_ocm2(self, ocm2):
+        """Complete the active cumulant response using its two symmetries.
+
+        For bra-ket-bra-ket ordering, Hermiticity is
+        ``L[a,b,c,d] = L[b,a,d,c].conj()`` and electron-pair exchange is
+        ``L[a,b,c,d] = L[c,d,a,b]``.  The corresponding source k-point blocks
+        are ``(k2,k1,k4)`` and ``(k3,k4,k1)``; each still obeys the original
+        ``+ - + -`` momentum rule.
+        """
+        _check_shape(
+            ocm2,
+            (self.nkpts, self.nkpts, self.nkpts,
+             self.ncas, self.ncas, self.ncas, self.nmo),
+            label="ocm2",
+        )
+        active = slice(self.ncore, self.nocc)
+        one_sided = ocm2[..., active]
+        half = np.empty_like(one_sided)
+        result = np.empty_like(one_sided)
+        kconserv = kpts_helper.get_kconserv(
+            self.las._scf.cell, self.kpts,
+        )
+
+        for k1, k2, k3 in kpts_helper.loop_kkk(self.nkpts):
+            k4 = kconserv[k1, k2, k3]
+            half[k1, k2, k3] = (
+                one_sided[k1, k2, k3]
+                + one_sided[k2, k1, k4].conj().transpose(1, 0, 3, 2)
+            )
+        for k1, k2, k3 in kpts_helper.loop_kkk(self.nkpts):
+            k4 = kconserv[k1, k2, k3]
+            result[k1, k2, k3] = (
+                half[k1, k2, k3]
+                + half[k3, k4, k1].transpose(2, 3, 0, 1)
+            )
+        return result
+
+    def orbital_response(self, kappa, odm1s, ocm2, veff_prime):
+        """Build the complex block-MO orbital Hessian response."""
+        _check_shape(
+            kappa, (self.nkpts, self.nmo, self.nmo), label="kappa",
+        )
+        _check_shape(
+            odm1s, (2, self.nkpts, self.nmo, self.nmo), label="odm1s",
+        )
+        _check_shape(
+            veff_prime,
+            (2, self.nkpts, self.nmo, self.nmo),
+            label="veff_prime",
+        )
+        edm1s = odm1s + odm1s.conj().transpose(0, 1, 3, 2)
+        ecm2 = self._symmetrize_active_ocm2(ocm2)
+        dtype = np.result_type(
+            edm1s.dtype, ecm2.dtype, veff_prime.dtype, self.fock1.dtype,
+        )
+        f1_prime = np.zeros(
+            (self.nkpts, self.nmo, self.nmo), dtype=dtype,
+        )
+        fock1_one_body = np.zeros_like(f1_prime)
+        active = slice(self.ncore, self.nocc)
+
+        for k in range(self.nkpts):
+            for spin in range(2):
+                fock1_one_body[k] += (
+                    self.h1s[spin, k] @ self.dm1s[spin, k]
+                )
+                f1_prime[k] += self.h1s[spin, k] @ edm1s[spin, k]
+                f1_prime[k] += veff_prime[spin, k] @ self.dm1s[spin, k]
+            f1_prime[k] += (
+                self.fock1[k] @ kappa[k]
+                - kappa[k] @ self.fock1[k]
+            ) / 2.0
+
+        for k1, k2, k3 in kpts_helper.loop_kkk(self.nkpts):
+            paaa = self.eri_paaa(k1, k2, k3)
+            f1_prime[k1][:, active] += np.tensordot(
+                paaa, ecm2[k1, k2, k3],
+                axes=((1, 2, 3), (1, 2, 3)),
+            )
+
+        f1_prime += self._orbital_response_external_cumulant(
+            kappa, self.fock1 - fock1_one_body,
+        )
+        return f1_prime - f1_prime.conj().transpose(0, 2, 1)
+
+    def _orbital_response_external_cumulant(
+            self, kappa, fock1_cumulant):
+        """Differentiate the cumulant Fock term for external rotations.
+
+        The molecular real-orbital implementation reduces all four integral
+        derivatives to ``ppaa`` and ``papa`` by permutational symmetry.  For
+        complex Bloch orbitals, some of those permutations also conjugate the
+        integrals.  Contracting the three differentiated active integral
+        indices directly with the disk-backed ``ppaa``, ``papa``, and
+        ``paap`` blocks avoids that real-only assumption.
+
+        The returned matrix omits the final skew-Hermitian completion.  Its
+        ``-F_cumulant @ kappa`` connection term combines with the half
+        commutator already added by :meth:`orbital_response` to give the
+        covariant orbital Hessian used by the molecular implementation.
+
+        This is the first-order expansion of ``mc1step.gorb_update``.  The
+        stored ERIs retain bra-ket-bra-ket order and therefore always use
+        ``k1 - k2 + k3 - k4 = G``.  ``mc1step`` also constructs a regrouped
+        ``hdm2_ppaa[p,u,q,v]`` tensor whose labels obey ``k1 + k2 - k3 - k4``;
+        that alternate rule does not apply here because the contractions below
+        consume ``kappa`` before such a regrouped Hessian tensor is formed.
+        """
+        _check_shape(
+            kappa, (self.nkpts, self.nmo, self.nmo), label="kappa",
+        )
+        _check_shape(
+            fock1_cumulant,
+            (self.nkpts, self.nmo, self.nmo),
+            label="fock1_cumulant",
+        )
+        active = slice(self.ncore, self.nocc)
+        kappa_external = np.array(kappa, copy=True)
+        kappa_external[:, active, active] = 0
+        response = -np.einsum(
+            "kpr,krq->kpq", fock1_cumulant, kappa_external,
+            optimize=True,
+        )
+        kconserv = kpts_helper.get_kconserv(
+            self.las._scf.cell, self.kpts,
+        )
+
+        for k1, k2, k3 in kpts_helper.loop_kkk(self.nkpts):
+            k4 = kconserv[k1, k2, k3]
+            cascm2_kpts = _get_casdm2_kpts(
+                self.cascm2, self.mo_phase, (k1, k2, k3, k4),
+            )
+            ppaa = self.eris.ppaa(k1, k2, k3)
+            papa = self.eris.papa(k1, k2, k3)
+            paap = self.eris.paap(k1, k2, k3)
+            # Ket index 2 of ppaa: dU/dt = kappa.
+            response[k1][:, active] += np.einsum(
+                "pxst,xr,qrst->pq",
+                ppaa, kappa_external[k2, :, active], cascm2_kpts,
+                optimize=True,
+            )
+            # Bra index 3 of papa: d(U*)/dt = kappa*; using
+            # kappa*_{x,s} = -kappa_{s,x} gives the explicit minus sign.
+            response[k1][:, active] -= np.einsum(
+                "sx,prxt,qrst->pq",
+                kappa_external[k3, active, :], papa, cascm2_kpts,
+                optimize=True,
+            )
+            # Ket index 4 of paap: dU/dt = kappa.
+            response[k1][:, active] += np.einsum(
+                "prsx,xt,qrst->pq",
+                paap, kappa_external[k4, :, active], cascm2_kpts,
+                optimize=True,
+            )
+        return response
+
     def _zero_ci_step(self, dtype):
         """Return zero determinant vectors with the reference CI layout."""
         return [
@@ -2325,13 +3179,469 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
         """Return whether every determinant coefficient in ``ci1`` is zero."""
         return not any(np.any(c1) for ci1_r in ci1 for c1 in ci1_r)
 
+    def _matvec(self, x):
+        """Dispatch a combined packed orbital/CI Hessian-vector product.
 
-# Install only the parameterization interface at this layer. Gradient methods
-# are registered alongside their respective function definitions.
-for _klass in (PBCLASCINoSymm, PBCLASCITransSymm):
+        The UGG owns the external vector layout.  The existing CI-CI action
+        is evaluated only for a nonzero CI component.  A nonzero orbital
+        component is routed to both the orbital-orbital and CI-output/orbital-
+        input responses, after which the reciprocal orbital-output/CI-input
+        and CI-CI responses are added when needed.
+        """
+        kappa1, ci1 = self.ugg.unpack(x)
+        dtype = np.result_type(np.asarray(x).dtype, kappa1.dtype)
+
+        if np.any(kappa1):
+            kappa2 = np.asarray(self._orbital_hessian_response(kappa1))
+            _check_shape(kappa2, np.shape(kappa1), label="kappa2")
+            ci2 = self._ci_orbital_hessian_response(kappa1)
+        else:
+            kappa2 = np.zeros_like(kappa1, dtype=dtype)
+            ci2 = self._zero_ci_step(dtype)
+
+        if not self._ci_step_is_zero(ci1):
+            tdm1rs, tcm2 = self.make_tdm1s2c_sub(ci1)
+            kappa2 = kappa2 + self._orbital_ci_hessian_response(
+                tdm1rs, tcm2,
+            )
+            ci2_ci = self._ci_hessian_response(ci1, tdm1rs=tdm1rs)
+            ci2 = [
+                [
+                    orbital_response + ci_response
+                    for orbital_response, ci_response in zip(
+                        orbital_response_r, ci_response_r,
+                    )
+                ]
+                for orbital_response_r, ci_response_r in zip(ci2, ci2_ci)
+            ]
+
+        kappa2 = kappa2 + self.level_shift * kappa1
+        ci2 = [
+            [
+                response + self.level_shift * trial
+                for response, trial in zip(response_r, trial_r)
+            ]
+            for response_r, trial_r in zip(ci2, ci1)
+        ]
+
+        return self.ugg.pack(kappa2 / 2.0, ci2)
+
+    _rmatvec = _matvec
+
+
+class KLASSCF_TransSymmHessianOperator(KLASSCF_HessianOperator):
+    """Translation-adapted CI Hessian operator for k-LASSCF.
+
+    The external CI vector retains the full ``[cell][root]`` layout used by
+    :class:`KLASSCF_HessianOperator`.  Before a CI, RDM, or transition-RDM
+    contraction, the translated cell vectors are packed into one representative
+    vector using ``phase_per_frag``.  The contracted response is subsequently
+    expanded back to the full layout with the same phases.
+
+    Parameters
+    ----------
+    ref_cell : int, optional
+        Representative BvK cell.  Defaults to ``las.ref_cell``.
+    phase_per_frag : array_like, optional
+        Unit-modulus CI translation phase for each cell.  When omitted, the
+        phases are obtained from ``las.get_phase_per_frag(mo_coeff)``.
+    validate_trans_symmetry : bool, optional
+        Validate translated CI vectors and local Hamiltonian blocks.
+    trans_sym_tol : float, optional
+        Absolute and relative tolerance used by the validation.
+
+    Other parameters are identical to :class:`KLASSCF_HessianOperator`.
+    """
+
+
+    def __init__(
+            self, las, ugg, mo_coeff=None, ci=None, casdm1frs=None,
+            h1eff=None, h2eff=None, kpts=None, kmesh=None, ref_cell=None,
+            phase_per_frag=None, validate_trans_symmetry=True,
+            trans_sym_tol=1e-8, casdm2fr=None, eris=None,
+            veff_kpts=None, dm1s_kpts=None, mo_phase=None):
+        if mo_coeff is None:
+            mo_coeff = las.mo_coeff
+        if ci is None:
+            ci = las.ci
+        if kmesh is None:
+            kmesh = las.kmesh
+
+        kmesh = tuple(int(n) for n in kmesh)
+        ncell = int(np.prod(kmesh))
+        if ref_cell is None:
+            ref_cell = getattr(las, "ref_cell", 0)
+        if not isinstance(ref_cell, (int, np.integer)):
+            raise TypeError("ref_cell must be an integer")
+        if not 0 <= ref_cell < ncell:
+            raise ValueError(
+                f"ref_cell must be in [0, {ncell}); got {ref_cell}"
+            )
+
+        if phase_per_frag is None:
+            get_phases = getattr(las, "get_phase_per_frag", None)
+            if get_phases is None:
+                phase_per_frag = np.ones(ncell, dtype=np.complex128)
+            else:
+                phase_per_frag = get_phases(mo_coeff)
+
+        self.ref_cell = int(ref_cell)
+        self.ncell = ncell
+        self.phase_per_frag = self._normalize_phase_per_frag(
+            phase_per_frag, ncell, self.ref_cell,
+        )
+        if not isinstance(validate_trans_symmetry, (bool, np.bool_)):
+            raise TypeError("validate_trans_symmetry must be a boolean")
+        self.validate_trans_symmetry = bool(validate_trans_symmetry)
+        self.trans_sym_tol = float(trans_sym_tol)
+        if not np.isfinite(self.trans_sym_tol) or self.trans_sym_tol <= 0:
+            raise ValueError("trans_sym_tol must be finite and positive")
+
+        ci_ref = self._pack_ci(
+            ci, validate=self.validate_trans_symmetry,
+            tol=self.trans_sym_tol,
+        )
+        ci = self._unpack_cif(ci_ref)
+
+        super().__init__(
+            las, ugg, mo_coeff=mo_coeff, ci=ci, casdm1frs=casdm1frs,
+            h1eff=h1eff, h2eff=h2eff, kpts=kpts, kmesh=kmesh,
+            casdm2fr=casdm2fr, eris=eris, veff_kpts=veff_kpts,
+            dm1s_kpts=dm1s_kpts, mo_phase=mo_phase,
+        )
+
+    @staticmethod
+    def _normalize_phase_per_frag(phase_per_frag, ncell, ref_cell):
+        """Validate cell phases and use the reference cell as phase origin."""
+        phase_per_frag = np.asarray(
+            phase_per_frag, dtype=np.result_type(phase_per_frag, np.complex128),
+        )
+        _check_shape(phase_per_frag, (ncell,), label="phase_per_frag")
+        magnitudes = np.abs(phase_per_frag)
+        if np.any(~np.isfinite(magnitudes)) or np.any(magnitudes == 0):
+            raise ValueError(
+                "phase_per_frag must contain finite nonzero phases"
+            )
+        if not np.allclose(magnitudes, 1.0, atol=1e-8, rtol=0.0):
+            raise ValueError("phase_per_frag entries must have unit magnitude")
+
+        phases = phase_per_frag / magnitudes
+        phases *= phases[ref_cell].conjugate()
+        phases[ref_cell] = 1.0
+        return phases
+
+    def _pack_ci(self, ci, validate=False, tol=None):
+        """Pack full translated CI vectors into one phase-free cell vector.
+
+        The phase-weighted average is the projector onto the translationally
+        adapted CI subspace.  It is also insensitive to the selected
+        representative cell.
+        """
+        if ci is None:
+            return None
+        if len(ci) != self.ncell:
+            raise ValueError(
+                f"CI list must contain {self.ncell} cells; got {len(ci)}"
+            )
+        if tol is None:
+            tol = getattr(self, "trans_sym_tol", 1e-8)
+
+        nroots = len(ci[self.ref_cell])
+        if any(len(ci_r) != nroots for ci_r in ci):
+            raise ValueError("translated cells have inconsistent root counts")
+
+        packed = []
+        for iroot in range(nroots):
+            ref_shape = np.shape(ci[self.ref_cell][iroot])
+            translated = []
+            for phase, ci_r in zip(self.phase_per_frag, ci):
+                _check_shape(ci_r[iroot], ref_shape, label=f"ci_r[{iroot}]")
+                translated.append(
+                    phase.conjugate() * np.asarray(ci_r[iroot])
+                )
+            ci_ref = np.mean(np.stack(translated, axis=0), axis=0)
+            if validate:
+                scale = max(np.linalg.norm(ci_ref), 1.0)
+                error = max(
+                    np.linalg.norm(ci_cell - ci_ref)
+                    for ci_cell in translated
+                )
+                if error > tol * scale:
+                    raise ValueError(
+                        "CI vectors do not obey the requested translation "
+                        f"phases; maximum error {error:.3e}"
+                    )
+            packed.append(ci_ref)
+        return packed
+
+    def _unpack_cif(self, ci_ref):
+        """Expand packed root CI vectors to all cells with their phases."""
+        if ci_ref is None:
+            return [None for _ in range(self.ncell)]
+        return [
+            [np.array(phase * c0, copy=True) for c0 in ci_ref]
+            for phase in self.phase_per_frag
+        ]
+
+    def _init_dms_(self, casdm1frs, casdm2fr=None, dm1s_kpts=None):
+        """Construct reference RDMs once and copy phase-invariant blocks."""
+        ref = self.ref_cell
+        ncas_ref = int(self.ncas_sub[ref])
+        nelec_ref = tuple(self.nelecas_sub[ref])
+        if any(int(ncas) != ncas_ref for ncas in self.ncas_sub):
+            raise ValueError(
+                "translation-adapted cells must have identical active spaces"
+            )
+        if any(tuple(nelec) != nelec_ref for nelec in self.nelecas_sub):
+            raise ValueError(
+                "translation-adapted cells must have identical electron counts"
+            )
+        if casdm1frs is None:
+            ci_ref = self._pack_ci(self.ci)
+            fcibox = self.fciboxes[ref]
+            dm1a, dm1b = fcibox.states_make_rdm1s(
+                ci_ref, self.ncas_sub[ref], self.nelecas_sub[ref],
+            )
+            dm1_ref = np.stack([dm1a, dm1b], axis=1)
+        else:
+            if len(casdm1frs) != self.ncell:
+                raise ValueError(
+                    "casdm1frs must contain one block for every cell"
+                )
+            dm1_ref = np.asarray(casdm1frs[ref])
+            if self.validate_trans_symmetry:
+                for dm1 in casdm1frs:
+                    if not np.allclose(
+                            dm1, dm1_ref, atol=self.trans_sym_tol,
+                            rtol=self.trans_sym_tol):
+                        raise ValueError(
+                            "casdm1frs is not translation symmetric"
+                        )
+
+        casdm1frs = [np.array(dm1_ref, copy=True) for _ in range(self.ncell)]
+        KLASSCF_HessianOperator._init_dms_(
+            self, casdm1frs, casdm2fr, dm1s_kpts,
+        )
+
+    def _validate_local_hamiltonians(self):
+        """Check equivalence of local one- and two-electron blocks."""
+        if not self.validate_trans_symmetry:
+            return
+        ref = self.ref_cell
+        h1_ref = np.asarray(self.h1frs[ref])
+        for h1 in self.h1frs:
+            if not np.allclose(
+                    h1, h1_ref, atol=self.trans_sym_tol,
+                    rtol=self.trans_sym_tol):
+                raise ValueError("h1eff local blocks are not translation symmetric")
+
+        iref = int(np.sum(self.ncas_sub[:ref]))
+        jref = iref + int(self.ncas_sub[ref])
+        h2_ref = self.eri_cas[iref:jref, iref:jref, iref:jref, iref:jref]
+        for ifrag, norb in enumerate(self.ncas_sub):
+            i = int(np.sum(self.ncas_sub[:ifrag]))
+            j = i + int(norb)
+            h2 = self.eri_cas[i:j, i:j, i:j, i:j]
+            if not np.allclose(
+                    h2, h2_ref, atol=self.trans_sym_tol,
+                    rtol=self.trans_sym_tol):
+                raise ValueError("h2eff local blocks are not translation symmetric")
+
+    def _init_ci_(self):
+        """Cache one representative local Hamiltonian action."""
+        self._validate_local_hamiltonians()
+        ref = self.ref_cell
+        fcibox = self.fciboxes[ref]
+        norb = self.ncas_sub[ref]
+        nelec = self.nelecas_sub[ref]
+        linkstrl_ref = fcibox.states_gen_linkstr(norb, nelec, False)
+        linkstr_ref = fcibox.states_gen_linkstr(norb, nelec, False)
+        self.linkstrl = [linkstrl_ref for _ in range(self.ncell)]
+        self.linkstr = [linkstr_ref for _ in range(self.ncell)]
+
+        i = int(np.sum(self.ncas_sub[:ref]))
+        j = i + int(norb)
+        h2_ref = self.eri_cas[i:j, i:j, i:j, i:j]
+        ci_ref = self._pack_ci(self.ci)
+        h0_ref = [0.0] * self.nroots
+        hc_ref = self.Hci(
+            fcibox, norb, nelec, h0_ref, self.h1frs[ref], h2_ref,
+            ci_ref, linkstrl=linkstrl_ref,
+        )
+        e_ref = [np.vdot(c0, hc0) for c0, hc0 in zip(ci_ref, hc_ref)]
+        residual_ref = [
+            hc0 - energy * c0
+            for hc0, energy, c0 in zip(hc_ref, e_ref, ci_ref)
+        ]
+        self.e0 = [list(e_ref) for _ in range(self.ncell)]
+        self.hci0 = self._unpack_cif(residual_ref)
+
+    def make_tdm1s_sub(self, ci1):
+        """Build all cell TDM blocks from one packed CI contraction.
+
+        For ``c_S = phase_S c_ref`` and ``x_S = phase_S x_ref``, the bra
+        and ket phases cancel in ``x_S^dagger A c_S``.  The reference
+        transition density is therefore copied to every translated cell.
+        """
+        ci1_ref = self._pack_ci(ci1)
+        ci0_ref = self._pack_ci(self.ci)
+        ref = self.ref_cell
+        fcibox = self.fciboxes[ref]
+        norb = self.ncas_sub[ref]
+        nelec = self.nelecas_sub[ref]
+        linkstr = None if self.linkstr is None else self.linkstr[ref]
+
+        state_arg = fcibox._state_args
+        solver_arg = fcibox._solver_args
+        nelec_by_solver = [
+            fcibox._get_nelec(solver, nelec)
+            for solver in fcibox.fcisolvers
+        ]
+        collect_args = (
+            state_arg(ci1_ref), state_arg(ci0_ref), norb,
+            solver_arg(nelec_by_solver),
+        )
+        collect_kwargs = {"link_index": solver_arg(linkstr)}
+        try:
+            dm1_r = list(fcibox._collect(
+                "trans_rdm1s", *collect_args, **collect_kwargs,
+            ))
+        except AttributeError as err:
+            if "FCItrans_rdm1" not in str(err):
+                raise
+            dm1_r = list(fcibox._collect(
+                "trans_rdm1s_py", *collect_args, **collect_kwargs,
+            ))
+        if len(dm1_r) != self.nroots:
+            raise ValueError(
+                f"reference cell produced {len(dm1_r)} transition "
+                f"densities for {self.nroots} roots"
+            )
+
+        dtype = np.result_type(self.eri_cas.dtype, np.complex128)
+        tdm1_ref = np.zeros(
+            (self.nroots, 2, norb, norb), dtype=dtype,
+        )
+        for iroot, (dm1s, c1, c0, dm1s_ref) in enumerate(zip(
+                dm1_r, ci1_ref, ci0_ref, self.casdm1frs[ref])):
+            overlap = np.vdot(c1, c0)
+            tdm1s = np.stack(dm1s, axis=0) - overlap * dm1s_ref
+            tdm1_ref[iroot] = (
+                tdm1s + tdm1s.swapaxes(-1, -2).conj()
+            )
+
+        tdm1rs = np.zeros(
+            (self.nroots, 2, self.ncastot, self.ncastot), dtype=dtype,
+        )
+        for ifrag, ncas in enumerate(self.ncas_sub):
+            i = int(np.sum(self.ncas_sub[:ifrag]))
+            j = i + int(ncas)
+            tdm1rs[:, :, i:j, i:j] = tdm1_ref
+        return tdm1rs
+
+    def get_h1eff_response(self, tdm1rs):
+        """Build one translated effective-Hamiltonian response and copy it."""
+        tdm1rs = np.asarray(tdm1rs)
+        _check_shape(
+            tdm1rs, (self.nroots, 2, self.ncastot, self.ncastot),
+            label="tdm1rs"
+        )
+
+        eri = self.eri_cas
+        v1rs = np.tensordot(tdm1rs, eri, axes=((2, 3), (0, 1)))
+        v1rs += v1rs[:, ::-1]
+        v1rs -= np.tensordot(
+            tdm1rs, eri, axes=((2, 3), (2, 1)),
+        )
+
+        ref = self.ref_cell
+        i = int(np.sum(self.ncas_sub[:ref]))
+        j = i + int(self.ncas_sub[ref])
+        dm1rs_ref = tdm1rs[:, :, i:j, i:j]
+        v1rs_ref = np.tensordot(
+            dm1rs_ref, eri[i:j, i:j, :, :],
+            axes=((2, 3), (0, 1)),
+        )
+        v1rs_ref += v1rs_ref[:, ::-1]
+        v1rs_ref -= np.tensordot(
+            dm1rs_ref, eri[:, i:j, i:j, :],
+            axes=((2, 3), (2, 1)),
+        )
+        h1_ref = v1rs[:, :, i:j, i:j] - v1rs_ref[:, :, i:j, i:j]
+        return [np.array(h1_ref, copy=True) for _ in range(self.ncell)]
+
+    def ci_response_diag(self, ci1):
+        """Apply one same-cell CI Hessian block and translate the result."""
+        ref = self.ref_cell
+        ci1_ref = self._pack_ci(ci1)
+        ci0_ref = self._pack_ci(self.ci)
+        norb = self.ncas_sub[ref]
+        nelec = self.nelecas_sub[ref]
+        i = int(np.sum(self.ncas_sub[:ref]))
+        j = i + int(norb)
+        h2_ref = self.eri_cas[i:j, i:j, i:j, i:j]
+        h0_ref = [-energy for energy in self.e0[ref]]
+        ci2_ref = self.Hci(
+            self.fciboxes[ref], norb, nelec, h0_ref,
+            self.h1frs[ref], h2_ref, ci1_ref,
+            linkstrl=self.linkstrl[ref],
+        )
+        response_ref = []
+        for hc1, c1, c0, residual in zip(
+                ci2_ref, ci1_ref, ci0_ref, self.hci0[ref]):
+            output_overlap = np.vdot(residual, c1)
+            input_overlap = np.vdot(c0, c1)
+            response_ref.append(2.0 * (
+                hc1 - output_overlap * c0 - input_overlap * residual
+            ))
+        return self._unpack_cif(response_ref)
+
+    def ci_response_offdiag(self, h1frs_response):
+        """Apply one different-cell CI response and translate the result."""
+        if len(h1frs_response) != self.ncell:
+            raise ValueError(
+                "h1frs_response must contain one block for every cell"
+            )
+        ref = self.ref_cell
+        ci0_ref = self._pack_ci(self.ci)
+        norb = self.ncas_sub[ref]
+        nelec = self.nelecas_sub[ref]
+        zero_h2 = np.zeros(
+            (norb,) * 4, dtype=self.eri_cas.dtype,
+        )
+        hc_ref = self.Hci(
+            self.fciboxes[ref], norb, nelec, [0.0] * self.nroots,
+            h1frs_response[ref], zero_h2, ci0_ref,
+            linkstrl=self.linkstrl[ref],
+        )
+        response_ref = [
+            2.0 * (hc - np.vdot(c0, hc) * c0)
+            for hc, c0 in zip(hc_ref, ci0_ref)
+        ]
+        return self._unpack_cif(response_ref)
+
+
+def get_hop(klas, mo_coeff=None, ci=None, ugg=None, **kwargs):
+    """Build the periodic orbital/CI Hessian at the current keyframe."""
+    if mo_coeff is None:
+        mo_coeff = klas.mo_coeff
+    if ci is None:
+        ci = klas.ci
+    if ugg is None:
+        ugg = klas.get_ugg(mo_coeff=mo_coeff, ci=ci)
+    hop = getattr(klas, "_hop", KLASSCF_HessianOperator)
+    return hop(klas, ugg, mo_coeff=mo_coeff, ci=ci, **kwargs)
+
+# Install the gradient and Hessian interfaces on the periodic LAS variants.
+# Each variant selects the Hessian operator matching its CI layout.
+for _klass, _hop in (
+        (PBCLASCINoSymm, KLASSCF_HessianOperator),
+        (PBCLASCITransSymm, KLASSCF_TransSymmHessianOperator)):
     _klass._klasscf_eris = _ERIS
     _klass._ugg = KLASSCF_UnitaryGroupGenerators
+    _klass._hop = _hop
     _klass.get_ugg = get_ugg
     _klass.get_grad_ci = get_grad_ci
     _klass.get_grad_orb = get_grad_orb
     _klass.get_grad = get_grad
+    _klass.get_hop = get_hop
