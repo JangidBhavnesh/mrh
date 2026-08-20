@@ -1,12 +1,15 @@
 #!/usr/bin/env python
 
 import numpy as np
+from pyscf.pbc.lib import kpts_helper
 
 from mrh.my_pyscf.pbc.fci import cplx_csf_helper
+from mrh.my_pyscf.pbc.mcscf.klas_ao2mo import _ERIS
 from mrh.my_pyscf.pbc.mcscf.klasci import (
     PBCLASCINoSymm,
     PBCLASCITransSymm,
 )
+from mrh.my_pyscf.pbc.mcscf.mc1step import _get_casdm2_kpts
 from mrh.my_pyscf.pbc.util.wannier import get_wannier_orbs
 
 # Author: Bhavnesh Jangid
@@ -760,9 +763,148 @@ def get_grad_ci(
     return gradient
 
 
+def get_grad_orb(
+        klas, mo_coeff_kpts=None, ci=None, h2eff_sub=None,
+        veff_kpts=None, dm1s_kpts=None, hermi=-1):
+    """Evaluate the k-LASSCF orbital gradient or effective Fock matrix.
+
+    The one-body contribution is formed independently at each k-point. The
+    active-space two-body cumulant is transformed from the Wannier basis to
+    momentum-conserving Bloch blocks and contracted with the ``paaa`` AO2MO
+    intermediates.
+
+    Args:
+        klas : object
+            Periodic LAS object supplying density matrices, integrals, and
+            k-point metadata.
+        mo_coeff_kpts : ndarray of shape (nkpts, nao, nmo), optional
+            Bloch-MO coefficients. Defaults to ``klas.mo_coeff``.
+        ci : sequence, optional
+            Nested ``[fragment][root]`` Wannier-basis CI vectors. Defaults to
+            ``klas.ci``.
+        h2eff_sub : _ERIS or ndarray, optional
+            Object providing ``paaa(k1, k2, k3)`` or an explicit array with
+            shape ``(nkpts, nkpts, nkpts, nmo, ncas, ncas, ncas)``. It is
+            constructed with ``klas._klasscf_eris`` when omitted.
+        veff_kpts : ndarray of shape (2, nkpts, nao, nao), optional
+            Spin-resolved state-averaged effective potential in the AO basis.
+        dm1s_kpts : ndarray of shape (2, nkpts, nao, nao), optional
+            Spin-resolved state-averaged one-particle density matrix in the AO
+            basis.
+        hermi : {-1, 0, 1}, optional
+            Selects the returned part of the effective Fock matrix. ``-1``
+            returns ``F - F†``, the anti-Hermitian orbital gradient; ``0``
+            returns ``F``; and ``1`` returns ``(F + F†) / 2``.
+
+    Returns:
+        ndarray of shape (nkpts, nmo, nmo)
+            Orbital gradient or requested Hermitian component. The
+            anti-Hermitian result is not divided by the number of k-points.
+
+    Raises:
+        ValueError
+            If an input has an incompatible shape or ``hermi`` is not one of
+            ``-1``, ``0``, and ``1``.
+    """
+    cell = klas._scf.cell
+    kpts = klas.kpts
+    nkpts = len(kpts)
+
+    if mo_coeff_kpts is None:
+        mo_coeff_kpts = klas.mo_coeff
+    mo_coeff_kpts = np.asarray(mo_coeff_kpts)
+    if ci is None:
+        ci = klas.ci
+    if dm1s_kpts is None:
+        dm1s_kpts = klas.make_rdm1s(mo_coeff=mo_coeff_kpts, ci=ci)
+    if h2eff_sub is None:
+        h2eff_sub = klas._klasscf_eris(klas, mo_coeff_kpts)
+    if veff_kpts is None:
+        veff_kpts = klas.get_veff(cell, dm_kpts=dm1s_kpts)
+
+    _, nmo = mo_coeff_kpts.shape[-2:]
+    ncore = klas.ncore
+    ncas = klas.ncas
+    nocc = ncore + ncas
+    ncastot = nkpts * ncas
+
+    get_paaa = getattr(h2eff_sub, "paaa", None)
+    if get_paaa is None:
+        _check_shape(
+            h2eff_sub,
+            (nkpts, nkpts, nkpts, nmo, ncas, ncas, ncas),
+            label="h2eff_sub",
+        )
+        get_paaa = lambda k1, k2, k3: h2eff_sub[k1, k2, k3]
+
+    dtype = np.result_type(
+        mo_coeff_kpts.dtype, veff_kpts.dtype, dm1s_kpts.dtype,
+    )
+    ovlp_kpts = klas._scf.get_ovlp(kpts=kpts)
+    hcore_kpts = klas.get_hcore(kpts=kpts)
+    h1es_kpts = hcore_kpts[None, :, :, :] + veff_kpts
+
+    f1 = np.empty((nkpts, nmo, nmo), dtype=dtype)
+    for k in range(nkpts):
+        smo_coeff_k = ovlp_kpts[k] @ mo_coeff_kpts[k]
+        dm1s_mo = (
+            smo_coeff_k.conj().T @ dm1s_kpts[:, k] @ smo_coeff_k
+        )
+        h1es_mo = (
+            mo_coeff_kpts[k].conj().T
+            @ h1es_kpts[:, k]
+            @ mo_coeff_kpts[k]
+        )
+        f1[k] = (
+            h1es_mo[0] @ dm1s_mo[0]
+            + h1es_mo[1] @ dm1s_mo[1]
+        )
+
+    # Convert the spin-summed 2-RDM to its cumulant in the Wannier basis.
+    casdm2 = klas.make_casdm2(ci=ci)
+    _check_shape(casdm2, (ncastot,) * 4, label="casdm2")
+    casdm1s = klas.make_casdm1s(ci=ci)
+    _check_shape(casdm1s, (2, ncastot, ncastot), label="casdm1s")
+    casdm1 = casdm1s.sum(0)
+    casdm2 -= np.multiply.outer(casdm1, casdm1)
+    casdm2 += np.multiply.outer(
+        casdm1s[0], casdm1s[0],
+    ).transpose(0, 3, 2, 1)
+    casdm2 += np.multiply.outer(
+        casdm1s[1], casdm1s[1],
+    ).transpose(0, 3, 2, 1)
+
+    mo_act_kpts = mo_coeff_kpts[:, :, ncore:nocc]
+    mo_phase = get_wannier_orbs(
+        klas._scf, klas.kmesh, mo_act_kpts,
+    )[-1]
+    kconserv = kpts_helper.get_kconserv(cell, kpts)
+
+    for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
+        k4 = kconserv[k1, k2, k3]
+        casdm2_kpts = _get_casdm2_kpts(
+            casdm2, mo_phase, (k1, k2, k3, k4),
+        )
+        f1[k1][:, ncore:nocc] += np.tensordot(
+            get_paaa(k1, k2, k3), casdm2_kpts,
+            axes=((1, 2, 3), (1, 2, 3)),
+        )
+
+    f1_h = f1.conj().transpose(0, 2, 1)
+    if hermi == -1:
+        return f1 - f1_h
+    if hermi == 0:
+        return f1
+    if hermi == 1:
+        return 0.5 * (f1 + f1_h)
+    raise ValueError("kwarg 'hermi' must be -1, 0, or +1")
+
+
 # Install only the parameterization interface at this layer. Gradient methods
 # are registered alongside their respective function definitions.
 for _klass in (PBCLASCINoSymm, PBCLASCITransSymm):
+    _klass._klasscf_eris = _ERIS
     _klass._ugg = KLASSCF_UnitaryGroupGenerators
     _klass.get_ugg = get_ugg
     _klass.get_grad_ci = get_grad_ci
+    _klass.get_grad_orb = get_grad_orb
