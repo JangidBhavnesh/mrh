@@ -2267,6 +2267,22 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
             return np.empty(0, dtype=np.complex128)
         return np.concatenate(vectors)
 
+    def _ci_hessian_response(self, ci1, tdm1rs=None):
+        """Apply the implemented CI-CI Hessian block to determinant vectors."""
+        if tdm1rs is None:
+            tdm1rs = self.make_tdm1s_sub(ci1)
+        h1frs_response = self.get_h1eff_response(tdm1rs)
+        ci2_diag = self.ci_response_diag(ci1)
+        ci2_offdiag = self.ci_response_offdiag(h1frs_response)
+
+        return [
+            [
+                diag + offdiag
+                for diag, offdiag in zip(diag_r, offdiag_r)
+            ]
+            for diag_r, offdiag_r in zip(ci2_diag, ci2_offdiag)
+        ]
+
     def _zero_ci_step(self, dtype):
         """Return zero determinant vectors with the reference CI layout."""
         return [
