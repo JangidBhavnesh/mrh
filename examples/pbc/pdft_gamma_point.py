@@ -1,11 +1,17 @@
 
 '''
 Here, I am doing the gamma-point CASSCF followed by PDFT.
-Note: 
-    1. mf.exxdiv=None should be used. Post-SCF method require this.
-    2. I am using GDF. In case of default DF which is FFTDF, the grids 
-    for the periodic DFT will change. Which I haven't tested yet.
-    3. Also, the MCPDFT (tPBE) == PBE with SD active space and same mo_coeff.
+
+Note:
+    1. mf.exxdiv=None should be used. Post-SCF methods require this.
+    2. This example uses GDF. The default FFTDF path has not been tested for
+       periodic MC-PDFT.
+    3. Periodic MC-PDFT must be initialized from a periodic HF object. Do not
+       pass an RKS/UKS object or convert one to RHF: the required density-fitting
+       ERIs may not be available or consistent. Build and run the HF/GDF object
+       directly so that its integrals are generated correctly.
+    4. For a single-determinant active space and fixed HF orbitals, tPBE equals
+       PBE evaluated non-self-consistently on the same HF density.
 '''
 
 
@@ -27,7 +33,7 @@ Cartesian
 import numpy as np
 from pyscf.pbc import gto, scf, dft
 from pyscf import mcscf
-from mrh.my_pyscf import mcpdft
+from mrh.my_pyscf.pbc import mcpdft
 
 # Periodic Calculation for CH=CH uni, using CASCI vs RHF
 def getcell():
@@ -49,16 +55,23 @@ def getcell():
     cell.build()
     return cell
 
-def periodicDFT():
+def periodicPDFT():
     cell = getcell()
-    mf = scf.RKS(cell).density_fit()
-    mf.verbose=4
-    mf.exxdiv=None
-    mf.xc='pbe'
-    eperpbe = mf.kernel()
+    mf = scf.RHF(cell).density_fit()
+    mf.exxdiv = None
+    mf.kernel()
+
+    # Evaluate PBE on the HF density without optimizing DFT orbitals.
+    ks = dft.RKS(cell).density_fit()
+    ks.verbose = 4
+    ks.exxdiv = None
+    ks.xc = 'pbe'
+    ks.max_cycle = 0
+    eperpbe = ks.kernel(mf.make_rdm1())
+
     mc = mcpdft.CASCI(mf, 'tPBE', 1,2)
     epdftper = mc.kernel(mf.mo_coeff)[0]
-    print("Periodic Cal (PBE vs tPBE): ", np.allclose(eperpbe,epdftper, 1e-7))
+    print("Periodic Cal (PBE@HF vs tPBE): ", np.allclose(eperpbe,epdftper, 1e-7))
 
 def periodicHF():
     cell = getcell()
@@ -71,4 +84,4 @@ def periodicHF():
 
 if __name__ == "__main__":
     periodicHF()
-    periodicDFT() 
+    periodicPDFT()

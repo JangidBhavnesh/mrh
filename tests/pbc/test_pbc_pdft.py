@@ -75,7 +75,7 @@ class KnownValues(unittest.TestCase):
         )
 
     def test_mcpdft_gamma_point(self):
-        from mrh.my_pyscf import mcpdft
+        from mrh.my_pyscf.pbc import mcpdft
         cell = gto.M(a = np.eye(3)*5,
         atom = '''
             H         -6.37665        2.20769        3.00000
@@ -86,15 +86,23 @@ class KnownValues(unittest.TestCase):
         cell.output = '/dev/null'
         cell.build()
 
-        mf = dft.RKS(cell).density_fit() # GDF
-        mf.xc = 'pbe'
+        mf = scf.RHF(cell).density_fit() # GDF
         mf.exxdiv = None
-        emf = mf.kernel()
+        mf.kernel()
+
+        ks = dft.RKS(cell).density_fit()
+        ks.xc = 'pbe'
+        ks.exxdiv = None
+        ks.max_cycle = 0
+        emf = ks.kernel(mf.make_rdm1())
 
         mc = mcpdft.CASCI(mf,'tPBE', 1, 2)
         ecasci = mc.kernel(mf.mo_coeff)[0]
 
         self.assertAlmostEqual (emf, ecasci, 7)
+
+        with self.assertRaisesRegex(NotImplementedError, "periodic HF"):
+            mcpdft.CASCI(ks, 'tPBE', 1, 2)
 
     def test_kmcpdft_limit_to_single_determinant(self):
         from mrh.my_pyscf.pbc import mcpdft
