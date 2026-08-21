@@ -15,7 +15,7 @@ class KnownValues(unittest.TestCase):
         cell.a = np.eye(3) * 8
         cell.atom = "H 0 0 0; H 1.4 0 0"
         cell.unit = "Bohr"
-        cell.basis = "sto-3g"
+        cell.basis = "6-31g"
         cell.precision = 1e-8
         cell.verbose = 0
         cell.build()
@@ -43,7 +43,7 @@ class KnownValues(unittest.TestCase):
         mc.kernel(mo)
 
         self.assertTrue(mc.converged)
-        self.assertAlmostEqual(mc.e_tot, -0.5329013391934931, 7)
+        self.assertAlmostEqual(mc.e_tot, -0.7389379476115105, 7)
 
     def test_legacy_laspdft_dispatch(self):
         from mrh.my_pyscf import mcpdft as legacy_mcpdft
