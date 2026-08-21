@@ -1181,6 +1181,48 @@ class KCASPDFTEndToEndTests(unittest.TestCase):
 
 class KCASPDFTRoutingTests(unittest.TestCase):
 
+    def test_second_order_krhf_is_routed_as_mean_field(self):
+        _, kmf, _, _ = build_periodic_h2()
+        second_order_kmf = kmf.newton()
+        conventional_mc = SimpleNamespace()
+        momentum_mc = SimpleNamespace(charge=0)
+        conventional_pdft = object()
+        momentum_pdft = object()
+
+        make_conventional_mc = mock.Mock(return_value=conventional_mc)
+        make_conventional_pdft = mock.Mock(return_value=conventional_pdft)
+        result = pbc_mcpdft._MCPDFT(
+            make_conventional_mc, second_order_kmf, "tPBE", 2, 2,
+            ncore=0, get_mcpdft_child_class=make_conventional_pdft,
+        )
+
+        self.assertIs(result, conventional_pdft)
+        make_conventional_mc.assert_called_once_with(
+            second_order_kmf, 2, 2, ncore=0,
+        )
+        make_conventional_pdft.assert_called_once_with(
+            conventional_mc, "tPBE",
+        )
+
+        with mock.patch.object(
+                pbc_mcpdft.pbc_mcscf, "KCASCI",
+                return_value=momentum_mc) as make_momentum_mc, \
+             mock.patch.object(
+                pbc_mcpdft, "get_kcas_mcpdft_child_class",
+                return_value=momentum_pdft) as make_momentum_pdft:
+            result = pbc_mcpdft.KCASCI(
+                second_order_kmf, "tPBE", 2, 2, ncore=0,
+                momentum_resolved=True, target_k=1,
+            )
+
+        self.assertIs(result, momentum_pdft)
+        make_momentum_mc.assert_called_once_with(
+            second_order_kmf, 2, 2, ncore=0, target_k=1,
+        )
+        make_momentum_pdft.assert_called_once_with(
+            momentum_mc, "tPBE",
+        )
+
     def test_kcasci_default_preserves_conventional_route(self):
         sentinel = object()
         with mock.patch.object(

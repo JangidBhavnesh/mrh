@@ -36,16 +36,15 @@ def _sanity_check_for_kmf(kmf0):
 def _MCPDFT (mc_class, kmc_or_kmf, ot, ncas, nelecas, ncore=None, frozen=None,
             get_mcpdft_child_class=get_mcpdft_child_class,
             allow_frozen=False, **kwargs):
-    kmf0 = getattr (kmc_or_kmf, '_scf', None)
-    
-    # If started with kCASCI or kCASSCF object, 
-    if kmf0 is not None:
+    # Newton SCF objects also expose ``_scf``.  Identify mean-field objects
+    # before using that attribute to distinguish an existing MC calculation.
+    kmf0 = getattr(kmc_or_kmf, '_scf', None)
+    if isinstance(kmc_or_kmf, scf.hf.SCF) or kmf0 is None:
+        kmf0 = _sanity_check_for_kmf(kmc_or_kmf)
+        kmc0 = None
+    else:
         kmf0 = _sanity_check_for_kmf(kmf0)
         kmc0 = kmc_or_kmf
-    else:
-        kmf0 = kmc_or_kmf
-        kmf0 = _sanity_check_for_kmf(kmf0)
-        kmc0 = None
 
     if frozen is not None and not allow_frozen:
         raise NotImplementedError("Frozen orbitals are not supported in k-MC-PDFT")
@@ -138,8 +137,10 @@ def kCASCIPDFT(kmc_or_kmf, ot, ncas, nelecas, ncore=None, frozen=None,
 
     from mrh.my_pyscf.pbc.mcscf.kcasci import PBCKCASCI
 
+    # A second-order SCF wrapper has an ``_scf`` attribute too, so test the
+    # public SCF type before treating the input as an existing PBCKCASCI.
     kmf = getattr(kmc_or_kmf, "_scf", None)
-    if kmf is None:
+    if isinstance(kmc_or_kmf, scf.hf.SCF) or kmf is None:
         if charged_spin is not None and charge not in (-1, 1):
             raise ValueError("charged_spin requires charge +1 or -1")
         kmf = _sanity_check_for_kmf(kmc_or_kmf)
