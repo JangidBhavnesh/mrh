@@ -31,23 +31,42 @@ def _sanity_check_for_kmf(kmf0):
     
     return kmf0
 
+
+def _sanity_check_for_gamma_mf(mf0):
+    """Validate a gamma-point mean-field object.
+
+    The historical gamma-point API accepted periodic HF and DFT references.
+    k-point MC-PDFT remains restricted to HF references.
+    """
+    assert isinstance(mf0, scf.hf.SCF), \
+        "MC-PDFT only works with periodic SCF objects"
+    if isinstance(mf0, scf.kuhf.KUHF):
+        mf0 = scf.addons.convert_to_rhf(mf0)
+    return mf0
+
 def _MCPDFT (mc_class, kmc_or_kmf, ot, ncas, nelecas, ncore=None, frozen=None,
             get_mcpdft_child_class=get_mcpdft_child_class,
+            sanity_check=_sanity_check_for_kmf, allow_frozen=False,
             **kwargs):
     kmf0 = getattr (kmc_or_kmf, '_scf', None)
     
     # If started with kCASCI or kCASSCF object, 
     if kmf0 is not None:
-        kmf0 = _sanity_check_for_kmf(kmf0)
+        kmf0 = sanity_check(kmf0)
         kmc0 = kmc_or_kmf
     else:
         kmf0 = kmc_or_kmf
-        kmf0 = _sanity_check_for_kmf(kmf0)
+        kmf0 = sanity_check(kmf0)
         kmc0 = None
 
-    assert frozen is None, "Frozen orbitals are not supported in k-MCPDFT yet."
-    kmc = get_mcpdft_child_class (mc_class (kmf0, ncas, nelecas, ncore=ncore),
-                                ot, **kwargs)
+    if frozen is not None and not allow_frozen:
+        raise NotImplementedError("Frozen orbitals are not supported in k-MC-PDFT")
+    mc_kwargs = {"ncore": ncore}
+    if frozen is not None:
+        mc_kwargs["frozen"] = frozen
+    kmc = get_mcpdft_child_class(
+        mc_class(kmf0, ncas, nelecas, **mc_kwargs), ot, **kwargs,
+    )
 
     if kmc0 is not None:
         from mrh.my_pyscf.pbc.mcscf.casci import PBCCASCI
@@ -66,12 +85,15 @@ def CASSCFPDFT(kmc_or_kmf, ot, ncas, nelecas, ncore=None, frozen=None, **kwargs)
     get_mcpdft_child_class = get_pbc_mcpdft_child_class_gamma
     return _MCPDFT(mcscf.CASSCF, kmc_or_kmf, ot, ncas, nelecas, ncore=ncore, frozen=frozen,
                     get_mcpdft_child_class=get_mcpdft_child_class,
+                    sanity_check=_sanity_check_for_gamma_mf,
+                    allow_frozen=True,
                 **kwargs)
 
 def CASCIPDFT(kmc_or_kmf, ot, ncas, nelecas, ncore=None, frozen=None, **kwargs):
     get_pbc_mcpdft_child_class = get_pbc_mcpdft_child_class_gamma
     return _MCPDFT(mcscf.CASCI, kmc_or_kmf, ot, ncas, nelecas, ncore=ncore, frozen=frozen,
                     get_mcpdft_child_class=get_pbc_mcpdft_child_class,
+                    sanity_check=_sanity_check_for_gamma_mf,
                 **kwargs)
 
 CASSCF = CASSCFPDFT

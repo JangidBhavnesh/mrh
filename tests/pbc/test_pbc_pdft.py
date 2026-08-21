@@ -75,7 +75,7 @@ class KnownValues(unittest.TestCase):
         )
 
     def test_mcpdft_gamma_point(self):
-        from mrh.my_pyscf import mcpdft
+        from mrh.my_pyscf.pbc import mcpdft
         cell = gto.M(a = np.eye(3)*5,
         atom = '''
             H         -6.37665        2.20769        3.00000
