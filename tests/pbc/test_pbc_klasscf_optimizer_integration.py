@@ -3,6 +3,7 @@
 import unittest
 
 import numpy as np
+from scipy import linalg
 from pyscf import lib
 from pyscf.pbc import gto, scf
 
@@ -60,6 +61,27 @@ class KnownValuesKLASSCFOptimizerIntegration(unittest.TestCase):
         self.assertEqual(np.shape(veff), (
             2, self.las.nkpts, mo_coeff.shape[-1], mo_coeff.shape[-1],
         ))
+
+    def test_physical_optimizer_applies_one_minres_microiteration(self):
+        angles = (0.04, -0.04)
+        mo_start = np.asarray([
+            mo @ linalg.expm(np.array([
+                [0.0, -angle], [angle, 0.0],
+            ]))
+            for mo, angle in zip(self.mo_guess, angles)
+        ])
+        self.las.max_cycle_macro = 1
+        self.las.max_cycle_micro = 1
+        # Force one update even if the initial gradient is already below the
+        # usual threshold; the second keyframe is still the stopping point.
+        self.las.min_cycle_macro = 2
+
+        result = self.las.kernel(mo_coeff=mo_start)
+
+        self.assertTrue(np.isfinite(result[0]))
+        self.assertTrue(np.isfinite(result[1]))
+        self.assertTrue(np.all(np.isfinite(result[3])))
+        self.assertFalse(np.allclose(result[3], mo_start))
 
 
 if __name__ == "__main__":
