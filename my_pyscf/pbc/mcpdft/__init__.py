@@ -88,3 +88,59 @@ def kCASCIPDFT(kmc_or_kmf, ot, ncas, nelecas, ncore=None, frozen=None, **kwargs)
 
 KCASSCF = kCASSCFPDFT
 KCASCI = kCASCIPDFT
+
+
+def _laspdftEnergy(mc_class, mc_or_mf, ot, ncas_sub, nelecas_sub,
+                   ncore=None, spin_sub=None, frozen=None, **kwargs):
+    from mrh.my_pyscf.mcscf.lasscf_sync_o0 import LASSCFNoSymm, LASSCFSymm
+    from mrh.my_pyscf.mcscf.lasscf_async import (
+        LASSCFNoSymm as AsyncLASSCFNoSymm,
+        LASSCFSymm as AsyncLASSCFSymm,
+    )
+    from mrh.my_pyscf.pbc.mcpdft.laspdft import get_mcpdft_child_class
+
+    las_classes = (
+        LASSCFNoSymm,
+        LASSCFSymm,
+        AsyncLASSCFNoSymm,
+        AsyncLASSCFSymm,
+    )
+    if isinstance(mc_or_mf, las_classes):
+        las = mc_or_mf
+        if frozen is not None:
+            las.frozen = frozen
+    else:
+        las_kwargs = {
+            "ncore": ncore,
+            "spin_sub": spin_sub,
+        }
+        if frozen is not None:
+            las_kwargs["frozen"] = frozen
+        las = mc_class(mc_or_mf, ncas_sub, nelecas_sub, **las_kwargs)
+
+    return get_mcpdft_child_class(las, ot, **kwargs)
+
+
+def LASSCFPDFT(mc_or_mf, ot, ncas_sub=None, nelecas_sub=None, ncore=None,
+               spin_sub=None, frozen=None, **kwargs):
+    """Create a gamma-point periodic LAS-PDFT solver."""
+    if ncas_sub is None:
+        ncas_sub = getattr(mc_or_mf, "ncas_sub", None)
+    if nelecas_sub is None:
+        nelecas_sub = getattr(mc_or_mf, "nelecas_sub", None)
+
+    from mrh.my_pyscf.mcscf.lasscf_o0 import LASSCF as MolecularLASSCF
+    return _laspdftEnergy(
+        MolecularLASSCF,
+        mc_or_mf,
+        ot,
+        ncas_sub,
+        nelecas_sub,
+        ncore=ncore,
+        spin_sub=spin_sub,
+        frozen=frozen,
+        **kwargs,
+    )
+
+
+LASSCF = LASSCFPDFT
