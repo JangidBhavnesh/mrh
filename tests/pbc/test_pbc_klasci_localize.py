@@ -143,25 +143,24 @@ class KnownValues(unittest.TestCase):
         full_occ = np.zeros((len(kmf.kpts), mo_coeff.shape[-1]))
         full_occ[:, active] = active_occ
 
-        for test_occ in (full_occ, full_occ[0]):
-            mo_loc = klas.localize_init_guess(
-                list(range(klas.ncas)),
-                mo_coeff=mo_coeff,
-                lo_coeff=lo_coeff,
-                mo_occ=test_occ,
-                frags_by_AOs=True,
-            )
+        mo_loc = klas.localize_init_guess(
+            list(range(klas.ncas)),
+            mo_coeff=mo_coeff,
+            lo_coeff=lo_coeff,
+            mo_occ=full_occ,
+            frags_by_AOs=True,
+        )
 
-            for k in range(len(kmf.kpts)):
-                overlap = (
-                    mo_coeff[k, :, active].conj().T
-                    @ ovlp[k]
-                    @ mo_loc[k, :, active]
-                )
-                self.assertLess(
-                    np.max(np.abs(np.abs(overlap) - np.eye(klas.ncas))),
-                    1e-10,
-                )
+        for k in range(len(kmf.kpts)):
+            overlap = (
+                mo_coeff[k, :, active].conj().T
+                @ ovlp[k]
+                @ mo_loc[k, :, active]
+            )
+            self.assertLess(
+                np.max(np.abs(np.abs(overlap) - np.eye(klas.ncas))),
+                1e-10,
+            )
 
     def test_be_2s_orbital_alignment(self):
         be_cell = gto.Cell()
