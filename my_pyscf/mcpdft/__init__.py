@@ -25,9 +25,6 @@ def _MCPDFT(mc_class, mc_or_mf_or_mol, ot, ncas, nelecas, ncore=None, frozen=Non
         mc0 = None
         mf_or_mol = mc_or_mf_or_mol
 
-    # Redefine the otfnal class for periodic systems
-    ot = periodicpdft(mc_or_mf_or_mol, ot)
-
     if isinstance(mf_or_mol, gto.Mole) and mf_or_mol.symmetry:
         logger.warn(mf_or_mol,
                     'Initializing MC-SCF with a symmetry-adapted Mole object may not work!')
@@ -47,11 +44,32 @@ def _MCPDFT(mc_class, mc_or_mf_or_mol, ot, ncas, nelecas, ncore=None, frozen=Non
 
 def CASSCFPDFT(mc_or_mf_or_mol, ot, ncas, nelecas, ncore=None, frozen=None,
                **kwargs):
+    if _is_periodic(mc_or_mf_or_mol):
+        from mrh.my_pyscf.pbc import mcpdft as pbc_mcpdft
+        return pbc_mcpdft.CASSCFPDFT(
+            mc_or_mf_or_mol,
+            ot,
+            ncas,
+            nelecas,
+            ncore=ncore,
+            frozen=frozen,
+            **kwargs,
+        )
     return _MCPDFT(mcscf.CASSCF, mc_or_mf_or_mol, ot, ncas, nelecas, ncore=ncore, frozen=frozen,
                    **kwargs)
 
 
 def CASCIPDFT(mc_or_mf_or_mol, ot, ncas, nelecas, ncore=None, **kwargs):
+    if _is_periodic(mc_or_mf_or_mol):
+        from mrh.my_pyscf.pbc import mcpdft as pbc_mcpdft
+        return pbc_mcpdft.CASCIPDFT(
+            mc_or_mf_or_mol,
+            ot,
+            ncas,
+            nelecas,
+            ncore=ncore,
+            **kwargs,
+        )
     return _MCPDFT(mcscf.CASCI, mc_or_mf_or_mol, ot, ncas, nelecas, ncore=ncore,
                    **kwargs)
 
@@ -70,9 +88,6 @@ def _laspdftEnergy(mc_class, mc_or_mf_or_mol, ot, ncas_sub, nelecas_sub, DoLASSI
     else:
         mc0 = None
         mf_or_mol = mc_or_mf_or_mol
-
-    # Redefine the otfnal class for periodic systems
-    ot = periodicpdft(mc_or_mf_or_mol, ot)
 
     if isinstance(mf_or_mol, gto.Mole) and mf_or_mol.symmetry:
         logger.warn(mf_or_mol,
@@ -132,6 +147,18 @@ def LASSCFPDFT(mc_or_mf_or_mol, ot, ncas_sub=None, nelecas_sub=None, ncore=None,
                **kwargs):
     if ncas_sub is None: ncas_sub = getattr(mc_or_mf_or_mol, 'ncas_sub', None)
     if nelecas_sub is None: nelecas_sub = getattr(mc_or_mf_or_mol, 'nelecas_sub', None)
+    if _is_periodic(mc_or_mf_or_mol):
+        from mrh.my_pyscf.pbc import mcpdft as pbc_mcpdft
+        return pbc_mcpdft.LASSCFPDFT(
+            mc_or_mf_or_mol,
+            ot,
+            ncas_sub=ncas_sub,
+            nelecas_sub=nelecas_sub,
+            ncore=ncore,
+            spin_sub=spin_sub,
+            frozen=frozen,
+            **kwargs,
+        )
     from mrh.my_pyscf.mcscf.lasscf_o0 import LASSCF
     return _laspdftEnergy(LASSCF, mc_or_mf_or_mol, ot, ncas_sub, nelecas_sub, ncore=ncore,
                           spin_sub=spin_sub, frozen=frozen, **kwargs)
@@ -161,61 +188,21 @@ def CIMCPDFT_SCF(*args, **kwargs):
     return fn(mcscf.CASSCF, *args, **kwargs)
 
 def _getmole(mc_or_mf_mol):
-    '''
-    A function to get the mol object from the mc_or_mf_mol object
-    '''
+    """Compatibility alias for the periodic molecule/cell resolver."""
+    from mrh.my_pyscf.pbc.mcpdft.otfnalperiodic import _get_mol_or_cell
+    return _get_mol_or_cell(mc_or_mf_mol)
+
+
+def _is_periodic(mc_or_mf_mol):
     from pyscf.pbc import gto as pbcgto
-    if isinstance(mc_or_mf_mol, (mc1step.CASSCF, casci.CASCI)):
-        return mc_or_mf_mol._scf.mol
-    elif isinstance(mc_or_mf_mol, gto.Mole) or isinstance(mc_or_mf_mol, pbcgto.cell.Cell):
-        return mc_or_mf_mol
-    else:
-        return mc_or_mf_mol.mol
-    
+    return isinstance(_getmole(mc_or_mf_mol), pbcgto.cell.Cell)
 
 def periodicpdft(mc_or_mf_mol, ot):
-    """
-    A wrapper function to check whether the mol is cell object or not.
-    if yes, then the otfnal class will be modified.
-    
-    Note: Remember to write the sanity check for the kpts.
-    
-    Also, this is not the best way to handle the situation but it works for now.In future,
-    I will put this in mrh.pbc folder.
-
-    Args:
-        mc: mcscf object
-    """
-    mol = _getmole(mc_or_mf_mol)
-    assert isinstance(ot, str), "The ot should be a string"
-    from pyscf.pbc import gto
-    if isinstance(mol, gto.cell.Cell):
-        from mrh.my_pyscf.mcpdft.otfnalperiodic import _get_transfnal
-        sanity_check_for_kpts(mc_or_mf_mol)
-        fnal = _get_transfnal(mc_or_mf_mol, ot)
-        return fnal
-    else:
-        return ot
+    """Compatibility wrapper for the periodic gamma-point dispatcher."""
+    from mrh.my_pyscf.pbc.mcpdft.otfnalperiodic import periodicpdft as fn
+    return fn(mc_or_mf_mol, ot)
 
 def sanity_check_for_kpts(mc_or_mf_mol):
-    '''
-    A function to check total number of kpts if it is greater than 1
-    raise an error.
-    '''
-    if hasattr(mc_or_mf_mol, '_scf'):
-        nkpts = len(mc_or_mf_mol._scf.kpts)
-    
-    elif hasattr(mc_or_mf_mol, '_las'):
-        nkpts = len(mc_or_mf_mol._las._scf.kpts)
-
-    elif hasattr(mc_or_mf_mol, 'kpts'):
-        nkpts = len(mc_or_mf_mol.kpts)
-
-    else:
-        raise NotImplementedError ("The input object does not have kpts attribute")
-    
-    if nkpts > 1:
-        raise ValueError ("Only supercell calculations can be performend with MCPDFT")
-    
-    
-    
+    """Compatibility wrapper for the periodic gamma-point check."""
+    from mrh.my_pyscf.pbc.mcpdft.otfnalperiodic import sanity_check_for_kpts as fn
+    return fn(mc_or_mf_mol)

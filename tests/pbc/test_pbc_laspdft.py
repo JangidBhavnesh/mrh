@@ -45,6 +45,36 @@ class KnownValues(unittest.TestCase):
         self.assertTrue(mc.converged)
         self.assertAlmostEqual(mc.e_tot, -0.5329013391934931, 7)
 
+    def test_legacy_laspdft_dispatch(self):
+        from mrh.my_pyscf import mcpdft as legacy_mcpdft
+
+        mc = legacy_mcpdft.LASSCF(
+            self.mf,
+            "tPBE",
+            (1, 1),
+            (1, 1),
+            spin_sub=(2, 2),
+            grids_level=1,
+        )
+
+        self.assertIsInstance(mc, _LASPDFT)
+
+    def test_legacy_mcpdft_dispatch(self):
+        from mrh.my_pyscf import mcpdft as legacy_mcpdft
+        from mrh.my_pyscf.pbc.mcpdft.mcpdft import _MCPDFT
+
+        mc = legacy_mcpdft.CASCI(self.mf, "tPBE", 1, 2)
+
+        self.assertIsInstance(mc, _MCPDFT)
+
+    def test_legacy_periodic_imports(self):
+        from mrh.my_pyscf.mcpdft import otfnalperiodic as legacy
+        from mrh.my_pyscf.pbc.mcpdft import otfnalperiodic as periodic
+
+        self.assertIs(legacy.otfnalperiodic, periodic.otfnalperiodic_gamma)
+        self.assertIs(legacy._get_transfnal, periodic.get_pbc_otfnal_gamma)
+        self.assertIs(legacy.sanity_check_for_df, periodic._get_ks_obj)
+
 
 if __name__ == "__main__":
     unittest.main()
