@@ -132,25 +132,20 @@ def _laspdftEnergy(mc_class, mc_or_mf, ot, ncas_sub, nelecas_sub,
         if frozen is not None:
             las.frozen = frozen
     else:
-        las_kwargs = {
-            "ncore": ncore,
-            "spin_sub": spin_sub,
-        }
-        if frozen is not None:
-            las_kwargs["frozen"] = frozen
+        las_kwargs = {"ncore": ncore, "spin_sub": spin_sub, "frozen": frozen}
         las = mc_class(mc_or_mf, ncas_sub, nelecas_sub, **las_kwargs)
-
     return get_mcpdft_child_class(las, ot, **kwargs)
 
 
 def LASSCFPDFT(mc_or_mf, ot, ncas_sub=None, nelecas_sub=None, ncore=None,
                spin_sub=None, frozen=None, **kwargs):
-    """Create a gamma-point periodic LAS-PDFT solver."""
+    """
+    Create a gamma-point periodic LAS-PDFT solver.
+    """
     if ncas_sub is None:
         ncas_sub = getattr(mc_or_mf, "ncas_sub", None)
     if nelecas_sub is None:
         nelecas_sub = getattr(mc_or_mf, "nelecas_sub", None)
-
     from mrh.my_pyscf.mcscf.lasscf_o0 import LASSCF as MolecularLASSCF
     return _laspdftEnergy(
         MolecularLASSCF,
