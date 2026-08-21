@@ -307,10 +307,21 @@ def get_pbc_otfnal_gamma(kmc_or_kmf_or_cell, otxc):
 def get_pbc_otfnal_kpts(kmc_or_kmf_or_cell, otxc):
     cell = _get_mol_or_cell (kmc_or_kmf_or_cell)
     kpts = getattr(kmc_or_kmf_or_cell, 'kpts', None)
-    kmesh = getattr(kmc_or_kmf_or_cell, 'kmesh', None)
+    try:
+        kmesh = getattr(kmc_or_kmf_or_cell, 'kmesh', None)
+    except TypeError:
+        # PySCF's SCF.kmesh property changed with the kpts_to_kmesh API.
+        kmesh = None
 
     assert kpts is not None, "kpts is required for kpts-based OT-FNAL"
-    assert kmesh is not None, "kmesh is required for kpts-based OT-FNAL"
+    if kmesh is None:
+        from pyscf.pbc.tools.k2gamma import kpts_to_kmesh
+        try:
+            kmesh = kpts_to_kmesh(cell, kpts)
+        except TypeError:
+            # Compatibility with PySCF releases whose helper accepted only
+            # the k-point array.
+            kmesh = kpts_to_kmesh(kpts)
 
     cell_kptsinfo = {
         'cell': cell, 
