@@ -165,6 +165,14 @@ class KnownValues(unittest.TestCase):
         (3, 2, (1, 1)),
     ]
 
+    # An even electron count permits odd spin multiplicities, while an odd
+    # electron count permits even spin multiplicities.  The random vectors do
+    # not need to be spin eigenfunctions for this parity distinction.
+    MULTIPLICITY_PARITY_CASES = [
+        ("odd", 2, 2, (1, 1)),
+        ("even", 2, 2, (2, 1)),
+    ]
+
     def test_krdm12_and_krdm12s(self):
         """Check RDM properties and consistency among public functions."""
         helper = KFCIHelperFunctions()
@@ -190,52 +198,54 @@ class KnownValues(unittest.TestCase):
                         rdm1, rdm2, rdm1s, rdm2s, rdm1_direct,
                         rdm1s_direct, nelec)
 
-    def test_krdm_vs_full_cplx_fci_rdm(self):
-        """Compare sector RDMs with embedded full complex-FCI RDMs."""
+    def test_direct_vs_embedded_ref_for_multiplicity_parities(self):
+        """Compare direct and reference RDMs for odd/even multiplicities."""
         helper = KFCIHelperFunctions()
-        for nkpts, ncas, nelec in self.CASES:
+        for parity, nkpts, ncas, nelec in self.MULTIPLICITY_PARITY_CASES:
             for target_k in range(nkpts):
-                with self.subTest(
-                        nkpts=nkpts, ncas=ncas, nelec=nelec,
-                        target_k=target_k):
-                    norb = nkpts * ncas
-                    fcivec, ci_full, *_ = (
-                        helper.embed_random_ksector_fcivec_to_full_ci(
-                            nkpts, ncas, nelec, target_k=target_k))
-                    solver = direct_spin1_kfci.FCISolver(
-                        nkpts=nkpts, target_k=target_k)
+                for reorder in (False, True):
+                    with self.subTest(
+                            multiplicity_parity=parity, nkpts=nkpts,
+                            ncas=ncas, nelec=nelec, target_k=target_k,
+                            reorder=reorder):
+                        norb = nkpts * ncas
+                        fcivec = helper.random_ksector_fcivec(
+                            nkpts, ncas, nelec, target_k=target_k)[0]
 
-                    rdm1s_k = solver.make_rdm1s(
-                        fcivec.copy(), norb, nelec)
-                    rdm1s_ref = direct_spin1_cplx.make_rdm1s(
-                        ci_full.copy(), norb, nelec)
-                    for actual, reference in zip(rdm1s_k, rdm1s_ref):
-                        assert_same_rdm(actual, reference)
-
-                    assert_same_rdm(
-                        solver.make_rdm1(fcivec.copy(), norb, nelec),
-                        direct_spin1_cplx.make_rdm1(
-                            ci_full.copy(), norb, nelec))
-
-                    rdm12s_k = solver.make_rdm12s(
-                        fcivec.copy(), norb, nelec)
-                    rdm12s_ref = direct_spin1_cplx.make_rdm12s(
-                        ci_full.copy(), norb, nelec)
-                    for actual_group, reference_group in zip(
-                            rdm12s_k, rdm12s_ref):
+                        direct1s = krdm_helper.make_rdm1s(
+                            fcivec, norb, nelec, nkpts,
+                            target_k=target_k)
+                        reference1s = krdm_helper.make_rdm1s_ref(
+                            fcivec, norb, nelec, nkpts,
+                            target_k=target_k)
                         for actual, reference in zip(
-                                actual_group, reference_group):
+                                direct1s, reference1s):
                             assert_same_rdm(actual, reference)
 
-                    rdm12_k = solver.make_rdm12(
-                        fcivec.copy(), norb, nelec)
-                    rdm12_ref = direct_spin1_cplx.make_rdm12(
-                        ci_full.copy(), norb, nelec)
-                    for actual, reference in zip(rdm12_k, rdm12_ref):
-                        assert_same_rdm(actual, reference)
+                        direct12s = krdm_helper.make_rdm12s(
+                            fcivec, norb, nelec, nkpts,
+                            target_k=target_k, reorder=reorder)
+                        reference12s = krdm_helper.make_rdm12s_ref(
+                            fcivec, norb, nelec, nkpts,
+                            target_k=target_k, reorder=reorder)
+                        for actual_group, reference_group in zip(
+                                direct12s, reference12s):
+                            for actual, reference in zip(
+                                    actual_group, reference_group):
+                                assert_same_rdm(actual, reference)
 
-    def test_krdm_c_backend_and_ham_energy(self):
-        """Check C embedding and reproduce Hamiltonian energy from RDMs."""
+                        direct12 = krdm_helper.make_rdm12(
+                            fcivec, norb, nelec, nkpts,
+                            target_k=target_k, reorder=reorder)
+                        reference12 = krdm_helper.make_rdm12_ref(
+                            fcivec, norb, nelec, nkpts,
+                            target_k=target_k, reorder=reorder)
+                        for actual, reference in zip(
+                                direct12, reference12):
+                            assert_same_rdm(actual, reference)
+
+    def test_direct_rdm_energy_matches_kcasci_active_space_energy(self):
+        """Match the direct-RDM energy to the kCASCI FCI energy path."""
         nkpts, ncas, nelec, target_k = 2, 2, (1, 1), 0
         norb = nkpts * ncas
         rng = np.random.default_rng(91)
