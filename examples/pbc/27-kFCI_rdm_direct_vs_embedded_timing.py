@@ -9,7 +9,7 @@ CI vector in a fixed momentum sector and times ``make_rdm12s`` using:
 1. the direct packed momentum-sector implementation; and
 2. the retained full-CI embedding implementation (``make_rdm12s_ref``).
 
-The default scan is 2, 4, ..., 16 total orbitals.  It uses two active
+The scan is 2, 4, ..., 16 total orbitals.  It uses two active
 orbitals and two neutral active electrons per k-point, then removes one beta
 electron (``charge=+1``) to reproduce the charged graphene sector:
 
@@ -21,12 +21,11 @@ Run from the repository root with::
     PYTHONPATH=.. python \
         examples/pbc/27-kFCI_rdm_direct_vs_embedded_timing.py
 
-Use ``--charge 0`` for the neutral sectors.  Each completed size is flushed
-immediately to CSV so earlier timings survive if a large embedded-reference
-calculation is interrupted.
+Edit the calculation settings below to change the charge, target momentum,
+thread count, random seed, or output file.  Each completed size is flushed to
+CSV so earlier timings survive if a large embedded calculation is interrupted.
 """
 
-import argparse
 import csv
 import gc
 import math
@@ -40,9 +39,19 @@ from pyscf import lib
 from mrh.my_pyscf.pbc.fci import direct_spin1_kfci, krdm_helper
 
 
-DEFAULT_ACTIVE_ORBITALS = tuple(range(2, 17, 2))
-ACTIVE_ORBITALS_PER_KPOINT = 2
-ACTIVE_ELECTRONS_PER_KPOINT = (1, 1)
+# ------------------------------------------------------------
+# Calculation settings
+# ------------------------------------------------------------
+
+active_orbitals = range(2, 17, 2)
+active_orbitals_per_kpoint = 2
+active_electrons_per_kpoint = (1, 1)
+charge = +1
+target_k = 0
+num_threads = 32
+seed = 12
+output = Path("krdm_direct_vs_embedded_timings.csv")
+rdm_tolerance = 1e-10
 
 RESULT_FIELDS = (
     "active_orbitals_total",
@@ -62,63 +71,9 @@ RESULT_FIELDS = (
 )
 
 
-def parse_args():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--active-orbitals",
-        type=int,
-        nargs="+",
-        default=DEFAULT_ACTIVE_ORBITALS,
-        help="total active-orbital sizes (default: 2 4 ... 16)",
-    )
-    parser.add_argument(
-        "--charge",
-        type=int,
-        choices=(0, 1),
-        default=1,
-        help="remove one beta electron for +1, or remain neutral for 0",
-    )
-    parser.add_argument(
-        "--target-k",
-        type=int,
-        default=0,
-        help="total momentum-sector index (default: 0)",
-    )
-    parser.add_argument(
-        "--threads",
-        type=int,
-        default=32,
-        help="OpenMP/BLAS threads for the direct implementation (default: 32)",
-    )
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=12,
-        help="base random-number seed (default: 12)",
-    )
-    parser.add_argument(
-        "--output",
-        type=Path,
-        default=Path("krdm_direct_vs_embedded_timings.csv"),
-        help="checkpoint CSV path",
-    )
-    return parser.parse_args()
-
-
-def validate_args(args):
-    if args.threads < 1:
-        raise ValueError("--threads must be positive")
-    for norb in args.active_orbitals:
-        if norb < ACTIVE_ORBITALS_PER_KPOINT:
-            raise ValueError("active-orbital sizes must be at least 2")
-        if norb % ACTIVE_ORBITALS_PER_KPOINT:
-            raise ValueError(
-                "each active-orbital size must be divisible by 2")
-
-
 def electron_counts(nkpts, charge):
-    neleca = nkpts * ACTIVE_ELECTRONS_PER_KPOINT[0]
-    nelecb = nkpts * ACTIVE_ELECTRONS_PER_KPOINT[1] - charge
+    neleca = nkpts * active_electrons_per_kpoint[0]
+    nelecb = nkpts * active_electrons_per_kpoint[1] - charge
     if nelecb < 0:
         raise ValueError(
             f"charge={charge} is incompatible with nkpts={nkpts}")
@@ -173,7 +128,7 @@ def warm_up():
 
 
 def benchmark_size(norb, charge, target_k, threads, seed):
-    nkpts = norb // ACTIVE_ORBITALS_PER_KPOINT
+    nkpts = norb // active_orbitals_per_kpoint
     nelec = electron_counts(nkpts, charge)
     resolved_target_k = target_k % nkpts
     sector_size = direct_spin1_kfci.sector_size(
@@ -204,7 +159,7 @@ def benchmark_size(norb, charge, target_k, threads, seed):
         resolved_target_k,
     )
     error = maximum_rdm_error(direct, reference)
-    if error > 1e-10:
+    if error > rdm_tolerance:
         raise AssertionError(
             f"direct/reference RDM mismatch for {norb} orbitals: {error}")
 
@@ -243,30 +198,36 @@ def print_result(row):
     )
 
 
-def main():
-    args = parse_args()
-    validate_args(args)
-    lib.num_threads(args.threads)
-    warm_up()
+# ------------------------------------------------------------
+# Direct versus embedded RDM timing scan
+# ------------------------------------------------------------
 
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    with args.output.open("w", newline="") as output_file:
-        writer = csv.DictWriter(output_file, fieldnames=RESULT_FIELDS)
-        writer.writeheader()
+if num_threads < 1:
+    raise ValueError("num_threads must be positive")
+
+for norb in active_orbitals:
+    if norb < active_orbitals_per_kpoint:
+        raise ValueError("active-orbital sizes must be at least 2")
+    if norb % active_orbitals_per_kpoint:
+        raise ValueError("each active-orbital size must be divisible by 2")
+
+lib.num_threads(num_threads)
+warm_up()
+
+output.parent.mkdir(parents=True, exist_ok=True)
+with output.open("w", newline="") as output_file:
+    writer = csv.DictWriter(output_file, fieldnames=RESULT_FIELDS)
+    writer.writeheader()
+    output_file.flush()
+
+    for index, norb in enumerate(active_orbitals):
+        row = benchmark_size(
+            norb=norb,
+            charge=charge,
+            target_k=target_k,
+            threads=num_threads,
+            seed=seed + index,
+        )
+        writer.writerow(row)
         output_file.flush()
-
-        for index, norb in enumerate(args.active_orbitals):
-            row = benchmark_size(
-                norb=norb,
-                charge=args.charge,
-                target_k=args.target_k,
-                threads=args.threads,
-                seed=args.seed + index,
-            )
-            writer.writerow(row)
-            output_file.flush()
-            print_result(row)
-
-
-if __name__ == "__main__":
-    main()
+        print_result(row)
