@@ -46,6 +46,17 @@ set_target_properties (clib_mrh_pbc_kcistring PROPERTIES
 
 set (PBC_KFCI_COMMON_SOURCE_FILES "pbc_kfci_common.c")
 
+set (PBC_KFCI_RDM_SOURCE_FILES
+     "pbc_kfci_rdm.c"
+     ${PBC_KFCI_COMMON_SOURCE_FILES})
+add_library (clib_mrh_pbc_kfci_rdm SHARED ${PBC_KFCI_RDM_SOURCE_FILES})
+target_link_libraries(clib_mrh_pbc_kfci_rdm ${FCI_LIBRARY} ${LAPACK_LIBRARIES})
+set_target_properties (clib_mrh_pbc_kfci_rdm PROPERTIES
+      LINKER_LANGUAGE C
+      CLEAN_DIRECT_OUTPUT 1
+      LIBRARY_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}
+      OUTPUT_NAME "pbc_kfci_rdm")
+
 set (PBC_FCI_CONTRACT_K_SOURCE_FILES
      "pbc_fci_contract_k.c"
      ${PBC_KFCI_COMMON_SOURCE_FILES})
