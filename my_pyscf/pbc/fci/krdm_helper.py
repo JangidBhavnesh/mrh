@@ -194,9 +194,9 @@ def extract_ksector_ci_from_full(ci_full, norb, nelec, nkpts, target_k=0,
     return fcivec
 
 
-def make_rdm1s(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
-               spin=None, kmom=None, kconserv=None):
-    """Build spin-separated one-particle RDMs."""
+def make_rdm1s_ref(fcivec, norb, nelec, nkpts, target_k=0,
+                   link_index=None, spin=None, kmom=None, kconserv=None):
+    """Build reference 1-RDMs through an embedded full-CI vector."""
     ci_full = embed_ksector_ci_to_full(
         fcivec, norb, nelec, nkpts, target_k=target_k,
         link_index=link_index, spin=spin, kmom=kmom, kconserv=kconserv)
@@ -204,18 +204,19 @@ def make_rdm1s(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
         ci_full, norb, _unpack_nelec(nelec, spin), link_index=None)
 
 
-def make_rdm1(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
-              spin=None, kmom=None, kconserv=None):
-    """Build the spin-summed one-particle RDM."""
-    rdm1a, rdm1b = make_rdm1s(
+def make_rdm1_ref(fcivec, norb, nelec, nkpts, target_k=0,
+                  link_index=None, spin=None, kmom=None, kconserv=None):
+    """Build a reference spin-summed 1-RDM through full-CI embedding."""
+    rdm1a, rdm1b = make_rdm1s_ref(
         fcivec, norb, nelec, nkpts, target_k=target_k,
         link_index=link_index, spin=spin, kmom=kmom, kconserv=kconserv)
     return (rdm1a + rdm1b).conj().T
 
 
-def make_rdm12s(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
-                reorder=True, spin=None, kmom=None, kconserv=None):
-    """Build spin-separated one- and two-particle RDMs."""
+def make_rdm12s_ref(fcivec, norb, nelec, nkpts, target_k=0,
+                    link_index=None, reorder=True, spin=None, kmom=None,
+                    kconserv=None):
+    """Build reference 1-/2-RDMs through an embedded full-CI vector."""
     ci_full = embed_ksector_ci_to_full(
         fcivec, norb, nelec, nkpts, target_k=target_k,
         link_index=link_index, spin=spin, kmom=kmom, kconserv=kconserv)
@@ -224,16 +225,26 @@ def make_rdm12s(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
         reorder=reorder)
 
 
-def make_rdm12(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
-               reorder=True, spin=None, kmom=None, kconserv=None):
-    """Build spin-summed one- and two-particle RDMs."""
-    (dm1a, dm1b), (dm2aa, dm2ab, dm2bb) = make_rdm12s(
+def make_rdm12_ref(fcivec, norb, nelec, nkpts, target_k=0,
+                   link_index=None, reorder=True, spin=None, kmom=None,
+                   kconserv=None):
+    """Build reference spin-summed RDMs through full-CI embedding."""
+    (dm1a, dm1b), (dm2aa, dm2ab, dm2bb) = make_rdm12s_ref(
         fcivec, norb, nelec, nkpts, target_k=target_k,
         link_index=link_index, reorder=reorder, spin=spin, kmom=kmom,
         kconserv=kconserv)
     dm1 = dm1a + dm1b
     dm2 = dm2aa + dm2bb + dm2ab + dm2ab.transpose(2, 3, 0, 1)
     return dm1.conj().T, dm2
+
+
+# Keep the public API working until the direct momentum-sector kernels are
+# registered below.  These aliases are replaced by direct implementations in
+# the next implementation step; the ``*_ref`` names remain for benchmarks.
+make_rdm1s = make_rdm1s_ref
+make_rdm1 = make_rdm1_ref
+make_rdm12s = make_rdm12s_ref
+make_rdm12 = make_rdm12_ref
 
 
 def contract_ss_embedded(fcivec, norb, nelec, nkpts, target_k=0,
