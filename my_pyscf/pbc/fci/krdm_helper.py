@@ -20,7 +20,9 @@ from mrh.my_pyscf.pbc.fci import (
 
 
 _kci_lib_initialized = False
+_direct_rdm_lib_initialized = False
 _contract_ss_lib_initialized = False
+libpbckrdm = None
 libpbcfci_k = None
 
 
@@ -89,6 +91,35 @@ def _init_contract_ss_lib():
     ]
     libpbcfci_k.FCIcontract_ss_k.restype = None
     _contract_ss_lib_initialized = True
+
+
+def _init_direct_rdm_lib():
+    """Load and configure the packed momentum-sector RDM kernels."""
+    global _direct_rdm_lib_initialized, libpbckrdm
+    if _direct_rdm_lib_initialized:
+        return
+
+    libpbckrdm = load_library("libpbc_kfci_rdm")
+    void_p = ctypes.c_void_p
+    int_t = ctypes.c_int
+    libpbckrdm.FCIkci_make_rdm1s_direct.argtypes = [
+        void_p, void_p, void_p,
+        int_t, int_t, int_t, void_p,
+        void_p, int_t, int_t,
+        void_p, int_t, int_t,
+        void_p, void_p,
+    ]
+    libpbckrdm.FCIkci_make_rdm1s_direct.restype = int_t
+    libpbckrdm.FCIkci_make_rdm12s_direct.argtypes = [
+        void_p, void_p, void_p, void_p, void_p, void_p,
+        int_t, int_t, int_t, void_p,
+        void_p, int_t, int_t,
+        void_p, int_t, int_t,
+        void_p, void_p, void_p, void_p,
+        void_p, void_p,
+    ]
+    libpbckrdm.FCIkci_make_rdm12s_direct.restype = int_t
+    _direct_rdm_lib_initialized = True
 
 
 def _unpack_k(norb, nelec, nkpts, link_index=None, spin=None, kmom=None,
@@ -238,13 +269,115 @@ def make_rdm12_ref(fcivec, norb, nelec, nkpts, target_k=0,
     return dm1.conj().T, dm2
 
 
-# Keep the public API working until the direct momentum-sector kernels are
-# registered below.  These aliases are replaced by direct implementations in
-# the next implementation step; the ``*_ref`` names remain for benchmarks.
-make_rdm1s = make_rdm1s_ref
-make_rdm1 = make_rdm1_ref
-make_rdm12s = make_rdm12s_ref
-make_rdm12 = make_rdm12_ref
+def _direct_rdm_inputs(fcivec, norb, nelec, nkpts, target_k, link_index,
+                       spin, kmom, kconserv):
+    """Return contiguous CI and layout arrays for a direct RDM call."""
+    neleca, nelecb = _unpack_nelec(nelec, spin)
+    layout = _as_contract_map(
+        norb, (neleca, nelecb), nkpts, target_k=target_k,
+        link_index=link_index, spin=spin, kmom=kmom, kconserv=kconserv)
+    fcivec = np.asarray(fcivec, dtype=np.complex128, order="C")
+    if fcivec.size != layout.sector_size:
+        raise ValueError(
+            "CI vector has size {}, expected {} for momentum sector {}"
+            .format(fcivec.size, layout.sector_size, layout.target_k))
+    return fcivec, layout
+
+
+def make_rdm1s(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
+               spin=None, kmom=None, kconserv=None):
+    """Build spin-separated 1-RDMs directly in the momentum sector."""
+    fcivec, layout = _direct_rdm_inputs(
+        fcivec, norb, nelec, nkpts, target_k, link_index, spin, kmom,
+        kconserv)
+    linka, linkb = layout.link_index
+    dm1a = np.empty((norb, norb), dtype=np.complex128, order="C")
+    dm1b = np.empty_like(dm1a)
+    _init_direct_rdm_lib()
+    with lib.with_omp_threads(lib.num_threads()):
+        err = libpbckrdm.FCIkci_make_rdm1s_direct(
+            dm1a.ctypes.data_as(ctypes.c_void_p),
+            dm1b.ctypes.data_as(ctypes.c_void_p),
+            fcivec.ctypes.data_as(ctypes.c_void_p),
+            ctypes.c_int(norb), ctypes.c_int(nkpts),
+            ctypes.c_int(layout.blocks.shape[0]),
+            layout.blocks.ctypes.data_as(ctypes.c_void_p),
+            linka.ctypes.data_as(ctypes.c_void_p),
+            ctypes.c_int(linka.shape[0]), ctypes.c_int(linka.shape[1]),
+            linkb.ctypes.data_as(ctypes.c_void_p),
+            ctypes.c_int(linkb.shape[0]), ctypes.c_int(linkb.shape[1]),
+            layout.str2tot_a.ctypes.data_as(ctypes.c_void_p),
+            layout.str2tot_b.ctypes.data_as(ctypes.c_void_p),
+        )
+    if err:
+        raise MemoryError("direct momentum-sector 1-RDM allocation failed")
+    return dm1a, dm1b
+
+
+def make_rdm1(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
+              spin=None, kmom=None, kconserv=None):
+    """Build a spin-summed 1-RDM directly in the momentum sector."""
+    dm1a, dm1b = make_rdm1s(
+        fcivec, norb, nelec, nkpts, target_k=target_k,
+        link_index=link_index, spin=spin, kmom=kmom, kconserv=kconserv)
+    return (dm1a + dm1b).conj().T
+
+
+def make_rdm12s(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
+                reorder=True, spin=None, kmom=None, kconserv=None):
+    """Build spin-separated RDMs directly in the momentum sector."""
+    fcivec, layout = _direct_rdm_inputs(
+        fcivec, norb, nelec, nkpts, target_k, link_index, spin, kmom,
+        kconserv)
+    linka, linkb = layout.link_index
+    dm1a = np.empty((norb, norb), dtype=np.complex128, order="C")
+    dm1b = np.empty_like(dm1a)
+    dm2aa = np.empty((norb,) * 4, dtype=np.complex128, order="C")
+    dm2ab = np.empty_like(dm2aa)
+    dm2bb = np.empty_like(dm2aa)
+    _init_direct_rdm_lib()
+    with lib.with_omp_threads(lib.num_threads()):
+        err = libpbckrdm.FCIkci_make_rdm12s_direct(
+            dm1a.ctypes.data_as(ctypes.c_void_p),
+            dm1b.ctypes.data_as(ctypes.c_void_p),
+            dm2aa.ctypes.data_as(ctypes.c_void_p),
+            dm2ab.ctypes.data_as(ctypes.c_void_p),
+            dm2bb.ctypes.data_as(ctypes.c_void_p),
+            fcivec.ctypes.data_as(ctypes.c_void_p),
+            ctypes.c_int(norb), ctypes.c_int(nkpts),
+            ctypes.c_int(layout.blocks.shape[0]),
+            layout.blocks.ctypes.data_as(ctypes.c_void_p),
+            linka.ctypes.data_as(ctypes.c_void_p),
+            ctypes.c_int(linka.shape[0]), ctypes.c_int(linka.shape[1]),
+            linkb.ctypes.data_as(ctypes.c_void_p),
+            ctypes.c_int(linkb.shape[0]), ctypes.c_int(linkb.shape[1]),
+            layout.stra_ids.ctypes.data_as(ctypes.c_void_p),
+            layout.stra_offsets.ctypes.data_as(ctypes.c_void_p),
+            layout.strb_ids.ctypes.data_as(ctypes.c_void_p),
+            layout.strb_offsets.ctypes.data_as(ctypes.c_void_p),
+            layout.str2tot_a.ctypes.data_as(ctypes.c_void_p),
+            layout.str2tot_b.ctypes.data_as(ctypes.c_void_p),
+        )
+    if err:
+        raise MemoryError("direct momentum-sector 1-/2-RDM allocation failed")
+    if reorder:
+        # The full-CI driver reorders with its internal transposed 1-RDM and
+        # transposes that matrix only when returning it to Python.
+        rdm_helper.reorder_rdm(dm1a.T, dm2aa, inplace=True)
+        rdm_helper.reorder_rdm(dm1b.T, dm2bb, inplace=True)
+    return (dm1a, dm1b), (dm2aa, dm2ab, dm2bb)
+
+
+def make_rdm12(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
+               reorder=True, spin=None, kmom=None, kconserv=None):
+    """Build spin-summed RDMs directly in the momentum sector."""
+    (dm1a, dm1b), (dm2aa, dm2ab, dm2bb) = make_rdm12s(
+        fcivec, norb, nelec, nkpts, target_k=target_k,
+        link_index=link_index, reorder=reorder, spin=spin, kmom=kmom,
+        kconserv=kconserv)
+    dm1 = dm1a + dm1b
+    dm2 = dm2aa + dm2bb + dm2ab + dm2ab.transpose(2, 3, 0, 1)
+    return dm1.conj().T, dm2
 
 
 def contract_ss_embedded(fcivec, norb, nelec, nkpts, target_k=0,
