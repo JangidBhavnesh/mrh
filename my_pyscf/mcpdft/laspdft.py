@@ -55,11 +55,12 @@ class _LASPDFT(_PDFT):
     def multi_state(self, method='Lin'):
         raise NotImplementedError(f"MS-PDFT not avaialble for the LAS wave functions.")
 
-def get_mcpdft_child_class(mc, ot, DoLASSI=False, states=None, **kwargs):
+def get_mcpdft_child_class(mc, ot, DoLASSI=False, states=None,
+                           _pdft_class=_LASPDFT, **kwargs):
     mc_doc = (mc.__class__.__doc__ or 'No docstring for MC-SCF parent method')
 
-    class PDFT(_LASPDFT, mc.__class__):
-        __doc__ = mc_doc + '\n\n' + _LASPDFT.__doc__
+    class PDFT(_pdft_class, mc.__class__):
+        __doc__ = mc_doc + '\n\n' + _pdft_class.__doc__
         _mc_class = mc.__class__
         setattr(_mc_class, 'DoLASSI', None)
         setattr(_mc_class, 'states', None)
@@ -70,12 +71,12 @@ def get_mcpdft_child_class(mc, ot, DoLASSI=False, states=None, **kwargs):
             if self._in_mcscf_env:
                 return mc.__class__.get_h2eff(self, mo_coeff=mo_coeff)
             else:
-                return _LASPDFT.get_h2eff(self, mo_coeff=mo_coeff)
+                return _pdft_class.get_h2eff(self, mo_coeff=mo_coeff)
         
         # Have to pass this due to dump_chk, which won't work for LAS.
         def compute_pdft_energy_(self, mo_coeff=None, ci=None, ot=None, otxc=None,
                                  grids_level=None, grids_attr=None, dump_chk=False, **kwargs):
-            return _LASPDFT.compute_pdft_energy_(self, mo_coeff=mo_coeff, ci=ci, ot=ot, otxc=otxc,
+            return _pdft_class.compute_pdft_energy_(self, mo_coeff=mo_coeff, ci=ci, ot=ot, otxc=otxc,
                     grids_level=grids_level, grids_attr=grids_attr, dump_chk=False, **kwargs)
 
         if DoLASSI:
