@@ -53,8 +53,14 @@ def make_one_casdm2 (mc, ci, state=0):
     return casdm2
 
 def energy_mcwfn(mc, mo_coeff=None, ci=None, ot=None, state=0, casdm1s=None,
-                casdm2=None, verbose=None):
-    # See pyscf.mcpdft.mcpdft.energy_mcwfn for details.
+                 casdm2=None, verbose=None, mo_phase=None, h2eff=None):
+    """Compute the MC-wavefunction part from dense Wannier-basis RDMs.
+
+    ``mo_phase`` and ``h2eff`` may be supplied by wavefunction
+    specializations whose Wannier gauge or active-space integral builder
+    differs from conventional periodic CASCI.  Omitting them preserves the
+    established k-MC-PDFT behavior.
+    """
 
     if ot is None: ot = mc.otfnal
     if mo_coeff is None: mo_coeff = mc.mo_coeff
@@ -69,8 +75,18 @@ def energy_mcwfn(mc, mo_coeff=None, ci=None, ot=None, state=0, casdm1s=None,
     ncas = mc.ncas
     kmesh = mc.kmesh
 
-    # Get the MO_PHASE:
-    mo_phase = get_mo_coeff_k2R(mc._scf, mo_coeff, ncore, ncas, kmesh=kmesh)[-1]
+    if mo_phase is None:
+        mo_phase = get_mo_coeff_k2R(
+            mc._scf, mo_coeff, ncore, ncas, kmesh=kmesh,
+        )[-1]
+    mo_phase = np.asarray(mo_phase)
+    ncastot = ncas * nkpts
+    expected_phase_shape = (nkpts, ncas, ncastot)
+    if mo_phase.shape != expected_phase_shape:
+        raise ValueError(
+            f"Expected mo_phase shape {expected_phase_shape}; "
+            f"got {mo_phase.shape}",
+        )
     log = logger.new_logger(mc, verbose=verbose)
 
     # First, transform the casdm1s to dm1s for each k-point.
@@ -136,8 +152,9 @@ def energy_mcwfn(mc, mo_coeff=None, ci=None, ot=None, state=0, casdm1s=None,
     if log.verbose >= logger.DEBUG or abs(hyb_c) > 1e-10:
         # Now compute the cascm2:
         cascm2 = dm2_cumulant_complex(casdm2, casdm1s)
-        aeri = mc.get_h2eff(mo_coeff = mo_coeff)
-        ncastot = mc.ncas * mc.nkpts
+        if h2eff is None:
+            h2eff = mc.get_h2eff(mo_coeff=mo_coeff)
+        aeri = np.asarray(h2eff)
         assert aeri.ndim == 4 and aeri.shape == (ncastot,)*4
         E_c = np.tensordot(aeri, cascm2, axes=4) / (2 * nkpts)
         log.debug("E_c = %s", E_c)
