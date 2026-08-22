@@ -118,50 +118,59 @@ class KnownValues(unittest.TestCase):
                 1e-9,
             )
 
-    def test_occupation_constrained_localization_order(self):
+    def test_fock_canonicalization_order(self):
         ncore = klas.ncore
         nocc = ncore + klas.ncas
         active = slice(ncore, nocc)
         ovlp = kmf.get_ovlp()
 
-        # Build an orthonormal local-orbital basis whose virtual projection is
-        # larger than its occupied projection.  The singular-value ordering
-        # from _svd therefore puts the virtual active orbital first, and the
-        # explicit occupation sort must restore occupied-to-virtual ordering.
-        lo_coeff = np.empty(
-            (len(kmf.kpts), mo_coeff.shape[1], klas.ncas),
+        # Reverse the local active-orbital basis so that localization alone
+        # puts the higher-energy active orbital first.  With mo_occ omitted,
+        # both active orbitals belong to the same occupation sector and the
+        # Fock canonicalization must restore increasing-energy order.
+        lo_coeff = np.array(mo_coeff[:, :, active][:, :, ::-1], copy=True)
+        orbital_energy = np.arange(mo_coeff.shape[-1], dtype=float)
+        fock = np.empty(
+            (len(kmf.kpts), mo_coeff.shape[1], mo_coeff.shape[1]),
             dtype=mo_coeff.dtype,
         )
         for k in range(len(kmf.kpts)):
-            lo_coeff[k, :, 0] = (
-                0.5 * mo_coeff[k, :, ncore]
-                + np.sqrt(0.75) * mo_coeff[k, :, nocc]
-            )
-            lo_coeff[k, :, 1] = mo_coeff[k, :, ncore+1]
-
-        active_occ = np.array([2.0, 0.0])
-        full_occ = np.zeros((len(kmf.kpts), mo_coeff.shape[-1]))
-        full_occ[:, active] = active_occ
-
-        for test_occ in (full_occ, full_occ[0]):
-            mo_loc = klas.localize_init_guess(
-                list(range(klas.ncas)),
-                mo_coeff=mo_coeff,
-                lo_coeff=lo_coeff,
-                mo_occ=test_occ,
-                frags_by_AOs=True,
+            fock[k] = (
+                ovlp[k]
+                @ mo_coeff[k]
+                @ np.diag(orbital_energy)
+                @ mo_coeff[k].conj().T
+                @ ovlp[k]
             )
 
-            for k in range(len(kmf.kpts)):
-                overlap = (
-                    mo_coeff[k, :, active].conj().T
-                    @ ovlp[k]
-                    @ mo_loc[k, :, active]
-                )
-                self.assertLess(
-                    np.max(np.abs(np.abs(overlap) - np.eye(klas.ncas))),
-                    1e-10,
-                )
+        mo_loc = klas.localize_init_guess(
+            list(range(klas.ncas)),
+            mo_coeff=mo_coeff,
+            lo_coeff=lo_coeff,
+            fock=fock,
+            frags_by_AOs=True,
+        )
+
+        for k in range(len(kmf.kpts)):
+            overlap = (
+                mo_coeff[k, :, active].conj().T
+                @ ovlp[k]
+                @ mo_loc[k, :, active]
+            )
+            self.assertLess(
+                np.max(np.abs(np.abs(overlap) - np.eye(klas.ncas))),
+                1e-10,
+            )
+            localized_fock = (
+                mo_loc[k, :, active].conj().T
+                @ fock[k]
+                @ mo_loc[k, :, active]
+            )
+            np.testing.assert_allclose(
+                localized_fock,
+                np.diag(orbital_energy[active]),
+                atol=1e-10,
+            )
 
     def test_be_2s_orbital_alignment(self):
         be_cell = gto.Cell()
@@ -199,9 +208,10 @@ class KnownValues(unittest.TestCase):
             c_act = mo_loc[k, :, active]
             overlap_2s = (c_2s.conj().T @ ovlp[k] @ c_act)[0, 0]
 
-            self.assertGreater(overlap_2s.real, 0.95)
-            self.assertLess(abs(overlap_2s.imag), 1e-10)
-            np.testing.assert_allclose(overlap_2s, svals[k, 0], atol=1e-10)
+            self.assertGreater(abs(overlap_2s), 0.95)
+            np.testing.assert_allclose(
+                abs(overlap_2s), svals[k, 0], atol=1e-10,
+            )
             np.testing.assert_allclose(
                 mo_loc[k].conj().T @ ovlp[k] @ mo_loc[k],
                 np.eye(mo_loc.shape[-1]),
