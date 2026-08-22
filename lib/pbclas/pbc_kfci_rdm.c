@@ -23,6 +23,68 @@ typedef struct {
 } KFCIRDMLayout;
 
 
+typedef struct {
+        int *offsets;
+        int *indices;
+} KFCITargetLinkOrder;
+
+
+/* Group excitation links by target string and momentum transfer. */
+static int make_target_link_order(int *links, int nstr, int nlink,
+                                  int nkpts, KFCITargetLinkOrder *order)
+{
+        int nkeys = nstr * nkpts;
+        int *counts = calloc((size_t)nkeys, sizeof(int));
+        int *offsets = calloc((size_t)nkeys + 1, sizeof(int));
+        int *indices = NULL;
+
+        order->offsets = NULL;
+        order->indices = NULL;
+        if (counts == NULL || offsets == NULL) {
+                free(counts);
+                free(offsets);
+                return 1;
+        }
+
+        for (int ilink = 0; ilink < nstr * nlink; ilink++) {
+                int *link = links + (size_t)ilink * NLINK_FIELDS;
+                int target = link[LINK_TARGET];
+                if (link[LINK_SIGN] == 0 || target < 0) {
+                        continue;
+                }
+                int dk = mod_pos(link[LINK_DK], nkpts);
+                counts[target * nkpts + dk]++;
+        }
+        for (int key = 0; key < nkeys; key++) {
+                offsets[key + 1] = offsets[key] + counts[key];
+                counts[key] = offsets[key];
+        }
+
+        indices = malloc(sizeof(int) * (size_t)(offsets[nkeys] > 0
+                                                 ? offsets[nkeys] : 1));
+        if (indices == NULL) {
+                free(counts);
+                free(offsets);
+                return 1;
+        }
+        for (int ilink = 0; ilink < nstr * nlink; ilink++) {
+                int *link = links + (size_t)ilink * NLINK_FIELDS;
+                int target = link[LINK_TARGET];
+                if (link[LINK_SIGN] == 0 || target < 0) {
+                        continue;
+                }
+                int dk = mod_pos(link[LINK_DK], nkpts);
+                int key = target * nkpts + dk;
+                indices[counts[key]++] = ilink;
+        }
+
+        free(counts);
+        order->offsets = offsets;
+        order->indices = indices;
+        return 0;
+}
+
+
 static int make_string_layout(int nkpts, int nstr, int *str2tot,
                               int **p_string_k, int **p_string_local)
 {
@@ -296,7 +358,7 @@ static int make_ab_rdm(double complex *dm2ab, double complex *ci,
                        KFCIRDMLayout *layout, int nblocks, int *blocks,
                        int *linka, int nlinka, int *linkb, int nlinkb,
                        int *stra_ids, int *stra_offsets,
-                       int *strb_ids, int *strb_offsets)
+                       int *strb_ids, int *strb_offsets, int *kneg)
 {
         int norb = layout->norb;
         int nkpts = layout->nkpts;
@@ -304,9 +366,32 @@ static int make_ab_rdm(double complex *dm2ab, double complex *ci,
         int nthreads = omp_get_max_threads();
         double complex *work = calloc((size_t)nthreads * ndm2,
                                       sizeof(double complex));
-        if (work == NULL) {
+        int *alpha_prefix = malloc(sizeof(int) * (size_t)(nblocks + 1));
+        KFCITargetLinkOrder order_a;
+        KFCITargetLinkOrder order_b;
+        order_a.offsets = order_a.indices = NULL;
+        order_b.offsets = order_b.indices = NULL;
+
+        if (work == NULL || alpha_prefix == NULL ||
+            make_target_link_order(linka, layout->nstra, nlinka, nkpts,
+                                   &order_a) ||
+            make_target_link_order(linkb, layout->nstrb, nlinkb, nkpts,
+                                   &order_b)) {
+                free(work);
+                free(alpha_prefix);
+                free(order_a.offsets);
+                free(order_a.indices);
+                free(order_b.offsets);
+                free(order_b.indices);
                 return 1;
         }
+
+        alpha_prefix[0] = 0;
+        for (int iblock = 0; iblock < nblocks; iblock++) {
+                alpha_prefix[iblock + 1] = alpha_prefix[iblock]
+                        + blocks[iblock * 6 + BLOCK_NA];
+        }
+        int alpha_tasks = alpha_prefix[nblocks];
 
 #pragma omp parallel
 {
@@ -314,67 +399,74 @@ static int make_ab_rdm(double complex *dm2ab, double complex *ci,
         double complex *local = work + (size_t)tid * ndm2;
 
 #pragma omp for schedule(dynamic, 1)
-        for (int iblock = 0; iblock < nblocks; iblock++) {
+        for (int itask = 0; itask < alpha_tasks; itask++) {
+                int iblock = 0;
+                while (alpha_prefix[iblock + 1] <= itask) {
+                        iblock++;
+                }
                 int *block = blocks + iblock * 6;
                 int ka = block[BLOCK_KA];
                 int kb = block[BLOCK_KB];
-                int na = block[BLOCK_NA];
                 int nb = block[BLOCK_NB];
                 int offset = block[BLOCK_OFFSET];
+                int ia1 = itask - alpha_prefix[iblock];
+                int stra1 = stra_ids[stra_offsets[ka] + ia1];
 
-                for (int ia = 0; ia < na; ia++) {
-                        int stra0 = stra_ids[stra_offsets[ka] + ia];
-                        int *alinks = linka
-                                + (size_t)stra0 * nlinka * NLINK_FIELDS;
-                        for (int ib = 0; ib < nb; ib++) {
-                                int strb0 = strb_ids[strb_offsets[kb] + ib];
-                                int *blinks = linkb
-                                        + (size_t)strb0 * nlinkb
-                                        * NLINK_FIELDS;
-                                double complex source = ci[offset
-                                        + (size_t)ia * nb + ib];
+                for (int ib1 = 0; ib1 < nb; ib1++) {
+                        int strb1 = strb_ids[strb_offsets[kb] + ib1];
+                        double complex target = ci[offset
+                                + (size_t)ia1 * nb + ib1];
 
-                                for (int la = 0; la < nlinka; la++) {
-                                        int *alink = alinks
-                                                + la * NLINK_FIELDS;
-                                        int signa = alink[LINK_SIGN];
-                                        int stra1 = alink[LINK_TARGET];
-                                        if (signa == 0 || stra1 < 0) {
-                                                continue;
-                                        }
-                                        int ka1 = layout->stra_k[stra1];
-                                        int ia1 = layout->stra_local[stra1];
+                        for (int dka = 0; dka < nkpts; dka++) {
+                                int dkb = kneg[dka];
+                                int akey = stra1 * nkpts + dka;
+                                int bkey = strb1 * nkpts + dkb;
+                                int a0 = order_a.offsets[akey];
+                                int a1 = order_a.offsets[akey + 1];
+                                int b0 = order_b.offsets[bkey];
+                                int b1 = order_b.offsets[bkey + 1];
 
-                                        for (int lb = 0; lb < nlinkb; lb++) {
-                                                int *blink = blinks
-                                                        + lb * NLINK_FIELDS;
-                                                int signb = blink[LINK_SIGN];
-                                                int strb1 = blink[LINK_TARGET];
-                                                if (signb == 0 || strb1 < 0) {
+                                for (int ai = a0; ai < a1; ai++) {
+                                        int aid = order_a.indices[ai];
+                                        int stra0 = aid / nlinka;
+                                        int *alink = linka
+                                                + (size_t)aid * NLINK_FIELDS;
+                                        int ka0 = layout->stra_k[stra0];
+                                        int ia0 = layout->stra_local[stra0];
+
+                                        for (int bi = b0; bi < b1; bi++) {
+                                                int bid = order_b.indices[bi];
+                                                int strb0 = bid / nlinkb;
+                                                int *blink = linkb
+                                                        + (size_t)bid
+                                                        * NLINK_FIELDS;
+                                                int kb0 = layout->strb_k[strb0];
+                                                int source_key = ka0 * nkpts
+                                                        + kb0;
+                                                int source_offset =
+                                                        layout->block_offset[
+                                                                source_key];
+                                                if (source_offset < 0) {
                                                         continue;
                                                 }
-                                                int kb1 = layout->strb_k[strb1];
-                                                int target_key = ka1 * nkpts + kb1;
-                                                int target_offset =
-                                                        layout->block_offset[target_key];
-                                                if (target_offset < 0) {
-                                                        continue;
-                                                }
-                                                int ib1 = layout->strb_local[strb1];
-                                                int target_nb =
-                                                        layout->block_nb[target_key];
-                                                double complex target = ci[
-                                                        target_offset
-                                                        + (size_t)ia1 * target_nb
-                                                        + ib1];
+                                                int ib0 =
+                                                        layout->strb_local[strb0];
+                                                int source_nb =
+                                                        layout->block_nb[
+                                                                source_key];
+                                                double complex source = ci[
+                                                        source_offset
+                                                        + (size_t)ia0 * source_nb
+                                                        + ib0];
                                                 int p = alink[LINK_CRE];
                                                 int q = alink[LINK_DES];
                                                 int r = blink[LINK_CRE];
                                                 int s = blink[LINK_DES];
                                                 local[dm2_index(q, p, s, r,
-                                                                norb)]
-                                                        += (double)(signa * signb)
-                                                           * conj(source) * target;
+                                                                norb)] +=
+                                                        (double)(alink[LINK_SIGN]
+                                                                 * blink[LINK_SIGN])
+                                                        * conj(source) * target;
                                         }
                                 }
                         }
@@ -384,6 +476,11 @@ static int make_ab_rdm(double complex *dm2ab, double complex *ci,
 
         reduce_thread_buffers(dm2ab, work, nthreads, ndm2);
         free(work);
+        free(alpha_prefix);
+        free(order_a.offsets);
+        free(order_a.indices);
+        free(order_b.offsets);
+        free(order_b.indices);
         return 0;
 }
 
@@ -421,7 +518,7 @@ int FCIkci_make_rdm12s_direct(
         int *linkb, int nstrb, int nlinkb,
         int *stra_ids, int *stra_offsets,
         int *strb_ids, int *strb_offsets,
-        int *str2tot_a, int *str2tot_b)
+        int *str2tot_a, int *str2tot_b, int *kneg)
 {
         KFCIRDMLayout layout;
         int err = make_layout(&layout, norb, nkpts, nblocks, blocks,
@@ -440,7 +537,7 @@ int FCIkci_make_rdm12s_direct(
                 err = make_ab_rdm(dm2ab, ci, &layout, nblocks, blocks,
                                   linka, nlinka, linkb, nlinkb,
                                   stra_ids, stra_offsets,
-                                  strb_ids, strb_offsets);
+                                  strb_ids, strb_offsets, kneg);
         }
         free_layout(&layout);
         return err;

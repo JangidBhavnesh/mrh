@@ -116,7 +116,7 @@ def _init_direct_rdm_lib():
         void_p, int_t, int_t,
         void_p, int_t, int_t,
         void_p, void_p, void_p, void_p,
-        void_p, void_p,
+        void_p, void_p, void_p,
     ]
     libpbckrdm.FCIkci_make_rdm12s_direct.restype = int_t
     _direct_rdm_lib_initialized = True
@@ -357,6 +357,7 @@ def make_rdm12s(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
             layout.strb_offsets.ctypes.data_as(ctypes.c_void_p),
             layout.str2tot_a.ctypes.data_as(ctypes.c_void_p),
             layout.str2tot_b.ctypes.data_as(ctypes.c_void_p),
+            layout.kmom.kneg.ctypes.data_as(ctypes.c_void_p),
         )
     if err:
         raise MemoryError("direct momentum-sector 1-/2-RDM allocation failed")
