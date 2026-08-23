@@ -30,7 +30,7 @@ from mrh.my_pyscf.pbc.fci.kfci_helper import (
 # Author: Bhavnesh Jangid
 
 """
-Momentum-sector FCI contractions for periodic systems.
+Full configuration interaction with with k-symmetry (k-FCI) for periodic systems.
 """
 
 logger = lib.logger
@@ -39,11 +39,28 @@ HERMI_THRESH = 1e-8
 libpbcfci_k = None
 libpbckfci_hdiag = None
 
+# Lookup table for the population count (number of set bits) of every
+# possible byte.  FCI occupation strings use one bit per spatial orbital, so
+# a population count is also a count of occupied orbitals.  Looking up all
+# bytes with NumPy avoids a Python loop over determinant strings.
 _UINT8_POPCOUNT = np.asarray(
     [bin(value).count("1") for value in range(256)], dtype=np.uint8)
 
 def _popcount_uint64(values):
-    """Count set bits in uint64 values without ``int.bit_count``."""
+    """Return the number of set bits in each ``uint64`` occupation string.
+
+    Each 64-bit value is viewed as eight bytes.  Those bytes index
+    ``_UINT8_POPCOUNT``, and summing the eight lookup results gives the
+    population count of the original value.  The byte order does not matter
+    because only the sum is retained.  The result has the same shape as
+    ``values`` and uses ``uint16`` as a safe accumulator type.
+
+    This vectorized lookup avoids calling ``int.bit_count`` separately for
+    every element and also supports Python versions on which that method is
+    unavailable.
+    """
+    # A contiguous uint64 array can be reinterpreted reliably as eight bytes
+    # per element without copying during ``view``.
     values = np.ascontiguousarray(values, dtype=np.uint64)
     byte_values = values.view(np.uint8).reshape(values.shape + (8,))
     return _UINT8_POPCOUNT[byte_values].sum(axis=-1, dtype=np.uint16)
@@ -1324,6 +1341,16 @@ def _spin_square_diag_k(norb, nelec, nkpts, target_k=0, link_index=None,
 
         hblk = hdiag[offset:offset + size].reshape(nstra, nstrb)
         for ia, astr in enumerate(astrs):
+            # An alpha and beta determinant are uint64 bit strings with one
+            # bit per spatial orbital.  Their bitwise intersection therefore
+            # has one set bit for every doubly occupied orbital.  For a Slater
+            # determinant, the diagonal spin-squared matrix element is
+            #
+            #   <D|S^2|D> = Sz^2 + (N_alpha + N_beta)/2 - N_common,
+            #
+            # where N_common is this intersection's population count.
+            # ``bstrs`` is an array, so the lookup computes all beta-string
+            # counts paired with the current alpha string at once.
             common = np.bitwise_and(astr, bstrs)
             hblk[ia] = diag0 - _popcount_uint64(common)
 
