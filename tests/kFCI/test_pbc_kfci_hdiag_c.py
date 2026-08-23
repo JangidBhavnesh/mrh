@@ -1,6 +1,5 @@
 #!/usr/bin/env python
 
-"""Tests for the compiled k-FCI Hamiltonian diagonal."""
 
 import unittest
 
@@ -14,6 +13,10 @@ from mrh.my_pyscf.pbc.fci.direct_spin1_kfci import (
 )
 
 
+# Author: Bhavnesh Jangid
+
+"""Tests for the compiled k-FCI Hamiltonian diagonal."""
+
 class KnownValues(unittest.TestCase):
 
     @staticmethod
@@ -21,6 +24,11 @@ class KnownValues(unittest.TestCase):
         return rng.normal(size=shape) + 1j * rng.normal(size=shape)
 
     def test_make_hdiag_matches_python_reference(self):
+        """Compare the compiled Hamiltonian diagonal with Python output.
+
+        The comparison covers multiple orbital and electron configurations in
+        every available ``target_k`` sector.
+        """
         test_cases = [
             (1, 4, (2, 2)),
             (2, 3, (2, 2)),
@@ -54,6 +62,11 @@ class KnownValues(unittest.TestCase):
                         hdiag_c, hdiag_ref, atol=1e-10, rtol=1e-10)
 
     def test_make_hdiag_streamed_ab_matches_python_reference(self):
+        """Check the diagonal with streamed alpha-beta contractions.
+
+        The compiled streamed-map result is compared with the Python diagonal
+        constructed from an explicit alpha-beta contract map.
+        """
         nkpts, ncas, nelec = 3, 2, (2, 1)
         norb = nkpts * ncas
         rng = np.random.default_rng(117)
@@ -82,6 +95,11 @@ class KnownValues(unittest.TestCase):
                     hdiag_c, hdiag_ref, atol=1e-10, rtol=1e-10)
 
     def test_hdiag_auto_map_skips_large_ab_structure(self):
+        """Ensure auto mode omits an oversized alpha-beta map.
+
+        The same-spin contraction structures must remain available when the
+        explicit alpha-beta address arrays are not built.
+        """
         nkpts, ncas, nelec, target_k = 8, 2, (8, 8), 0
         norb = nkpts * ncas
         link_index = _unpack(norb, nelec, None, nkpts)
