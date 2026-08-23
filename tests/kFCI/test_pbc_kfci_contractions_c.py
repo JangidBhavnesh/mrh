@@ -19,7 +19,7 @@ from mrh.my_pyscf.pbc.fci.direct_spin1_kfci import (
     make_kfci_contract_map,
     sector_size,
 )
-from mrh.my_pyscf.pbc.fci.kfci_helper import (
+from mrh.my_pyscf.pbc.fci.kfci_contract_map import (
     _raise_if_contract_map_too_large,
 )
 

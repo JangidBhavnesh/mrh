@@ -1,4 +1,37 @@
 #!/usr/bin/env python
+"""Full CI support for spin-free periodic Hamiltonians at fixed momentum.
+
+The determinant basis has fixed numbers of alpha and beta electrons, and
+therefore fixed particle number and :math:`M_S`. Determinants are grouped by
+the momenta of their alpha and beta strings. Only blocks whose combined
+momentum equals ``target_k`` are stored in the packed CI vector.
+
+The symmetry support is:
+
+=========================================  =========
+Symmetry                                   Supported
+=========================================  =========
+Lattice translation / crystal momentum    Yes
+Particle number and :math:`M_S`            Yes
+Total spin / singlet adaptation            No
+Point-group or additional space-group      No
+Time-reversal or Kramers                    No
+Hermitian Hamiltonian, real or complex     Yes
+Alpha/beta orbital degeneracy               Yes
+=========================================  =========
+
+``Alpha/beta orbital degeneracy`` means that alpha and beta electrons use the
+same spatial orbitals and integrals. Spin-dependent unrestricted Hamiltonians
+are not supported. States of different total spin can occur in the same
+:math:`M_S` sector; a spin penalty can target a desired spin, but it does not
+make the determinant basis spin-adapted. ``orbsym`` and ``wfnsym`` are not
+used.
+
+The one-electron integrals must be block diagonal in k-point, and the
+two-electron integrals must obey crystal-momentum conservation. No additional
+point-group, time-reversal, or Kramers reduction is applied.
+"""
+
 import ctypes
 import os
 from dataclasses import dataclass
@@ -20,9 +53,6 @@ from mrh.my_pyscf.pbc.fci.kcistrings import (
 )
 
 # Author: Bhavnesh Jangid
-
-
-"""Contraction-map helpers for k-FCI and k-FCI RDM operations."""
 
 
 libpbckcistring = load_library('libpbc_kcistring')

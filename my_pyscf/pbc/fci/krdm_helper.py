@@ -12,7 +12,7 @@ from mrh.lib.helper import load_library
 from mrh.my_pyscf.pbc.fci import (
     direct_spin1_cplx,
     kcistrings,
-    kfci_helper,
+    kfci_contract_map,
     rdm_helper,
     spin_op,
 )
@@ -421,7 +421,7 @@ def _as_contract_map(norb, nelec, nkpts, target_k=0, link_index=None,
     link_index = _unpack_k(
         norb, nelec, nkpts, link_index=link_index, spin=spin, kmom=kmom,
         kconserv=kconserv)
-    return kfci_helper.KFCILayoutMap.build(
+    return kfci_contract_map.KFCILayoutMap.build(
         norb, nelec, nkpts, target_k, link_index=link_index, kmom=kmom,
         kconserv=kconserv)
 

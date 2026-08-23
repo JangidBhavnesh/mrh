@@ -11,7 +11,7 @@ alpha-alpha, and beta-beta excitation pairs restricted to ``target_k``.
 import unittest
 import numpy as np
 
-from mrh.my_pyscf.pbc.fci.kfci_helper import (
+from mrh.my_pyscf.pbc.fci.kfci_contract_map import (
     _unpack_contract_link_index,
     make_kfci_contract_map,
 )
