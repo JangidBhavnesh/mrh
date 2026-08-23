@@ -1,8 +1,8 @@
 #include <complex.h>
 #include <omp.h>
 #include <stdlib.h>
+#include "../fblas.h"
 #include "pbc_kfci_common.h"
-#include "vhf/fblas.h"
 
 /*
 Author: Bhavnesh Jangid
@@ -34,14 +34,6 @@ typedef struct {
         int *indices;
         int nlinks_total;
 } LinkOrderK;
-
-/** Add n complex values from in to out. */
-static void zadd(double complex *out, double complex *in, size_t n)
-{
-        for (size_t i = 0; i < n; i++) {
-                out[i] += in[i];
-        }
-}
 
 /**
  * Group valid links by starting momentum and momentum transfer.
@@ -1124,6 +1116,9 @@ static void contract_ab_sparse_task(double complex *ci0,
                                     long long *ab_eri_idx_ab,
                                     long long *ab_eri_idx_ba)
 {
+        const int inc = 1;
+        const double complex Z1 = 1.0 + 0.0 * I;
+
         pbc_kfci_zset0(ab_buf, (size_t)dst_size);
         for (int i = entry0; i < entry1; i++) {
                 double complex coef =
@@ -1134,7 +1129,8 @@ static void contract_ab_sparse_task(double complex *ci0,
         }
 
         omp_set_lock(dst_lock);
-        zadd(ci1 + dst_offset, ab_buf, (size_t)dst_size);
+        zaxpy_(&dst_size, &Z1, ab_buf, &inc,
+               ci1 + dst_offset, &inc);
         omp_unset_lock(dst_lock);
 }
 
