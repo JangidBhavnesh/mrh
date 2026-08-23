@@ -11,7 +11,8 @@ from mrh.my_pyscf.pbc.fci import ksolver
 # Author: Bhavnesh Jangid
 
 """
-Run k-FCI independently in each total-momentum sector.
+kFCI performs full configuration interaction while conserving total crystal
+momentum. ``target_k`` selects the momentum sector solved independently.
 """
 
 def get_kfci_integrals(kmc, mo_coeff):
@@ -79,7 +80,6 @@ cell.atom = [
 ]
 cell.basis = "STO-6G"
 cell.unit = "Angstrom"
-cell.max_memory = 100000
 cell.ke_cutoff = 100
 cell.precision = 1e-10
 cell.verbose = lib.logger.INFO
@@ -109,7 +109,7 @@ nelecas = (nkpts * kmc.nelecas[0], nkpts * kmc.nelecas[1])
 
 print(f"k-RHF energy: {kmf.e_tot.real:12.8f}")
 
-# The k-FCI solver currently provides spin penalization but not a CSF solver.
+# Note: The k-FCI solver currently provides spin penalization but not a CSF solver.
 for target_k in range(nkpts):
     kmc.fcisolver = ksolver(cell, nkpts=nkpts, target_k=target_k)
     kmc.fcisolver.conv_tol = 1e-10
