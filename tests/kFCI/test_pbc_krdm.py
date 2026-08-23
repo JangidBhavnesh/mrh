@@ -6,8 +6,7 @@ import numpy as np
 from mrh.my_pyscf.pbc.fci import direct_spin1_cplx
 from mrh.my_pyscf.pbc.fci import direct_spin1_kfci
 from mrh.my_pyscf.pbc.fci import krdm_helper
-
-from kfci_test_utils import KFCIHelperFunctions
+from mrh.my_pyscf.pbc.fci.addons import KFCIHelperFunctions
 
 # Author: Bhavnesh Jangid
 

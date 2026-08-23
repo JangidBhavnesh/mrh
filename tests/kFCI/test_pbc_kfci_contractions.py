@@ -14,10 +14,7 @@ from mrh.my_pyscf.pbc.fci.direct_spin1_kfci import (
     contract_1e_k,
     contract_2e_k,
 )
-
-# Basically, using the common helper functions for kFCI tests, 
-# instead of duplicating them in each test file.
-from kfci_test_utils import KFCIHelperFunctions
+from mrh.my_pyscf.pbc.fci.addons import KFCIHelperFunctions
 
 
 # Author: Bhavnesh Jangid
