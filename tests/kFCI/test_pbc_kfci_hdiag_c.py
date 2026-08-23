@@ -94,10 +94,10 @@ class KnownValues(unittest.TestCase):
                 np.testing.assert_allclose(
                     hdiag_c, hdiag_ref, atol=1e-10, rtol=1e-10)
 
-    def test_hdiag_auto_map_skips_large_ab_structure(self):
+    def test_hdiag_auto_map_skips_large_ab_map(self):
         """Ensure auto mode omits an oversized alpha-beta map.
 
-        The same-spin contraction structures must remain available when the
+        The same-spin contraction maps must remain available when the
         explicit alpha-beta address arrays are not built.
         """
         nkpts, ncas, nelec, target_k = 8, 2, (8, 8), 0

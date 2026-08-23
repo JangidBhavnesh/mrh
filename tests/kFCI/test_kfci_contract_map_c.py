@@ -70,13 +70,13 @@ class KnownValues(unittest.TestCase):
                     map_c = make_kfci_contract_map(
                         norb, nelec, nkpts, target_k,
                         link_index=link_index,
-                        use_c_structures=True,
+                        use_c_contract_map=True,
                     )
                     map_py = make_kfci_contract_map(
                         norb, nelec, nkpts, target_k,
                         link_index=link_index,
                         build_pair_tables=True,
-                        use_c_structures=False,
+                        use_c_contract_map=False,
                     )
 
                     self.assertFalse(map_c.has_pair_tables)

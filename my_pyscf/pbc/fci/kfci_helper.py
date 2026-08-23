@@ -26,8 +26,8 @@ from mrh.my_pyscf.pbc.fci.kcistrings import (
 
 
 libpbckcistring = load_library('libpbc_kcistring')
-_contract_structure_builder_configured = False
-_same_spin_structure_builder_configured = False
+_contract_map_builder_configured = False
+_same_spin_contract_map_builder_configured = False
 
 
 # Constants for link table fields
@@ -446,7 +446,7 @@ def _eri_index(kp, kq, kr, p, q, r, s, nkpts, ncas):
     )
 
 
-def build_ab_sparse_structure(ab_tab, ab_offsets, blocks, nkpts, ncas):
+def build_ab_sparse_contract_map(ab_tab, ab_offsets, blocks, nkpts, ncas):
     dtype = np.int32
     table_size = nkpts * nkpts
     block_offset = -np.ones(table_size, dtype=dtype)
@@ -519,8 +519,8 @@ def build_ab_sparse_structure(ab_tab, ab_offsets, blocks, nkpts, ncas):
     }
 
 
-def build_same_spin_dense_structure(ss_tab, ss_offsets, blocks, nkpts, ncas,
-                                    spin):
+def build_same_spin_dense_contract_map(ss_tab, ss_offsets, blocks, nkpts,
+                                       ncas, spin):
     block_offset = -np.ones(nkpts * nkpts, dtype=np.int32)
     block_na = np.zeros(nkpts * nkpts, dtype=np.int32)
     block_nb = np.zeros(nkpts * nkpts, dtype=np.int32)
@@ -605,20 +605,20 @@ def build_same_spin_dense_structure(ss_tab, ss_offsets, blocks, nkpts, ncas,
     }
 
 
-def _configure_contract_structure_builder():
-    global _contract_structure_builder_configured
-    if _contract_structure_builder_configured:
+def _configure_contract_map_builder():
+    global _contract_map_builder_configured
+    if _contract_map_builder_configured:
         return
 
-    libpbckcistring.FCIcount_contract_k_structures.argtypes = [
+    libpbckcistring.FCIcount_contract_map_k.argtypes = [
         ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
         ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
         ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
         ctypes.c_void_p,
     ]
-    libpbckcistring.FCIcount_contract_k_structures.restype = ctypes.c_int
+    libpbckcistring.FCIcount_contract_map_k.restype = ctypes.c_int
 
-    libpbckcistring.FCIfill_contract_k_structures.argtypes = [
+    libpbckcistring.FCIfill_contract_map_k.argtypes = [
         ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
         ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
         ctypes.c_void_p, ctypes.c_void_p,
@@ -632,24 +632,24 @@ def _configure_contract_structure_builder():
         ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
         ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
     ]
-    libpbckcistring.FCIfill_contract_k_structures.restype = ctypes.c_int
-    _contract_structure_builder_configured = True
+    libpbckcistring.FCIfill_contract_map_k.restype = ctypes.c_int
+    _contract_map_builder_configured = True
 
 
-def _configure_same_spin_structure_builder():
-    global _same_spin_structure_builder_configured
-    if _same_spin_structure_builder_configured:
+def _configure_same_spin_contract_map_builder():
+    global _same_spin_contract_map_builder_configured
+    if _same_spin_contract_map_builder_configured:
         return
 
-    libpbckcistring.FCIcount_same_spin_contract_k_structures.argtypes = [
+    libpbckcistring.FCIcount_same_spin_contract_map_k.argtypes = [
         ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
         ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
         ctypes.c_int, ctypes.c_void_p,
     ]
-    libpbckcistring.FCIcount_same_spin_contract_k_structures.restype = (
+    libpbckcistring.FCIcount_same_spin_contract_map_k.restype = (
         ctypes.c_int)
 
-    libpbckcistring.FCIfill_same_spin_contract_k_structures.argtypes = [
+    libpbckcistring.FCIfill_same_spin_contract_map_k.argtypes = [
         ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
         ctypes.c_void_p,
         ctypes.c_void_p, ctypes.c_int,
@@ -658,12 +658,12 @@ def _configure_same_spin_structure_builder():
         ctypes.c_void_p, ctypes.c_void_p,
         ctypes.c_void_p, ctypes.c_void_p,
     ]
-    libpbckcistring.FCIfill_same_spin_contract_k_structures.restype = (
+    libpbckcistring.FCIfill_same_spin_contract_map_k.restype = (
         ctypes.c_int)
-    _same_spin_structure_builder_configured = True
+    _same_spin_contract_map_builder_configured = True
 
 
-def _empty_ab_structure(nkpts):
+def _empty_ab_contract_map(nkpts):
     table_size = int(nkpts) * int(nkpts)
     return {
         "ab_group_tab": np.zeros((0, 3), dtype=np.int32),
@@ -676,9 +676,9 @@ def _empty_ab_structure(nkpts):
     }
 
 
-def build_same_spin_contract_structure_c(link_index, str2tot, blocks,
-                                         nkpts, ncas, spin):
-    _configure_same_spin_structure_builder()
+def build_same_spin_contract_map_c(link_index, str2tot, blocks,
+                                   nkpts, ncas, spin):
+    _configure_same_spin_contract_map_builder()
 
     link_index = np.asarray(link_index, dtype=np.int32, order="C")
     str2tot = np.asarray(str2tot, dtype=np.int32, order="C")
@@ -688,7 +688,7 @@ def build_same_spin_contract_structure_c(link_index, str2tot, blocks,
     dims = np.zeros(2, dtype=np.int64)
 
     with lib.with_omp_threads(lib.num_threads()):
-        status = libpbckcistring.FCIcount_same_spin_contract_k_structures(
+        status = libpbckcistring.FCIcount_same_spin_contract_map_k(
             link_index.ctypes.data_as(ctypes.c_void_p),
             ctypes.c_int(nstr),
             ctypes.c_int(nlink),
@@ -699,7 +699,7 @@ def build_same_spin_contract_structure_c(link_index, str2tot, blocks,
             dims.ctypes.data_as(ctypes.c_void_p),
         )
     if status != 0:
-        raise RuntimeError("FCIcount_same_spin_contract_k_structures failed")
+        raise RuntimeError("FCIcount_same_spin_contract_map_k failed")
 
     ngroups, nentries = int(dims[0]), int(dims[1])
     if nentries > np.iinfo(np.int32).max:
@@ -719,7 +719,7 @@ def build_same_spin_contract_structure_c(link_index, str2tot, blocks,
     }
 
     with lib.with_omp_threads(lib.num_threads()):
-        status = libpbckcistring.FCIfill_same_spin_contract_k_structures(
+        status = libpbckcistring.FCIfill_same_spin_contract_map_k(
             link_index.ctypes.data_as(ctypes.c_void_p),
             ctypes.c_int(nstr),
             ctypes.c_int(nlink),
@@ -737,15 +737,15 @@ def build_same_spin_contract_structure_c(link_index, str2tot, blocks,
             arrays["eri_idx"].ctypes.data_as(ctypes.c_void_p),
         )
     if status != 0:
-        raise RuntimeError("FCIfill_same_spin_contract_k_structures failed")
+        raise RuntimeError("FCIfill_same_spin_contract_map_k failed")
 
     return arrays
 
 
-def build_contract_structures_c(link_indexa, link_indexb, str2tot_a,
-                                str2tot_b, blocks, nkpts, ncas,
-                                explicit_ab=True):
-    _configure_contract_structure_builder()
+def build_contract_map_c(link_indexa, link_indexb, str2tot_a,
+                         str2tot_b, blocks, nkpts, ncas,
+                         explicit_ab=True):
+    _configure_contract_map_builder()
 
     link_indexa = np.asarray(link_indexa, dtype=np.int32, order="C")
     link_indexb = np.asarray(link_indexb, dtype=np.int32, order="C")
@@ -758,11 +758,11 @@ def build_contract_structures_c(link_indexa, link_indexb, str2tot_a,
     dims = np.zeros(6, dtype=np.int64)
 
     if not explicit_ab:
-        aa_dense = build_same_spin_contract_structure_c(
+        aa_dense = build_same_spin_contract_map_c(
             link_indexa, str2tot_a, blocks, nkpts, ncas, "a")
-        bb_dense = build_same_spin_contract_structure_c(
+        bb_dense = build_same_spin_contract_map_c(
             link_indexb, str2tot_b, blocks, nkpts, ncas, "b")
-        arrays = _empty_ab_structure(nkpts)
+        arrays = _empty_ab_contract_map(nkpts)
         arrays.update({
             "aa_group_tab": aa_dense["group_tab"],
             "aa_group_offsets": aa_dense["group_offsets"],
@@ -780,7 +780,7 @@ def build_contract_structures_c(link_indexa, link_indexb, str2tot_a,
         return arrays
 
     with lib.with_omp_threads(lib.num_threads()):
-        status = libpbckcistring.FCIcount_contract_k_structures(
+        status = libpbckcistring.FCIcount_contract_map_k(
             link_indexa.ctypes.data_as(ctypes.c_void_p),
             ctypes.c_int(nstra),
             ctypes.c_int(nlinka),
@@ -793,13 +793,13 @@ def build_contract_structures_c(link_indexa, link_indexb, str2tot_a,
             dims.ctypes.data_as(ctypes.c_void_p),
         )
     if status != 0:
-        raise RuntimeError("FCIcount_contract_k_structures failed")
+        raise RuntimeError("FCIcount_contract_map_k failed")
 
     nab_groups, nab_entries = int(dims[0]), int(dims[1])
     naa_groups, naa_entries = int(dims[2]), int(dims[3])
     nbb_groups, nbb_entries = int(dims[4]), int(dims[5])
     table_size = nkpts * nkpts
-    _raise_if_contract_structure_too_large(
+    _raise_if_contract_map_too_large(
         nab_entries, naa_entries, nbb_entries)
 
     arrays = {
@@ -831,7 +831,7 @@ def build_contract_structures_c(link_indexa, link_indexb, str2tot_a,
     }
 
     with lib.with_omp_threads(lib.num_threads()):
-        status = libpbckcistring.FCIfill_contract_k_structures(
+        status = libpbckcistring.FCIfill_contract_map_k(
             link_indexa.ctypes.data_as(ctypes.c_void_p),
             ctypes.c_int(nstra),
             ctypes.c_int(nlinka),
@@ -865,13 +865,13 @@ def build_contract_structures_c(link_indexa, link_indexb, str2tot_a,
             arrays["bb_eri_idx"].ctypes.data_as(ctypes.c_void_p),
         )
     if status != 0:
-        raise RuntimeError("FCIfill_contract_k_structures failed")
+        raise RuntimeError("FCIfill_contract_map_k failed")
 
     return arrays
 
 
-def _raise_if_contract_structure_too_large(nab_entries, naa_entries,
-                                           nbb_entries):
+def _raise_if_contract_map_too_large(nab_entries, naa_entries,
+                                     nbb_entries):
     max_int32 = np.iinfo(np.int32).max
     if max(nab_entries, naa_entries, nbb_entries) <= max_int32:
         return
@@ -913,9 +913,9 @@ def build_contract_pair_tables(link_indexa, link_indexb, norb, nkpts,
     return flatten_pair_tables(ab_pairs, aa_pairs, bb_pairs, nkpts)
 
 
-def build_same_spin_pair_structures_py(link_indexa, link_indexb, norb, nkpts,
-                                       blocks, ncas, kmom=None,
-                                       kconserv=None):
+def build_same_spin_pair_contract_maps_py(
+        link_indexa, link_indexb, norb, nkpts, blocks, ncas, kmom=None,
+        kconserv=None):
     kmom = _as_kmom(nkpts, kmom=kmom, kconserv=kconserv)
     straid_k, strbid_k, str2tot_a, str2tot_b = gen_k_sector_maps(
         link_indexa, link_indexb, nkpts, kmom=kmom)
@@ -952,10 +952,10 @@ def build_same_spin_pair_structures_py(link_indexa, link_indexb, norb, nkpts,
     bb_tab = (np.asarray(np.vstack(bb_rows), dtype=np.int32, order="C")
               if bb_rows else np.zeros((0, NSS_FIELDS), dtype=np.int32))
 
-    aa_dense = build_same_spin_dense_structure(
+    aa_dense = build_same_spin_dense_contract_map(
         aa_tab, np.asarray(aa_offsets, dtype=np.int32, order="C"),
         blocks, nkpts, ncas, "a")
-    bb_dense = build_same_spin_dense_structure(
+    bb_dense = build_same_spin_dense_contract_map(
         bb_tab, np.asarray(bb_offsets, dtype=np.int32, order="C"),
         blocks, nkpts, ncas, "b")
 
@@ -999,7 +999,7 @@ def estimate_ab_entries_upper_bound(link_indexa, link_indexb, blocks, nkpts,
     return int(nentries)
 
 
-def estimate_ab_structure_bytes(nentries):
+def estimate_ab_contract_map_bytes(nentries):
     # ab_src_addr, ab_dst_addr, ab_sign are int32; two eri indices are int64.
     return int(nentries) * (3 * 4 + 2 * 8)
 
@@ -1020,7 +1020,7 @@ def _resolve_explicit_ab(link_indexa, link_indexb, blocks, nkpts,
     # address more than int32.max entries, so force the streamed AB kernel.
     if nentries > np.iinfo(np.int32).max:
         return False
-    required = estimate_ab_structure_bytes(nentries)
+    required = estimate_ab_contract_map_bytes(nentries)
     if max_memory is None:
         max_memory = _available_memory_bytes()
     if max_memory is None:
@@ -1138,7 +1138,7 @@ class KFCIContractMap:
 
     @classmethod
     def build(cls, norb, nelec, nkpts, target_k, link_index=None,
-              build_pair_tables=False, use_c_structures=True,
+              build_pair_tables=False, use_c_contract_map=True,
               explicit_ab="auto", max_memory=None, memory_fraction=0.5,
               kmom=None, kconserv=None, cell=None, kpts=None, kmesh=None):
         layout = KFCILayoutMap.build(
@@ -1158,28 +1158,28 @@ class KFCIContractMap:
             explicit_ab=explicit_ab, max_memory=max_memory,
             memory_fraction=memory_fraction, kmom=kmom)
 
-        structures = None
-        if use_c_structures and kmom.scalar:
+        contract_arrays = None
+        if use_c_contract_map and kmom.scalar:
             try:
-                structures = build_contract_structures_c(
+                contract_arrays = build_contract_map_c(
                     link_indexa, link_indexb, str2tot_a, str2tot_b,
                     blocks, nkpts, ncas, explicit_ab=explicit_ab)
             except AttributeError:
-                structures = None
+                contract_arrays = None
 
-        if explicit_ab and (build_pair_tables or structures is None):
+        if explicit_ab and (build_pair_tables or contract_arrays is None):
             ab_tab, ab_offsets, aa_tab, aa_offsets, bb_tab, bb_offsets = (
                 build_contract_pair_tables(link_indexa, link_indexb,
                                            norb, nkpts, kmom=kmom))
             has_pair_tables = True
-            if structures is None:
-                ab_sparse = build_ab_sparse_structure(
+            if contract_arrays is None:
+                ab_sparse = build_ab_sparse_contract_map(
                     ab_tab, ab_offsets, blocks, nkpts, ncas)
-                aa_dense = build_same_spin_dense_structure(
+                aa_dense = build_same_spin_dense_contract_map(
                     aa_tab, aa_offsets, blocks, nkpts, ncas, "a")
-                bb_dense = build_same_spin_dense_structure(
+                bb_dense = build_same_spin_dense_contract_map(
                     bb_tab, bb_offsets, blocks, nkpts, ncas, "b")
-                structures = {
+                contract_arrays = {
                     "ab_group_tab": ab_sparse["ab_group_tab"],
                     "ab_group_offsets": ab_sparse["ab_group_offsets"],
                     "ab_src_addr": ab_sparse["ab_src_addr"],
@@ -1200,17 +1200,17 @@ class KFCIContractMap:
                     "bb_sign": bb_dense["sign"],
                     "bb_eri_idx": bb_dense["eri_idx"],
                 }
-        elif structures is None:
+        elif contract_arrays is None:
             (aa_tab, aa_offsets, bb_tab, bb_offsets, aa_dense, bb_dense) = (
-                build_same_spin_pair_structures_py(
+                build_same_spin_pair_contract_maps_py(
                     link_indexa, link_indexb, norb, nkpts, blocks, ncas,
                     kmom=kmom))
             table_size = nkpts * nkpts
             ab_tab = np.zeros((0, NAB_FIELDS), dtype=np.int32)
             ab_offsets = np.zeros(table_size + 1, dtype=np.int32)
             has_pair_tables = False
-            structures = _empty_ab_structure(nkpts)
-            structures.update({
+            contract_arrays = _empty_ab_contract_map(nkpts)
+            contract_arrays.update({
                 "aa_group_tab": aa_dense["group_tab"],
                 "aa_group_offsets": aa_dense["group_offsets"],
                 "aa_src_addr": aa_dense["src_addr"],
@@ -1242,39 +1242,39 @@ class KFCIContractMap:
             bb_tab=bb_tab,
             bb_offsets=bb_offsets,
             has_pair_tables=has_pair_tables,
-            ab_group_tab=structures["ab_group_tab"],
-            ab_group_offsets=structures["ab_group_offsets"],
-            ab_src_addr=structures["ab_src_addr"],
-            ab_dst_addr=structures["ab_dst_addr"],
-            ab_sign=structures["ab_sign"],
-            ab_eri_idx_ab=structures["ab_eri_idx_ab"],
-            ab_eri_idx_ba=structures["ab_eri_idx_ba"],
-            aa_group_tab=structures["aa_group_tab"],
-            aa_group_offsets=structures["aa_group_offsets"],
-            aa_src_addr=structures["aa_src_addr"],
-            aa_dst_addr=structures["aa_dst_addr"],
-            aa_sign=structures["aa_sign"],
-            aa_eri_idx=structures["aa_eri_idx"],
-            bb_group_tab=structures["bb_group_tab"],
-            bb_group_offsets=structures["bb_group_offsets"],
-            bb_src_addr=structures["bb_src_addr"],
-            bb_dst_addr=structures["bb_dst_addr"],
-            bb_sign=structures["bb_sign"],
-            bb_eri_idx=structures["bb_eri_idx"],
+            ab_group_tab=contract_arrays["ab_group_tab"],
+            ab_group_offsets=contract_arrays["ab_group_offsets"],
+            ab_src_addr=contract_arrays["ab_src_addr"],
+            ab_dst_addr=contract_arrays["ab_dst_addr"],
+            ab_sign=contract_arrays["ab_sign"],
+            ab_eri_idx_ab=contract_arrays["ab_eri_idx_ab"],
+            ab_eri_idx_ba=contract_arrays["ab_eri_idx_ba"],
+            aa_group_tab=contract_arrays["aa_group_tab"],
+            aa_group_offsets=contract_arrays["aa_group_offsets"],
+            aa_src_addr=contract_arrays["aa_src_addr"],
+            aa_dst_addr=contract_arrays["aa_dst_addr"],
+            aa_sign=contract_arrays["aa_sign"],
+            aa_eri_idx=contract_arrays["aa_eri_idx"],
+            bb_group_tab=contract_arrays["bb_group_tab"],
+            bb_group_offsets=contract_arrays["bb_group_offsets"],
+            bb_src_addr=contract_arrays["bb_src_addr"],
+            bb_dst_addr=contract_arrays["bb_dst_addr"],
+            bb_sign=contract_arrays["bb_sign"],
+            bb_eri_idx=contract_arrays["bb_eri_idx"],
             explicit_ab=bool(explicit_ab),
         )
         return cls(layout=layout, two_e=two_e)
 
 
 def make_kfci_contract_map(norb, nelec, nkpts, target_k, link_index=None,
-                           build_pair_tables=False, use_c_structures=True,
+                           build_pair_tables=False, use_c_contract_map=True,
                            explicit_ab="auto", max_memory=None,
                            memory_fraction=0.5, kmom=None, kconserv=None,
                            cell=None, kpts=None, kmesh=None):
     return KFCIContractMap.build(norb, nelec, nkpts, target_k,
                                  link_index=link_index,
                                  build_pair_tables=build_pair_tables,
-                                 use_c_structures=use_c_structures,
+                                 use_c_contract_map=use_c_contract_map,
                                  explicit_ab=explicit_ab,
                                  max_memory=max_memory,
                                  memory_fraction=memory_fraction,
