@@ -381,7 +381,10 @@ def contract_1e_k_py(h1e, fcivec, norb, nelec, nkpts, kindx,
                      link_index=None, kmom=None):
     '''
     Contract one-electron Hamiltonian with a k-FCI vector in a fixed
-    total momentum sector.
+    total momentum sector. I started with pure python implementation then
+    moved to C implementation for performance. 
+    This function is kept for reference and testing purposes.
+    
     args:
         h1e : ndarray, shape (nkpts, norb_k, norb_k)
             One-electron integrals in k-space, where norb_k = norb // nkpts.
