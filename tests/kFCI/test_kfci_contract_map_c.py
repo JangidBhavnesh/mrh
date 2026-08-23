@@ -1,7 +1,15 @@
 #!/usr/bin/env python
 
-import unittest
+"""Verify the low-level C contract-map builder against the Python reference.
 
+Contract map organizes momentum-sector CI addresses, fermionic signs, and
+ERI indices used by the two-electron contraction and Hamiltonian-diagonal
+kernels. Basically, contract_map combines and reorganizes the link-indices 
+into alpha–beta, alpha–alpha, and beta–beta excitation pairs restricted to the
+selected target_k sector.
+"""
+
+import unittest
 import numpy as np
 
 from mrh.my_pyscf.pbc.fci.kfci_helper import (
@@ -9,10 +17,13 @@ from mrh.my_pyscf.pbc.fci.kfci_helper import (
     make_kfci_contract_map,
 )
 
+# Author: Bhavnesh Jangid
+
 
 class KnownValues(unittest.TestCase):
 
     def test_c_contract_map_matches_python_builder(self):
+        # nkpts, ncas, nelec
         test_cases = [
             (1, 4, (2, 2)),
             (2, 3, (2, 2)),
@@ -74,6 +85,6 @@ class KnownValues(unittest.TestCase):
                             err_msg=field,
                         )
 
-
 if __name__ == "__main__":
+    print("Running unit tests for contract-map builder...")
     unittest.main()
