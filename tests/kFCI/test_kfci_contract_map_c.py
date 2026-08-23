@@ -2,11 +2,10 @@
 
 """Verify the low-level C contract-map builder against the Python reference.
 
-Contract map organizes momentum-sector CI addresses, fermionic signs, and
+A contract map organizes momentum-sector CI addresses, fermionic signs, and
 ERI indices used by the two-electron contraction and Hamiltonian-diagonal
-kernels. Basically, contract_map combines and reorganizes the link-indices 
-into alpha–beta, alpha–alpha, and beta–beta excitation pairs restricted to the
-selected target_k sector.
+kernels. It combines and reorganizes link indices into alpha-beta,
+alpha-alpha, and beta-beta excitation pairs restricted to ``target_k``.
 """
 
 import unittest
@@ -23,6 +22,11 @@ from mrh.my_pyscf.pbc.fci.kfci_helper import (
 class KnownValues(unittest.TestCase):
 
     def test_c_contract_map_matches_python_builder(self):
+        """Compare every compiled contract-map field with Python output.
+
+        The comparison covers several orbital and electron configurations in
+        every available total-momentum sector.
+        """
         # nkpts, ncas, nelec
         test_cases = [
             (1, 4, (2, 2)),

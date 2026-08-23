@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-"""Tests for compiled k-FCI Hamiltonian contractions."""
+"""Test compiled kFCI one- and two-electron Hamiltonian contractions."""
 
 import unittest
 
@@ -22,6 +22,8 @@ from mrh.my_pyscf.pbc.fci.direct_spin1_kfci import (
 from mrh.my_pyscf.pbc.fci.kfci_helper import (
     _raise_if_contract_structure_too_large,
 )
+
+# Author: Bhavnesh Jangid
 
 
 class KnownValues(unittest.TestCase):
@@ -81,6 +83,11 @@ class KnownValues(unittest.TestCase):
                         sigma_c, sigma_ref, atol=1e-10, rtol=1e-10)
 
     def test_contract_2e_k_matches_python_reference(self):
+        """Compare the compiled 2e contraction with its Python reference.
+
+        Scalar k meshes, multiple electron counts, and every ``target_k``
+        sector are included.
+        """
         test_cases = [
             (1, 4, (2, 2)),
             (2, 3, (2, 2)),
@@ -119,6 +126,11 @@ class KnownValues(unittest.TestCase):
                         sigma_c, sigma_ref, atol=1e-10, rtol=1e-10)
 
     def test_contract_2e_k_matches_python_reference_2d_kmesh(self):
+        """Compare compiled and Python 2e contractions on a 2D k mesh.
+
+        This exercises non-scalar momentum arithmetic with explicit
+        alpha-beta contraction structures in every momentum sector.
+        """
         kmom = self._make_2d_kmom()
         self.assertFalse(kmom.scalar)
 
@@ -147,6 +159,11 @@ class KnownValues(unittest.TestCase):
                     sigma_c, sigma_ref, atol=1e-10, rtol=1e-10)
 
     def test_contract_2e_k_streamed_ab_2d_kmesh(self):
+        """Compare streamed and explicit alpha-beta contractions in 2D.
+
+        The same-spin structures remain explicit while the alpha-beta terms
+        are generated from link indices during contraction.
+        """
         kmom = self._make_2d_kmom()
         nkpts, ncas, nelec, target_k = kmom.nkpts, 2, (2, 1), 3
         norb = nkpts * ncas
@@ -174,6 +191,7 @@ class KnownValues(unittest.TestCase):
             sigma_test, sigma_ref, atol=1e-10, rtol=1e-10)
 
     def test_contract_2e_k_thread_consistency(self):
+        """Verify that one and four OpenMP threads produce the same result."""
         nkpts, ncas, nelec, target_k = 4, 2, (4, 4), 0
         norb = nkpts * ncas
         rng = np.random.default_rng(18)
@@ -203,6 +221,11 @@ class KnownValues(unittest.TestCase):
             sigma_4, sigma_1, atol=1e-10, rtol=1e-10)
 
     def test_contract_2e_k_streamed_ab_matches_python_reference(self):
+        """Compare streamed alpha-beta contraction with Python output.
+
+        The test covers every ``target_k`` sector of a scalar k mesh without
+        storing the explicit alpha-beta sparse structure.
+        """
         nkpts, ncas, nelec = 3, 2, (2, 1)
         norb = nkpts * ncas
         rng = np.random.default_rng(31)
@@ -230,6 +253,7 @@ class KnownValues(unittest.TestCase):
                     sigma_c, sigma_ref, atol=1e-10, rtol=1e-10)
 
     def test_contract_2e_k_does_not_rebuild_streamed_map(self):
+        """Ensure contraction reuses a supplied streamed contract map."""
         nkpts, ncas, nelec, target_k = 3, 2, (2, 1), 1
         norb = nkpts * ncas
         rng = np.random.default_rng(41)
@@ -254,6 +278,11 @@ class KnownValues(unittest.TestCase):
             direct_spin1_kfci.make_kfci_contract_map = old_builder
 
     def test_contract_map_auto_skips_large_ab_structure(self):
+        """Ensure auto mode streams an oversized alpha-beta structure.
+
+        Same-spin structures must remain available when the explicit
+        alpha-beta address arrays are omitted.
+        """
         nkpts, ncas, nelec, target_k = 8, 2, (8, 8), 0
         norb = nkpts * ncas
         link_index = _unpack(norb, nelec, None, nkpts)
@@ -267,6 +296,7 @@ class KnownValues(unittest.TestCase):
         self.assertGreater(contract_map.bb_src_addr.size, 0)
 
     def test_contract_structure_size_guard(self):
+        """Check the signed 32-bit contraction-structure size boundary."""
         max_int32 = np.iinfo(np.int32).max
         with self.assertRaisesRegex(MemoryError, "ab_entries"):
             _raise_if_contract_structure_too_large(max_int32 + 1, 0, 0)
