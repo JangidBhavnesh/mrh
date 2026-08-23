@@ -189,25 +189,8 @@ class ContractionTests(unittest.TestCase):
                      straid_k, strbid_k, blocks) = sector_data
 
                     eri_k = (
-                        rng.normal(
-                            size=(
-                                nkpts,
-                                nkpts,
-                                nkpts,
-                                ncas,
-                                ncas,
-                                ncas,
-                                ncas)) +
-                        1j *
-                        rng.normal(
-                            size=(
-                                nkpts,
-                                nkpts,
-                                nkpts,
-                                ncas,
-                                ncas,
-                                ncas,
-                                ncas)))
+                        rng.normal( size=( nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas)) + 1j *
+                        rng.normal(size=( nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas)))
 
                     eri_full = helper.eri_k_to_full(eri_k)
                     eri_full = 0.5 * \
@@ -223,12 +206,7 @@ class ContractionTests(unittest.TestCase):
                         sigma_full, blocks, straid_k, strbid_k, )
 
                     self.assertEqual(sigma_k.shape, sigma_ref_k.shape)
-                    self.assertTrue(
-                        np.allclose(
-                            sigma_k,
-                            sigma_ref_k,
-                            atol=1e-12,
-                            rtol=1e-12))
+                    self.assertTrue( np.allclose( sigma_k, sigma_ref_k, atol=1e-12, rtol=1e-12))
 
     def test_make_hamiltonian_k(self):
         '''
@@ -244,36 +222,13 @@ class ContractionTests(unittest.TestCase):
 
         h1e = (rng.normal(size=(nkpts, ncas, ncas))
                + 1j * rng.normal(size=(nkpts, ncas, ncas)))
-        eri = (
-            rng.normal(
-                size=(
-                    nkpts,
-                    nkpts,
-                    nkpts,
-                    ncas,
-                    ncas,
-                    ncas,
-                    ncas)) +
-            1j *
-            rng.normal(
-                size=(
-                    nkpts,
-                    nkpts,
-                    nkpts,
-                    ncas,
-                    ncas,
-                    ncas,
-                    ncas)))
+        eri = ( rng.normal( size=( nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas)) +
+            1j * rng.normal( size=( nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas)))
 
         solver = direct_spin1_kfci.FCISolver(nkpts=nkpts, target_k=target_k)
         hmat = solver.make_hamiltonian(h1e, eri, norb, nelec)
         hdiag = solver.make_hdiag(h1e, eri, norb, nelec)
-        self.assertTrue(
-            np.allclose(
-                hdiag,
-                np.diag(hmat),
-                atol=1e-12,
-                rtol=1e-12))
+        self.assertTrue( np.allclose( hdiag, np.diag(hmat), atol=1e-12, rtol=1e-12))
 
         for i in range(hmat.shape[1]):
             ci0 = np.zeros(hmat.shape[0], dtype=hmat.dtype)
@@ -300,26 +255,8 @@ class ContractionTests(unittest.TestCase):
 
         h1e = (rng.normal(size=(nkpts, ncas, ncas))
                + 1j * rng.normal(size=(nkpts, ncas, ncas)))
-        eri = (
-            rng.normal(
-                size=(
-                    nkpts,
-                    nkpts,
-                    nkpts,
-                    ncas,
-                    ncas,
-                    ncas,
-                    ncas)) +
-            1j *
-            rng.normal(
-                size=(
-                    nkpts,
-                    nkpts,
-                    nkpts,
-                    ncas,
-                    ncas,
-                    ncas,
-                    ncas)))
+        eri = ( rng.normal( size=( nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas)) +
+            1j * rng.normal( size=( nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas)))
 
         solver = direct_spin1_kfci.FCISolver(nkpts=nkpts, target_k=target_k)
 
