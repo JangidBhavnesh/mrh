@@ -33,15 +33,48 @@ libpbcfci_k = None
 def _init_kci_lib():
     """Configure C entry points for packed/full CI-vector conversion.
 
-    The two functions are provided by ``rdm_helper.libpbcrdm``:
+    The two functions are provided by ``rdm_helper.libpbcrdm``.  Their C
+    arguments, in call order, are as follows.
 
-    ``FCIkci_sector_to_full_cplx``
-        Scatters a packed ``complex128[sector_size]`` vector into a full
-        ``complex128[nstra, nstrb]`` spin-string table using the momentum
-        blocks, spin-string ID lists, and their offsets.
-    ``FCIkci_full_to_sector_cplx``
-        Gathers the inverse mapping from the full table into one packed total-
-        momentum sector.
+    ``FCIkci_sector_to_full_cplx(ci_full, ci_sector, nblocks, blocks,``
+    ``stra_ids, stra_offsets, strb_ids, strb_offsets, na_full, nb_full)``
+
+    ``ci_full`` : ``double complex *``
+        Output table of shape ``(na_full, nb_full)``.  The kernel zeroes the
+        table and scatters the selected sector into it.
+    ``ci_sector`` : ``double complex *``
+        Input packed CI vector of length ``sector_size``.
+    ``nblocks`` : ``int``
+        Number of occupied alpha/beta momentum-block pairs.
+    ``blocks`` : ``int *``
+        Contiguous ``int32`` array of shape ``(nblocks, 6)``.  Each row is
+        ``[ka, kb, na, nb, offset, size]``: alpha and beta momenta, their
+        string counts, the block's starting packed-vector address, and
+        ``size = na * nb``.
+    ``stra_ids`` / ``strb_ids`` : ``int *``
+        Global alpha/beta string addresses, flattened after grouping the
+        strings by momentum.  Their lengths are ``na_full`` and ``nb_full``.
+    ``stra_offsets`` / ``strb_offsets`` : ``int *``
+        Arrays of length ``nkpts + 1``; entries ``[k:k+2]`` delimit the IDs
+        belonging to momentum ``k`` in the corresponding ID array.
+    ``na_full`` / ``nb_full`` : ``int``
+        Total numbers of alpha and beta strings in the full determinant
+        space.  ``nb_full`` is also the row-major stride of ``ci_full``.
+
+    ``FCIkci_full_to_sector_cplx(ci_sector, ci_full, nblocks, blocks,``
+    ``stra_ids, stra_offsets, strb_ids, strb_offsets, nb_full)``
+
+    ``ci_sector`` : ``double complex *``
+        Output packed CI vector of length ``sector_size``.
+    ``ci_full`` : ``double complex *``
+        Input full CI table with shape ``(na_full, nb_full)``.
+    ``nblocks``, ``blocks``, ``stra_ids``, ``stra_offsets``, ``strb_ids``,
+    ``strb_offsets``
+        The same layout arrays described for the scatter function above.
+    ``nb_full`` : ``int``
+        Number of beta strings and therefore the row-major stride of
+        ``ci_full``.  ``na_full`` is not needed when gathering only listed
+        block entries.
 
     The configuration is idempotent: subsequent calls return immediately.
 
@@ -56,28 +89,28 @@ def _init_kci_lib():
         return
 
     rdm_helper.libpbcrdm.FCIkci_sector_to_full_cplx.argtypes = [
-        ctypes.c_void_p,
-        ctypes.c_void_p,
-        ctypes.c_int,
-        ctypes.c_void_p,
-        ctypes.c_void_p,
-        ctypes.c_void_p,
-        ctypes.c_void_p,
-        ctypes.c_void_p,
-        ctypes.c_int,
-        ctypes.c_int,
+        ctypes.c_void_p,  # ci_full
+        ctypes.c_void_p,  # ci_sector
+        ctypes.c_int,     # nblocks
+        ctypes.c_void_p,  # blocks
+        ctypes.c_void_p,  # stra_ids
+        ctypes.c_void_p,  # stra_offsets
+        ctypes.c_void_p,  # strb_ids
+        ctypes.c_void_p,  # strb_offsets
+        ctypes.c_int,     # na_full
+        ctypes.c_int,     # nb_full
     ]
     rdm_helper.libpbcrdm.FCIkci_sector_to_full_cplx.restype = None
     rdm_helper.libpbcrdm.FCIkci_full_to_sector_cplx.argtypes = [
-        ctypes.c_void_p,
-        ctypes.c_void_p,
-        ctypes.c_int,
-        ctypes.c_void_p,
-        ctypes.c_void_p,
-        ctypes.c_void_p,
-        ctypes.c_void_p,
-        ctypes.c_void_p,
-        ctypes.c_int,
+        ctypes.c_void_p,  # ci_sector
+        ctypes.c_void_p,  # ci_full
+        ctypes.c_int,     # nblocks
+        ctypes.c_void_p,  # blocks
+        ctypes.c_void_p,  # stra_ids
+        ctypes.c_void_p,  # stra_offsets
+        ctypes.c_void_p,  # strb_ids
+        ctypes.c_void_p,  # strb_offsets
+        ctypes.c_int,     # nb_full
     ]
     rdm_helper.libpbcrdm.FCIkci_full_to_sector_cplx.restype = None
     _kci_lib_initialized = True
@@ -86,10 +119,51 @@ def _init_kci_lib():
 def _init_contract_ss_lib():
     """Load and configure the direct packed-sector spin-squared kernel.
 
-    ``FCIcontract_ss_k`` receives packed input/output CI vectors, electron and
-    momentum counts, six-column momentum blocks, alpha/beta link tables,
-    momentum-grouped string IDs and offsets, and global-to-local string maps.
-    It applies ``S**2`` without embedding the vector in the full CI space.
+    The C signature is ``FCIcontract_ss_k(ci0, ci1, norb, neleca, nelecb,``
+    ``nkpts, nblocks, blocks, linka, nstra, nlinka, linkb, nstrb, nlinkb,``
+    ``stra_ids, stra_offsets, strb_ids, strb_offsets, str2tot_a,``
+    ``str2tot_b)``.  Its arguments are:
+
+    ``ci0`` : ``double complex *``
+        Input packed CI vector of length ``sector_size``.
+    ``ci1`` : ``double complex *``
+        Output packed vector of the same length, containing ``S**2 |ci0>``.
+    ``norb`` : ``int``
+        Total number of active spin-independent orbitals across all k-points.
+    ``neleca`` / ``nelecb`` : ``int``
+        Numbers of alpha and beta electrons.
+    ``nkpts`` : ``int``
+        Number of momentum points.
+    ``nblocks`` : ``int``
+        Number of alpha/beta momentum-block pairs in the packed sector.
+    ``blocks`` : ``int *``
+        ``int32[nblocks, 6]`` array whose rows are
+        ``[ka, kb, na, nb, offset, size]``.  The fields give the alpha and
+        beta momenta, string counts, packed-vector offset, and
+        ``size = na * nb``.
+    ``linka`` / ``linkb`` : ``int *``
+        Alpha/beta link tables with shapes ``(nstra, nlinka, 8)`` and
+        ``(nstrb, nlinkb, 8)``.  Each record is ``[p, q, target, sign, k0,``
+        ``k_p, k_q, dK]``: creation and annihilation orbital addresses,
+        target global string address, fermionic sign, source-string momentum,
+        creation/annihilation momenta, and momentum transfer.
+    ``nstra`` / ``nstrb`` : ``int``
+        Total numbers of alpha/beta strings in the full string spaces.
+    ``nlinka`` / ``nlinkb`` : ``int``
+        Numbers of link records stored per alpha/beta source string.
+    ``stra_ids`` / ``strb_ids`` : ``int *``
+        Global alpha/beta string addresses grouped contiguously by momentum;
+        their lengths are ``nstra`` and ``nstrb``.
+    ``stra_offsets`` / ``strb_offsets`` : ``int *``
+        ``int32[nkpts + 1]`` boundaries for the momentum groups in
+        ``stra_ids`` and ``strb_ids``.
+    ``str2tot_a`` / ``str2tot_b`` : ``int *``
+        Global-to-local lookup tables with shapes ``(nkpts, nstra)`` and
+        ``(nkpts, nstrb)``.  Entry ``[k, global_id]`` is the string's local
+        address in momentum group ``k``, or ``-1`` if it is not in that group.
+
+    The kernel applies ``S**2`` without embedding the vector in the full CI
+    space and has a ``void`` return type.
 
     The shared library and its ``ctypes`` signature are initialized only once.
 
@@ -104,26 +178,26 @@ def _init_contract_ss_lib():
 
     libpbcfci_k = load_library("libpbc_fci_contract_k")
     libpbcfci_k.FCIcontract_ss_k.argtypes = [
-        ctypes.c_void_p,
-        ctypes.c_void_p,
-        ctypes.c_int,
-        ctypes.c_int,
-        ctypes.c_int,
-        ctypes.c_int,
-        ctypes.c_int,
-        ctypes.c_void_p,
-        ctypes.c_void_p,
-        ctypes.c_int,
-        ctypes.c_int,
-        ctypes.c_void_p,
-        ctypes.c_int,
-        ctypes.c_int,
-        ctypes.c_void_p,
-        ctypes.c_void_p,
-        ctypes.c_void_p,
-        ctypes.c_void_p,
-        ctypes.c_void_p,
-        ctypes.c_void_p,
+        ctypes.c_void_p,  # ci0
+        ctypes.c_void_p,  # ci1
+        ctypes.c_int,     # norb
+        ctypes.c_int,     # neleca
+        ctypes.c_int,     # nelecb
+        ctypes.c_int,     # nkpts
+        ctypes.c_int,     # nblocks
+        ctypes.c_void_p,  # blocks
+        ctypes.c_void_p,  # linka
+        ctypes.c_int,     # nstra
+        ctypes.c_int,     # nlinka
+        ctypes.c_void_p,  # linkb
+        ctypes.c_int,     # nstrb
+        ctypes.c_int,     # nlinkb
+        ctypes.c_void_p,  # stra_ids
+        ctypes.c_void_p,  # stra_offsets
+        ctypes.c_void_p,  # strb_ids
+        ctypes.c_void_p,  # strb_offsets
+        ctypes.c_void_p,  # str2tot_a
+        ctypes.c_void_p,  # str2tot_b
     ]
     libpbcfci_k.FCIcontract_ss_k.restype = None
     _contract_ss_lib_initialized = True
@@ -132,14 +206,71 @@ def _init_contract_ss_lib():
 def _init_direct_rdm_lib():
     """Load and configure direct packed-sector RDM kernels.
 
-    ``FCIkci_make_rdm1s_direct`` builds the alpha and beta one-particle RDMs.
-    ``FCIkci_make_rdm12s_direct`` additionally builds the AA, AB, and BB
-    two-particle RDMs.  Both consume the packed CI vector, momentum layout,
-    link tables, and global-to-local string maps; the 1-/2-RDM kernel also
-    consumes grouped string IDs and the additive-inverse momentum table.
+    ``FCIkci_make_rdm1s_direct(dm1a, dm1b, ci, norb, nkpts, nblocks,``
+    ``blocks, linka, nstra, nlinka, linkb, nstrb, nlinkb, str2tot_a,``
+    ``str2tot_b)`` builds the spin-resolved 1-RDMs.  Its arguments are:
 
-    Both C functions return a nonzero allocation-error status, represented as
-    ``ctypes.c_int``.  Configuration is idempotent.
+    ``dm1a`` / ``dm1b`` : ``double complex *``
+        Output alpha/beta 1-RDM buffers, each with shape ``(norb, norb)``.
+    ``ci`` : ``double complex *``
+        Input packed CI vector of length ``sector_size``.
+    ``norb`` : ``int``
+        Total number of active spin-independent orbitals across all k-points.
+    ``nkpts`` : ``int``
+        Number of momentum points.
+    ``nblocks`` : ``int``
+        Number of alpha/beta momentum-block pairs in the packed sector.
+    ``blocks`` : ``int *``
+        ``int32[nblocks, 6]`` array.  Each row is
+        ``[ka, kb, na, nb, offset, size]``: alpha/beta momentum, string
+        counts, packed-vector offset, and ``size = na * nb``.
+    ``linka`` / ``linkb`` : ``int *``
+        Alpha/beta excitation tables with shapes ``(nstra, nlinka, 8)`` and
+        ``(nstrb, nlinkb, 8)``.  Each record is ``[p, q, target, sign, k0,``
+        ``k_p, k_q, dK]``; see :func:`_init_contract_ss_lib` for the meaning
+        of those fields.
+    ``nstra`` / ``nstrb`` : ``int``
+        Total numbers of alpha/beta strings in the full string spaces.
+    ``nlinka`` / ``nlinkb`` : ``int``
+        Numbers of excitation records per alpha/beta source string.
+    ``str2tot_a`` / ``str2tot_b`` : ``int *``
+        ``int32`` global-to-local string maps with shapes
+        ``(nkpts, nstra)`` and ``(nkpts, nstrb)``.  Entry ``[k, global_id]``
+        is the local address in momentum group ``k``, or ``-1`` when absent.
+
+    ``FCIkci_make_rdm12s_direct(dm1a, dm1b, dm2aa, dm2ab, dm2bb, ci,``
+    ``norb, nkpts, nblocks, blocks, linka, nstra, nlinka, linkb, nstrb,``
+    ``nlinkb, stra_ids, stra_offsets, strb_ids, strb_offsets, str2tot_a,``
+    ``str2tot_b, kneg)`` builds both RDM orders.  Its arguments are:
+
+    ``dm1a`` / ``dm1b`` : ``double complex *``
+        Output alpha/beta 1-RDM buffers of shape ``(norb, norb)``.
+    ``dm2aa`` / ``dm2ab`` / ``dm2bb`` : ``double complex *``
+        Output alpha-alpha, alpha-beta, and beta-beta 2-RDM buffers, each of
+        shape ``(norb, norb, norb, norb)``.
+    ``ci`` : ``double complex *``
+        Input packed CI vector of length ``sector_size``.
+    ``norb``, ``nkpts``, ``nblocks``, ``blocks``, ``linka``, ``nstra``,
+    ``nlinka``, ``linkb``, ``nstrb``, ``nlinkb``
+        The same orbital, layout, and link-table arguments defined for
+        ``FCIkci_make_rdm1s_direct`` above.
+    ``stra_ids`` / ``strb_ids`` : ``int *``
+        Global alpha/beta string addresses grouped contiguously by momentum;
+        their lengths are ``nstra`` and ``nstrb``.
+    ``stra_offsets`` / ``strb_offsets`` : ``int *``
+        ``int32[nkpts + 1]`` boundaries for the momentum groups in the
+        corresponding string-ID arrays.
+    ``str2tot_a`` / ``str2tot_b`` : ``int *``
+        The same global-to-local string maps defined for the 1-RDM kernel.
+    ``kneg`` : ``int *``
+        ``int32[nkpts]`` additive-inverse lookup: ``kneg[k]`` is the momentum
+        that sums with ``k`` to the zero-momentum element under the active
+        momentum algebra.
+
+    Both C functions return a nonzero failure status for temporary allocation
+    or layout-construction errors, represented as ``ctypes.c_int`` (zero
+    means success).  The Python callers translate any nonzero value to
+    :class:`MemoryError`.  Configuration is idempotent.
 
     Returns
     -------
@@ -154,20 +285,47 @@ def _init_direct_rdm_lib():
     void_p = ctypes.c_void_p
     int_t = ctypes.c_int
     libpbckrdm.FCIkci_make_rdm1s_direct.argtypes = [
-        void_p, void_p, void_p,
-        int_t, int_t, int_t, void_p,
-        void_p, int_t, int_t,
-        void_p, int_t, int_t,
-        void_p, void_p,
+        void_p,  # dm1a
+        void_p,  # dm1b
+        void_p,  # ci
+        int_t,   # norb
+        int_t,   # nkpts
+        int_t,   # nblocks
+        void_p,  # blocks
+        void_p,  # linka
+        int_t,   # nstra
+        int_t,   # nlinka
+        void_p,  # linkb
+        int_t,   # nstrb
+        int_t,   # nlinkb
+        void_p,  # str2tot_a
+        void_p,  # str2tot_b
     ]
     libpbckrdm.FCIkci_make_rdm1s_direct.restype = int_t
     libpbckrdm.FCIkci_make_rdm12s_direct.argtypes = [
-        void_p, void_p, void_p, void_p, void_p, void_p,
-        int_t, int_t, int_t, void_p,
-        void_p, int_t, int_t,
-        void_p, int_t, int_t,
-        void_p, void_p, void_p, void_p,
-        void_p, void_p, void_p,
+        void_p,  # dm1a
+        void_p,  # dm1b
+        void_p,  # dm2aa
+        void_p,  # dm2ab
+        void_p,  # dm2bb
+        void_p,  # ci
+        int_t,   # norb
+        int_t,   # nkpts
+        int_t,   # nblocks
+        void_p,  # blocks
+        void_p,  # linka
+        int_t,   # nstra
+        int_t,   # nlinka
+        void_p,  # linkb
+        int_t,   # nstrb
+        int_t,   # nlinkb
+        void_p,  # stra_ids
+        void_p,  # stra_offsets
+        void_p,  # strb_ids
+        void_p,  # strb_offsets
+        void_p,  # str2tot_a
+        void_p,  # str2tot_b
+        void_p,  # kneg
     ]
     libpbckrdm.FCIkci_make_rdm12s_direct.restype = int_t
     _direct_rdm_lib_initialized = True
