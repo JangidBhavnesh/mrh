@@ -9,7 +9,10 @@ import scipy.linalg
 
 from pyscf import lib
 from pyscf.fci import cistring, direct_spin1
-from pyscf.fci.addons import _unpack_nelec
+from pyscf.fci.addons import (
+    SpinPenaltyFCISolver as _PySCFSpinPenaltyFCISolver,
+    _unpack_nelec,
+)
 
 from mrh.lib.helper import load_library
 from mrh.my_pyscf.pbc.fci import kfci_helper, kcistrings, krdm_helper
@@ -1718,27 +1721,13 @@ def kernel_ms1(fci, h1e, eri, norb, nelec, nkpts, target_k=0, ci0=None,
     return e + ecore, c
 
 
-class SpinPenaltyFCISolver:
-    """Mixin that adds a spin-penalty operator to a k-FCI solver."""
+class SpinPenaltyFCISolver(_PySCFSpinPenaltyFCISolver):
+    """PySCF spin-penalty mixin specialized for a k-FCI solver.
 
-    __name_mixin__ = "SpinPenalty"
-    _keys = {"ss_value", "ss_penalty", "base"}
-
-    def __init__(self, fcibase, shift, ss_value):
-        self.base = fcibase.copy()
-        self.__dict__.update(fcibase.__dict__)
-        self.ss_value = ss_value
-        self.ss_penalty = shift
-        self.davidson_only = self.base.davidson_only = True
-
-    def undo_fix_spin(self):
-        """Remove the spin-penalty mixin and restore the base solver view."""
-        obj = lib.view(self, lib.drop_class(self.__class__,
-                                            SpinPenaltyFCISolver))
-        del obj.base
-        del obj.ss_value
-        del obj.ss_penalty
-        return obj
+    Initialization, bookkeeping, and ``undo_fix_spin`` are inherited from
+    PySCF.  Only operations whose signatures or data layout differ for a
+    packed momentum sector are overridden here.
+    """
 
     def contract_2e(self, eri, fcivec, norb, nelec, nkpts=None,
                     target_k=None, link_index=None, contract_map=None):
@@ -1749,7 +1738,10 @@ class SpinPenaltyFCISolver:
             target_k = self.target_k
         kmom = self.get_kmom(nkpts) if hasattr(self, "get_kmom") else None
         nelec = _unpack_nelec(nelec, self.spin)
-        ci0 = super().contract_2e(
+        # PySCF's base_contract_2e deliberately skips its molecular
+        # SpinPenaltyFCISolver.contract_2e in the dynamic mixin MRO and calls
+        # the underlying k-FCI solver contraction.
+        ci0 = self.base_contract_2e(
             eri, fcivec, norb, nelec, nkpts=nkpts, target_k=target_k,
             link_index=link_index, contract_map=contract_map)
         if contract_map is not None:
