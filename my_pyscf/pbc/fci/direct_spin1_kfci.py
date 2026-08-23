@@ -378,71 +378,50 @@ def _as_contract_map(norb, nelec, nkpts, target_k, link_index=None,
 
 
 def contract_1e_k_py(h1e, fcivec, norb, nelec, nkpts, kindx,
-                     link_index=None, kmom=None):
-    '''
-    Contract one-electron Hamiltonian with a k-FCI vector in a fixed
-    total momentum sector. I started with pure python implementation then
-    moved to C implementation for performance. 
-    This function is kept for reference and testing purposes.
-    
-    args:
-        h1e : ndarray, shape (nkpts, norb_k, norb_k)
-            One-electron integrals in k-space, where norb_k = norb // nkpts.
-        fcivec : ndarray, shape (sector_size,)
-            k-FCI vector in the target total momentum sector.
-        norb : int
-            Total number of orbitals.
-        nelec : tuple of 2 ints
-            Number of alpha and beta electrons.
-        nkpts : int
-            Number of k-points / momentum sectors.
-        kindx : int
-            Target total momentum sector. (0<=kindx < nkpts)
-        link_index : tuple of 2 ndarrays or None
-            Look up tables/link index for alpha and beta strings.
-            If None, it will be generated on the fly.
-            Note: these are k-aware link indices, and the link columns are:
-            [cre, des, target_address, parity, k0, k_cre, k_des, dK].
-            and overall shape is (nstr, nlink, 8) for each spin sector.
-        kmom : KPointMomentum or None
-            Precomputed momentum-arithmetic tables. If None, they are built
-            from ``nkpts``.
+                     link_index=None, contract_map=None, log_obj=None,
+                     kmom=None):
+    """Python reference implementation of :func:`contract_1e_k`.
 
-    returns:
-        sigma_ci : ndarray, shape (sector_size,)
-            Result of the Hamiltonian-vector product in the target momentum
-            sector.
-    '''
+    This routine has the same call signature and output convention as
+    ``contract_1e_k``.  See that function for the argument and return-value
+    documentation.
+    """
+    nkpts = int(nkpts)
+    ncas = int(norb) // nkpts
+    assert ncas * nkpts == int(norb)
 
-    link_indexa, link_indexb = _unpack(norb, nelec, link_index, nkpts,
-                                       kmom=kmom)
-    dtype = np.result_type(h1e, fcivec)
+    log = logger.new_logger(
+        log_obj, getattr(log_obj, "verbose", logger.QUIET))
+    t0 = (logger.process_clock(), logger.perf_counter())
+    contract_map = _as_contract_map(
+        norb, nelec, nkpts, kindx, link_index=link_index,
+        contract_map=contract_map, log_obj=log_obj, kmom=kmom)
+    assert fcivec.size == contract_map.sector_size
+    t0 = log.timer_debug1("k-FCI contract_1e_py map setup", *t0)
+
+    link_indexa, link_indexb = contract_map.link_index
+    dtype = np.complex128
 
     # Sanity checks
     assert link_indexa.ndim == link_indexb.ndim == 3
     assert link_indexa.shape[2] == link_indexb.shape[2] == 8
     assert h1e.ndim == 3
-    ncas = norb // nkpts
     assert h1e.shape == (nkpts, ncas, ncas)
 
-    kindx = int(kindx) % nkpts
-
-    # Generate the k-sector blocks and the corresponding alpha/beta string
-    # lists and global-to-local (specific k-sector) maps.
-    # rows are [ka, kb, na, nb, offset, size]
-    blocks = gen_k_sector_linkstr_info(link_indexa, link_indexb, nkpts,
-                                       kindx, kmom=kmom)
-    sector_size = int(blocks[:, 5].sum())
-
-    assert fcivec.size == sector_size
-
-    straid_k, strbid_k, tota_2k, totb_2k = gen_k_sector_maps(
-        link_indexa, link_indexb, nkpts, kmom=kmom)
+    blocks = contract_map.blocks
+    stra_ids = contract_map.stra_ids
+    stra_offsets = contract_map.stra_offsets
+    strb_ids = contract_map.strb_ids
+    strb_offsets = contract_map.strb_offsets
+    tota_2k = contract_map.str2tot_a
+    totb_2k = contract_map.str2tot_b
+    dk_zero = int(contract_map.kmom.zero)
 
     # Making sure fcivec is in the right dtype and C-contiguous.
     h1e = np.asarray(h1e, dtype=dtype, order="C")
     fcivec = np.asarray(fcivec, dtype=dtype, order="C")
     sigma_ci = np.zeros(fcivec.shape, dtype=dtype, order="C")
+    t0 = log.timer_debug1("k-FCI contract_1e_py array setup", *t0)
 
     # link columns: [cre, des, target_address, parity, k0, k_cre, k_des, dK]
     CRE = 0
@@ -454,11 +433,13 @@ def contract_1e_k_py(h1e, fcivec, norb, nelec, nkpts, kindx,
     DK = 7
 
     for ka, kb, na, nb, offset, size in blocks:
+        ka, kb, na, nb, offset, size = map(
+            int, (ka, kb, na, nb, offset, size))
         Cblk = fcivec[offset:offset + size].reshape(na, nb)
         Sblk = sigma_ci[offset:offset + size].reshape(na, nb)
 
-        alpha_ids = straid_k[ka]
-        beta_ids = strbid_k[kb]
+        alpha_ids = stra_ids[stra_offsets[ka]:stra_offsets[ka + 1]]
+        beta_ids = strb_ids[strb_offsets[kb]:strb_offsets[kb + 1]]
 
         # h1e contraction for the alpha strings.
         for ia0_local, astr0 in enumerate(alpha_ids):
@@ -475,8 +456,8 @@ def contract_1e_k_py(h1e, fcivec, norb, nelec, nkpts, kindx,
 
                 # h1e[k, p, q] is k-diagonal, so only k_cre == k_des
                 # contributes.
-                # which means only dk=0 contributes.
-                if (k_cre != k_des) or (dK != 0):
+                # which means only the zero-transfer dK label contributes.
+                if (k_cre != k_des) or (dK != dk_zero):
                     continue
 
                 # Note that p and q are in the global orbital indexing,
@@ -503,8 +484,8 @@ def contract_1e_k_py(h1e, fcivec, norb, nelec, nkpts, kindx,
                 dK = int(link[DK]) % nkpts
                 # h1e[k, p, q] is k-diagonal, so only k_cre == k_des
                 # contributes.
-                # which means only dk=0 contributes.
-                if (k_cre != k_des) or (dK != 0):
+                # which means only the zero-transfer dK label contributes.
+                if (k_cre != k_des) or (dK != dk_zero):
                     continue
 
                 hpq = h1e[k_cre, p % ncas, q % ncas]
@@ -516,6 +497,7 @@ def contract_1e_k_py(h1e, fcivec, norb, nelec, nkpts, kindx,
 
                 Sblk[:, ib1_local] += sign * hpq * Cblk[:, ib0_local]
 
+    log.timer_debug1("k-FCI contract_1e_py Python kernel", *t0)
     return sigma_ci
 
 
