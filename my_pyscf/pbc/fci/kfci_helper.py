@@ -1,7 +1,4 @@
 #!/usr/bin/env python
-
-"""Contraction-map helpers for k-FCI and k-FCI RDM operations."""
-
 import ctypes
 import os
 from dataclasses import dataclass
@@ -23,6 +20,10 @@ from mrh.my_pyscf.pbc.fci.kcistrings import (
 )
 
 # Author: Bhavnesh Jangid
+
+
+"""Contraction-map helpers for k-FCI and k-FCI RDM operations."""
+
 
 libpbckcistring = load_library('libpbc_kcistring')
 _contract_structure_builder_configured = False
