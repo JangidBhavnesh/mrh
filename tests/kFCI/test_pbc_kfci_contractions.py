@@ -2,6 +2,7 @@
 
 import unittest
 import numpy as np
+import scipy.linalg
 
 from pyscf import fci
 
@@ -56,7 +57,7 @@ class ContractionTests(unittest.TestCase):
                 for k in range(nkpts):
                     h1e_k[k] = 0.5 * (h1e_k[k] + h1e_k[k].conj().T)
 
-                h1e_full = helper.h1e_k_to_full(h1e_k)
+                h1e_full = scipy.linalg.block_diag(*h1e_k)
                 sigma_k = contract_1e_k(h1e_k, fcivec_k, norb, nelec, nkpts, 
                                         target_k, link_index=None)
                 
@@ -100,7 +101,7 @@ class ContractionTests(unittest.TestCase):
                     for k in range(nkpts):
                         h1e_k[k] = 0.5 * (h1e_k[k] + h1e_k[k].conj().T)
 
-                    h1e_full = helper.h1e_k_to_full(h1e_k)
+                    h1e_full = scipy.linalg.block_diag(*h1e_k)
 
                     sigma_k = contract_1e_k(
                         h1e_k, fcivec_k, norb, nelec, nkpts, target_k,

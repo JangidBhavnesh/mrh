@@ -2,6 +2,7 @@
 import unittest
 
 import numpy as np
+import scipy.linalg
 
 from mrh.my_pyscf.pbc.fci import direct_spin1_cplx
 from mrh.my_pyscf.pbc.fci import direct_spin1_kfci
@@ -193,7 +194,7 @@ class KnownValues(unittest.TestCase):
             fcivec.copy(), norb, nelec, reorder=False)
         e_rdm = (
             np.einsum(
-                "ij,ji", helper.h1e_k_to_full(h1e_k), rdm1_raw,
+                "ij,ji", scipy.linalg.block_diag(*h1e_k), rdm1_raw,
                 optimize=True)
             + np.einsum(
                 "ijkl,ijkl", eri_full, rdm2_raw, optimize=True))

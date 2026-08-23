@@ -1,6 +1,5 @@
 # !/usr/bin/env python
 import numpy as np
-import scipy.linalg
 
 from pyscf.fci import addons, cistring
 
@@ -133,10 +132,6 @@ def _unpack(norb, nelec, link_index, spin=None):
 
 class KFCIHelperFunctions:
     """Convert k-FCI integrals and CI vectors between sector layouts."""
-
-    def h1e_k_to_full(self, h1e_k):
-        """Arrange k-space one-electron integrals as a full matrix."""
-        return scipy.linalg.block_diag(*h1e_k)
 
     def eri_k_to_full(self, eri_k):
         """Arrange k-space two-electron integrals as a full tensor."""
