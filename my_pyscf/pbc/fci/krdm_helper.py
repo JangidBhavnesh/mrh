@@ -1,4 +1,3 @@
-"""Reduced-density-matrix and spin helpers for momentum-sector FCI."""
 
 import ctypes
 import sys
@@ -10,13 +9,19 @@ from pyscf.fci import cistring
 from pyscf.fci.addons import _unpack_nelec
 
 from mrh.lib.helper import load_library
+from mrh.my_pyscf.pbc.fci.addons import _unpack_k
 from mrh.my_pyscf.pbc.fci import (
     direct_spin1_cplx,
-    kcistrings,
     kfci_helper,
     rdm_helper,
     spin_op,
 )
+
+# Author: Bhavnesh Jangid
+
+"""
+Reduced-density-matrix and spin helpers for momentum-sector FCI.
+"""
 
 
 _kci_lib_initialized = False
@@ -122,35 +127,16 @@ def _init_direct_rdm_lib():
     _direct_rdm_lib_initialized = True
 
 
-def _unpack_k(norb, nelec, nkpts, link_index=None, spin=None, kmom=None,
-              kconserv=None):
-    """Generate or validate momentum-aware link indices."""
-    assert norb % nkpts == 0
-    if link_index is not None:
-        assert link_index[0].shape[2] == link_index[1].shape[2] == 8
-        return link_index
-
-    neleca, nelecb = _unpack_nelec(nelec, spin)
-    norb_k = norb // nkpts
-    orb_k = (np.arange(norb, dtype=np.int32) // norb_k).astype(np.int32)
-    if spin == 0 and neleca == nelecb:
-        link_indexa = link_indexb = kcistrings.gen_linkstr_index_k(
-            range(norb), neleca, orb_k, nkpts, kmom=kmom,
-            kconserv=kconserv)
-    else:
-        link_indexa = kcistrings.gen_linkstr_index_k(
-            range(norb), neleca, orb_k, nkpts, kmom=kmom,
-            kconserv=kconserv)
-        link_indexb = kcistrings.gen_linkstr_index_k(
-            range(norb), nelecb, orb_k, nkpts, kmom=kmom,
-            kconserv=kconserv)
-    return link_indexa, link_indexb
-
-
 def _as_contract_map(norb, nelec, nkpts, target_k=0, link_index=None,
                      spin=None, contract_map=None, kmom=None,
                      kconserv=None):
-    """Return a compatible layout map, constructing it when necessary."""
+    """Return the determinant layout needed by RDM and spin operations.
+
+    This is intentionally different from
+    ``direct_spin1_kfci._as_contract_map``.  RDM operations require only a
+    ``KFCILayoutMap``; they do not build or validate the two-electron
+    contraction structures stored in a full ``KFCIContractMap``.
+    """
     if contract_map is not None:
         return contract_map
     link_index = _unpack_k(
