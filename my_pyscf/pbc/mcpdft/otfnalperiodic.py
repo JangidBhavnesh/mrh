@@ -250,8 +250,8 @@ def _get_ks_obj(kmc_or_kmf_or_cell, khf=False, kpts=None):
     return ks
 
 
-def _get_pbc_otfnal(kmc_or_kmf_or_cell, otxc, otfnalperiodic_class, 
-                    cell_kptsinfo={}):
+def _get_pbc_otfnal(kmc_or_kmf_or_cell, otxc, otfnalperiodic_class,
+                    cell_kptsinfo=None):
     '''
     This is wrapper function to get the appropriate fnal class 
     for the given cell object
@@ -264,6 +264,9 @@ def _get_pbc_otfnal(kmc_or_kmf_or_cell, otxc, otfnalperiodic_class,
             otfnalperiodic class. This is a hack to avoid refactoring the whole code 
             to pass the cell and kpts only needed for the kpts calculations.
     '''
+    if cell_kptsinfo is None:
+        cell_kptsinfo = {}
+
     cell = _get_mol_or_cell (kmc_or_kmf_or_cell)
     fnal_class = get_transfnal (cell, otxc)
     fnal_class_type = fnal_class.__class__.__name__
@@ -304,10 +307,21 @@ def get_pbc_otfnal_gamma(kmc_or_kmf_or_cell, otxc):
 def get_pbc_otfnal_kpts(kmc_or_kmf_or_cell, otxc):
     cell = _get_mol_or_cell (kmc_or_kmf_or_cell)
     kpts = getattr(kmc_or_kmf_or_cell, 'kpts', None)
-    kmesh = getattr(kmc_or_kmf_or_cell, 'kmesh', None)
+    try:
+        kmesh = getattr(kmc_or_kmf_or_cell, 'kmesh', None)
+    except TypeError:
+        # PySCF's SCF.kmesh property changed with the kpts_to_kmesh API.
+        kmesh = None
 
     assert kpts is not None, "kpts is required for kpts-based OT-FNAL"
-    assert kmesh is not None, "kmesh is required for kpts-based OT-FNAL"
+    if kmesh is None:
+        from pyscf.pbc.tools.k2gamma import kpts_to_kmesh
+        try:
+            kmesh = kpts_to_kmesh(cell, kpts)
+        except TypeError:
+            # Compatibility with PySCF releases whose helper accepted only
+            # the k-point array.
+            kmesh = kpts_to_kmesh(kpts)
 
     cell_kptsinfo = {
         'cell': cell, 
@@ -317,3 +331,38 @@ def get_pbc_otfnal_kpts(kmc_or_kmf_or_cell, otxc):
     return _get_pbc_otfnal(kmc_or_kmf_or_cell, otxc, otfnalperiodic_kpts, 
                            cell_kptsinfo=cell_kptsinfo)
 
+
+def sanity_check_for_kpts(mc_or_mf_or_cell):
+    """Require the single k-point supported by gamma-point MC-PDFT."""
+    obj = mc_or_mf_or_cell
+    if hasattr(obj, "_las"):
+        obj = obj._las
+    if hasattr(obj, "_scf"):
+        obj = obj._scf
+
+    kpts = getattr(obj, "kpts", None)
+    if kpts is None:
+        raise NotImplementedError("The input object does not have kpts attribute")
+    if len(kpts) > 1:
+        raise ValueError("Only supercell calculations can be performed with MC-PDFT")
+
+
+def periodicpdft(mc_or_mf_or_mol, ot):
+    """Return the periodic gamma-point on-top functional when appropriate.
+
+    Molecular inputs are returned unchanged.  This behavior is retained for
+    callers of the historical ``mrh.my_pyscf.mcpdft.periodicpdft`` helper.
+    """
+    assert isinstance(ot, str), "The ot should be a string"
+    mol_or_cell = _get_mol_or_cell(mc_or_mf_or_mol)
+    if isinstance(mol_or_cell, pbcgto.cell.Cell):
+        sanity_check_for_kpts(mc_or_mf_or_mol)
+        return get_pbc_otfnal_gamma(mc_or_mf_or_mol, ot)
+    return ot
+
+
+# Historical names kept here so the compatibility module in
+# ``mrh.my_pyscf.mcpdft`` can be a thin re-export of the periodic code.
+otfnalperiodic = otfnalperiodic_gamma
+_get_transfnal = get_pbc_otfnal_gamma
+sanity_check_for_df = _get_ks_obj
