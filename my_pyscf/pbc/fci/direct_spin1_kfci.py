@@ -1,4 +1,36 @@
 #!/usr/bin/env python
+"""Full CI support for spin-free periodic Hamiltonians at fixed momentum.
+
+The determinant basis has fixed numbers of alpha and beta electrons, and
+therefore fixed particle number and :math:`M_S`. Determinants are grouped by
+the momenta of their alpha and beta strings. Only blocks whose combined
+momentum equals ``target_k`` are stored in the packed CI vector.
+
+The symmetry support is:
+
+=========================================  =========
+Symmetry                                   Supported
+=========================================  =========
+Lattice translation / crystal momentum    Yes
+Particle number and :math:`M_S`            Yes
+Total spin / singlet adaptation            No
+Point-group or additional space-group      No
+Time-reversal or Kramers                    No
+Hermitian Hamiltonian, real or complex     Yes
+Alpha/beta orbital degeneracy               Yes
+=========================================  =========
+
+``Alpha/beta orbital degeneracy`` means that alpha and beta electrons use the
+same spatial orbitals and integrals. Spin-dependent unrestricted Hamiltonians
+are not supported. States of different total spin can occur in the same
+:math:`M_S` sector; a spin penalty can target a desired spin, but it does not
+make the determinant basis spin-adapted. ``orbsym`` and ``wfnsym`` are not
+used.
+
+The one-electron integrals must be block diagonal in k-point, and the
+two-electron integrals must obey crystal-momentum conservation. No additional
+point-group, time-reversal, or Kramers reduction is applied.
+"""
 
 import ctypes
 import types
@@ -15,21 +47,17 @@ from pyscf.fci.addons import (
 )
 
 from mrh.lib.helper import load_library
-from mrh.my_pyscf.pbc.fci import kfci_helper, kcistrings, krdm_helper
+from mrh.my_pyscf.pbc.fci import kfci_contract_map, kcistrings, krdm_helper
 from mrh.my_pyscf.pbc.fci.kcistrings import (
     gen_k_sector_linkstr_info,
 )
-from mrh.my_pyscf.pbc.fci.kfci_helper import (
+from mrh.my_pyscf.pbc.fci.kfci_contract_map import (
     KFCIContractMap,
     _unpack_contract_link_index as _unpack,
     make_kfci_contract_map,
 )
 
 # Author: Bhavnesh Jangid
-
-"""
-Full configuration interaction with with k-symmetry (k-FCI) for periodic systems.
-"""
 
 logger = lib.logger
 HDIAG_IMAG_TOL = 1e-3
@@ -693,14 +721,14 @@ def contract_2e_k_py(eri, fcivec, norb, nelec, nkpts, target_k,
         if ci0_blocks[ka][kb] is None:
             continue
 
-        kfci_helper.contract_ab_pairs(
+        kfci_contract_map.contract_ab_pairs(
             eri, ci0_blocks[ka][kb], ci1_blocks, ab_pairs, ka, kb)
 
-        kfci_helper.contract_aa_pairs(eri, ci0_blocks, ci1_blocks,
-                                      aa_pairs, ka, kb)
+        kfci_contract_map.contract_aa_pairs(
+            eri, ci0_blocks, ci1_blocks, aa_pairs, ka, kb)
 
-        kfci_helper.contract_bb_pairs(eri, ci0_blocks, ci1_blocks,
-                                      bb_pairs, ka, kb)
+        kfci_contract_map.contract_bb_pairs(
+            eri, ci0_blocks, ci1_blocks, bb_pairs, ka, kb)
 
     log.timer_debug1("k-FCI contract_2e_py Python kernel", *t0)
     return sigma_ci
