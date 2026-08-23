@@ -14,6 +14,59 @@ Periodic FCI add-ons and compatibility dispatch.
 
 SpinPenaltyFCISolver = addons.SpinPenaltyFCISolver
 
+
+def get_kfci_integrals(kmc, mo_coeff):
+    """Build the active-space effective Hamiltonian in k-space."""
+    cell = kmc.cell
+    kmf = kmc._scf
+    nkpts = kmc.nkpts
+    ncore = kmc.ncore
+    ncas = kmc.ncas
+    nocc = ncore + ncas
+
+    hcore = kmc.get_hcore()
+    dtype = np.result_type(hcore, *[mo.dtype for mo in mo_coeff])
+    hcore = hcore.astype(dtype)
+
+    mo_core = [mo[:, :ncore] for mo in mo_coeff]
+    mo_cas = np.asarray(
+        [mo[:, ncore:nocc] for mo in mo_coeff], dtype=dtype)
+
+    # The final total energy is divided by nkpts, so accumulate the nuclear
+    # and core contributions with the corresponding cell normalization.
+    ecore = kmc.energy_nuc() * nkpts
+    if ncore > 0:
+        dm_core = np.asarray([
+            2.0 * mo_core[kpoint] @ mo_core[kpoint].conj().T
+            for kpoint in range(nkpts)
+        ], dtype=dtype)
+        core_vhf = kmc.get_veff(cell, dm_core, hermi=1, kpts=kmf.kpts)
+        fock_core = hcore + 0.5 * core_vhf
+        ecore += sum(
+            np.einsum("ij,ji", dm_core[kpoint], fock_core[kpoint])
+            for kpoint in range(nkpts))
+        hcore += core_vhf
+
+    h1e = np.asarray([
+        mo_cas[kpoint].conj().T @ hcore[kpoint] @ mo_cas[kpoint]
+        for kpoint in range(nkpts)
+    ], dtype=dtype)
+
+    # The 1/nkpts factor gives the supercell normalization.
+    h2e = kmf.with_df.ao2mo_7d(mo_cas, kpts=kmf.kpts)
+    h2e = np.asarray(h2e, dtype=dtype) / nkpts
+
+    # contract_2e follows PySCF direct_spin1.contract_2e conventions, so use
+    # the effective one-electron Hamiltonian h1 - J/2 and two-electron tensor
+    # h2/2.
+    j_eff = np.zeros_like(h1e)
+    for kp in range(nkpts):
+        for kq in range(nkpts):
+            j_eff[kp] += np.einsum("piis->ps", h2e[kp, kq, kq])
+    h1e -= 0.5 * j_eff
+    h2e *= 0.5
+    return h1e, h2e, ecore
+
 def fix_spin(fciobj, shift=0.1, ss=None, **kwargs):
     """Dispatch spin-penalty construction to the matching solver family."""
     from mrh.my_pyscf.pbc.fci import direct_spin1_kfci
