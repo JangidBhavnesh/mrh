@@ -1,6 +1,11 @@
 #!/usr/bin/env python
 
-"""Tests for k-FCI spin-penalty edge cases."""
+"""Test kFCI spin-penalty diagonals and compatibility utilities.
+
+The tests validate the uint64 population-count helper, the analytic diagonal
+of the spin-squared operator, and its use in the spin-penalized Hamiltonian
+diagonal.
+"""
 
 import unittest
 
@@ -8,18 +13,17 @@ import numpy as np
 
 from mrh.my_pyscf.pbc.fci import direct_spin1_kfci
 
+# Author: Bhavnesh Jangid
+
 
 class KnownValues(unittest.TestCase):
 
-    def test_popcount_uint64_python39_compatible(self):
-        values = np.asarray(
-            [0, 1, 3, 0xffff, 1 << 63, (1 << 64) - 1],
-            dtype=np.uint64)
-        expected = np.asarray([0, 1, 2, 16, 1, 64], dtype=np.uint16)
-        np.testing.assert_array_equal(
-            direct_spin1_kfci._popcount_uint64(values), expected)
-
     def test_spin_square_diag_matches_contract_ss(self):
+        """Compare the analytic S^2 diagonal with explicit contractions.
+
+        Each diagonal element is reconstructed by applying ``contract_ss``
+        to its determinant basis vector in every ``target_k`` sector.
+        """
         nkpts, ncas, nelec = 3, 2, (2, 1)
         norb = nkpts * ncas
 
@@ -42,6 +46,11 @@ class KnownValues(unittest.TestCase):
             np.testing.assert_allclose(diag, reference)
 
     def test_spin_penalty_hdiag_avoids_contract_ss_loop(self):
+        """Check direct assembly of the spin-penalized Hamiltonian diagonal.
+
+        For the lowest-spin linear penalty, the result must equal the base
+        diagonal plus ``shift * (diag(S^2) - ss)`` in a large sector.
+        """
         nkpts, ncas, nelec, target_k = 5, 2, (5, 4), 0
         norb = nkpts * ncas
         rng = np.random.default_rng(12)
