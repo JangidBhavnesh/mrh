@@ -10,6 +10,7 @@ diagonal.
 import unittest
 
 import numpy as np
+from pyscf.fci import addons as pyscf_fci_addons
 
 from mrh.my_pyscf.pbc.fci import direct_spin1_kfci
 
@@ -17,6 +18,38 @@ from mrh.my_pyscf.pbc.fci import direct_spin1_kfci
 
 
 class KnownValues(unittest.TestCase):
+
+    def test_spin_penalty_inherits_pyscf_mixin_and_undoes(self):
+        """Exercise inherited setup/undo and k-FCI base dispatch."""
+        nkpts, ncas, nelec, target_k = 2, 2, (1, 1), 0
+        norb = nkpts * ncas
+        rng = np.random.default_rng(8)
+        eri = np.zeros(
+            (nkpts,) * 3 + (ncas,) * 4, dtype=np.complex128)
+        contract_map = direct_spin1_kfci.make_kfci_contract_map(
+            norb, nelec, nkpts, target_k)
+        ci0 = (rng.normal(size=contract_map.sector_size)
+               + 1j * rng.normal(size=contract_map.sector_size))
+
+        solver = direct_spin1_kfci.FCISolver(
+            nkpts=nkpts, target_k=target_k)
+        base_result = solver.contract_2e(
+            eri, ci0, norb, nelec, contract_map=contract_map)
+        expected_penalty = 0.2 * direct_spin1_kfci.contract_ss(
+            ci0, norb, nelec, nkpts, target_k=target_k,
+            contract_map=contract_map)
+
+        solver.fix_spin_(shift=0.2, ss=0)
+        self.assertIsInstance(
+            solver, pyscf_fci_addons.SpinPenaltyFCISolver)
+        result = solver.contract_2e(
+            eri, ci0, norb, nelec, contract_map=contract_map)
+        np.testing.assert_allclose(result, base_result + expected_penalty)
+
+        plain_solver = solver.undo_fix_spin()
+        self.assertIsInstance(plain_solver, direct_spin1_kfci.FCISolver)
+        self.assertNotIsInstance(
+            plain_solver, direct_spin1_kfci.SpinPenaltyFCISolver)
 
     def test_spin_square_diag_matches_contract_ss(self):
         """Compare the analytic S^2 diagonal with explicit contractions.

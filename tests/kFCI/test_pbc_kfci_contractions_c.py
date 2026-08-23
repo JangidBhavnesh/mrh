@@ -75,7 +75,7 @@ class KnownValues(unittest.TestCase):
 
                     sigma_ref = contract_1e_k_py(
                         h1e, ci0, norb, nelec, nkpts, target_k,
-                        link_index=link_index)
+                        contract_map=contract_map)
                     sigma_c = contract_1e_k(
                         h1e, ci0, norb, nelec, nkpts, target_k,
                         contract_map=contract_map)
@@ -118,7 +118,7 @@ class KnownValues(unittest.TestCase):
 
                     sigma_ref = contract_2e_k_py(
                         eri, ci0, norb, nelec, nkpts, target_k,
-                        link_index=link_index)
+                        contract_map=contract_map)
                     sigma_c = contract_2e_k(
                         eri, ci0, norb, nelec, nkpts, target_k,
                         contract_map=contract_map)
@@ -151,7 +151,7 @@ class KnownValues(unittest.TestCase):
 
                 sigma_ref = contract_2e_k_py(
                     eri, ci0, norb, nelec, nkpts, target_k,
-                    link_index=link_index, kmom=kmom)
+                    contract_map=contract_map, kmom=kmom)
                 sigma_c = contract_2e_k(
                     eri, ci0, norb, nelec, nkpts, target_k,
                     contract_map=contract_map, kmom=kmom)
@@ -245,7 +245,7 @@ class KnownValues(unittest.TestCase):
                 ci0 = np.asarray(ci0, dtype=np.complex128, order="C")
                 sigma_ref = contract_2e_k_py(
                     eri, ci0, norb, nelec, nkpts, target_k,
-                    link_index=link_index)
+                    contract_map=contract_map)
                 sigma_c = contract_2e_k(
                     eri, ci0, norb, nelec, nkpts, target_k,
                     contract_map=contract_map)
