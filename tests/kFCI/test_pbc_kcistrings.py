@@ -8,8 +8,22 @@ from pyscf.fci import cistring
 from mrh.my_pyscf.pbc.fci import kcistrings
 
 
+# Author: Bhavnesh Jangid
+
+"""
+Test momentum-aware CI link indices and determinant-sector mappings.
+
+The k-point link index extends PySCF's single-excitation table with momentum
+labels and transfers. Sector maps then group alpha and beta strings whose
+combined momentum matches ``target_k``.
+"""
+
+
 def _string_momenta(strings, orb_k, nkpts):
-    """Return determinant momenta from their occupied orbitals."""
+    """
+    Return determinant momenta from their occupied orbitals.
+    Basically: sum(orb_k[occupied]) % nkpts for each determinant.
+    """
     momenta = []
     for string in strings:
         occupied = [orb for orb in range(len(orb_k))
@@ -17,18 +31,22 @@ def _string_momenta(strings, orb_k, nkpts):
         momenta.append(sum(orb_k[occupied]) % nkpts)
     return np.asarray(momenta, dtype=np.int32)
 
-
 class KnownValues(unittest.TestCase):
 
     def test_c_link_index_matches_python_reference(self):
-        """The C link table agrees with PySCF and brute-force momenta."""
+        """Check the compiled momentum-aware link-index builder.
+
+        Its excitation addresses and signs are compared with PySCF, while its
+        determinant, creation, destruction, and transfer momenta are built
+        independently from the orbital momentum labels.
+        """
         nkpts = 3
         norb = 6
         nocc = 2
         orb_k = np.repeat(np.arange(nkpts, dtype=np.int32), 2)
         strings = np.asarray(
             cistring.make_strings(range(norb), nocc), dtype=np.uint64)
-        nlink = nocc * (norb - nocc) + nocc
+        nlink = nocc * (norb - nocc) + nocc # number of single excitations per determinant
 
         link_c = np.empty((strings.size, nlink, 8), dtype=np.int32)
         kcistrings.libpbckcistring.FCIlinkstr_index_k(
@@ -59,10 +77,16 @@ class KnownValues(unittest.TestCase):
         )
 
     def test_python_sector_maps_match_brute_force(self):
-        """Sector maps and block offsets agree with determinant momenta."""
+        """Check momentum-sector maps and packed ``target_k`` blocks.
+
+        Determinants are grouped by brute-force occupied-orbital momenta, and
+        the resulting string IDs, inverse maps, block sizes, and offsets are
+        compared with the Python kFCI sector-map builders.
+        """
         nkpts = 3
         norb = 6
         target_k = 2
+        
         orb_k = np.repeat(np.arange(nkpts, dtype=np.int32), 2)
         strings_a = np.asarray(
             cistring.make_strings(range(norb), 2), dtype=np.uint64)
@@ -116,4 +140,5 @@ class KnownValues(unittest.TestCase):
 
 
 if __name__ == '__main__':
+    print("Running unit tests for kcistring utilities...")
     unittest.main()
