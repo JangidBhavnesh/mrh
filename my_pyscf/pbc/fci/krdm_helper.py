@@ -9,9 +9,9 @@ from pyscf.fci import cistring
 from pyscf.fci.addons import _unpack_nelec
 
 from mrh.lib.helper import load_library
-from mrh.my_pyscf.pbc.fci.addons import _unpack_k
 from mrh.my_pyscf.pbc.fci import (
     direct_spin1_cplx,
+    kcistrings,
     kfci_helper,
     rdm_helper,
     spin_op,
@@ -23,7 +23,6 @@ from mrh.my_pyscf.pbc.fci import (
 Reduced-density-matrix and spin helpers for momentum-sector FCI.
 """
 
-
 _kci_lib_initialized = False
 _direct_rdm_lib_initialized = False
 _contract_ss_lib_initialized = False
@@ -32,7 +31,26 @@ libpbcfci_k = None
 
 
 def _init_kci_lib():
-    """Configure the C helpers that map between sector and full CI arrays."""
+    """Configure C entry points for packed/full CI-vector conversion.
+
+    The two functions are provided by ``rdm_helper.libpbcrdm``:
+
+    ``FCIkci_sector_to_full_cplx``
+        Scatters a packed ``complex128[sector_size]`` vector into a full
+        ``complex128[nstra, nstrb]`` spin-string table using the momentum
+        blocks, spin-string ID lists, and their offsets.
+    ``FCIkci_full_to_sector_cplx``
+        Gathers the inverse mapping from the full table into one packed total-
+        momentum sector.
+
+    The configuration is idempotent: subsequent calls return immediately.
+
+    Returns
+    -------
+    None
+        The function mutates the ``ctypes`` signatures and initialization
+        flag; it does not execute either C kernel.
+    """
     global _kci_lib_initialized
     if _kci_lib_initialized:
         return
@@ -66,7 +84,20 @@ def _init_kci_lib():
 
 
 def _init_contract_ss_lib():
-    """Load and configure the C spin-squared contraction."""
+    """Load and configure the direct packed-sector spin-squared kernel.
+
+    ``FCIcontract_ss_k`` receives packed input/output CI vectors, electron and
+    momentum counts, six-column momentum blocks, alpha/beta link tables,
+    momentum-grouped string IDs and offsets, and global-to-local string maps.
+    It applies ``S**2`` without embedding the vector in the full CI space.
+
+    The shared library and its ``ctypes`` signature are initialized only once.
+
+    Returns
+    -------
+    None
+        Updates ``libpbcfci_k`` and the module initialization flag.
+    """
     global _contract_ss_lib_initialized, libpbcfci_k
     if _contract_ss_lib_initialized:
         return
@@ -99,7 +130,22 @@ def _init_contract_ss_lib():
 
 
 def _init_direct_rdm_lib():
-    """Load and configure the packed momentum-sector RDM kernels."""
+    """Load and configure direct packed-sector RDM kernels.
+
+    ``FCIkci_make_rdm1s_direct`` builds the alpha and beta one-particle RDMs.
+    ``FCIkci_make_rdm12s_direct`` additionally builds the AA, AB, and BB
+    two-particle RDMs.  Both consume the packed CI vector, momentum layout,
+    link tables, and global-to-local string maps; the 1-/2-RDM kernel also
+    consumes grouped string IDs and the additive-inverse momentum table.
+
+    Both C functions return a nonzero allocation-error status, represented as
+    ``ctypes.c_int``.  Configuration is idempotent.
+
+    Returns
+    -------
+    None
+        Updates ``libpbckrdm`` and the module initialization flag.
+    """
     global _direct_rdm_lib_initialized, libpbckrdm
     if _direct_rdm_lib_initialized:
         return
@@ -127,15 +173,90 @@ def _init_direct_rdm_lib():
     _direct_rdm_lib_initialized = True
 
 
+def _unpack_k(norb, nelec, nkpts, link_index=None, spin=None, kmom=None,
+              kconserv=None):
+    """Return momentum-aware alpha and beta link-index tables.
+
+    Parameters
+    ----------
+    norb : int
+        Total active-orbital count; it must be divisible by ``nkpts``.
+    nelec : int or tuple of two ints
+        Total electron count or ``(N_alpha, N_beta)``.
+    nkpts : int
+        Number of momentum points.
+    link_index : tuple of two ndarrays or None, optional
+        Existing alpha/beta link tables.  Each table must have eight fields in
+        its final dimension.  Valid tables are returned unchanged.
+    spin : int or None, optional
+        ``N_alpha - N_beta`` used when an integer ``nelec`` is unpacked.  A
+        value of zero also permits alpha and beta tables to share storage.
+    kmom : KPointMomentum or None, optional
+        Precomputed momentum arithmetic used to generate missing tables.
+    kconserv : ndarray or None, optional
+        Momentum-conservation table used when ``kmom`` is not supplied.
+
+    Returns
+    -------
+    link_indexa, link_indexb : tuple of ndarrays
+        Momentum-aware link tables with shapes ``(nstra, nlinka, 8)`` and
+        ``(nstrb, nlinkb, 8)`` and dtype ``int32`` when generated here.
+
+    Notes
+    -----
+    This function duplicates ``pbc.fci.addons._unpack_k``.  Maintaining both
+    copies risks divergent validation or generation behavior; ``krdm_helper``
+    should import the shared add-on helper instead of defining this copy.
+    """
+    assert norb % nkpts == 0
+    if link_index is not None:
+        assert link_index[0].shape[2] == link_index[1].shape[2] == 8
+        return link_index
+
+    neleca, nelecb = _unpack_nelec(nelec, spin)
+    norb_k = norb // nkpts
+    orb_k = (np.arange(norb, dtype=np.int32) // norb_k).astype(np.int32)
+    if spin == 0 and neleca == nelecb:
+        link_indexa = link_indexb = kcistrings.gen_linkstr_index_k(
+            range(norb), neleca, orb_k, nkpts, kmom=kmom,
+            kconserv=kconserv)
+    else:
+        link_indexa = kcistrings.gen_linkstr_index_k(
+            range(norb), neleca, orb_k, nkpts, kmom=kmom,
+            kconserv=kconserv)
+        link_indexb = kcistrings.gen_linkstr_index_k(
+            range(norb), nelecb, orb_k, nkpts, kmom=kmom,
+            kconserv=kconserv)
+    return link_indexa, link_indexb
+
+
 def _as_contract_map(norb, nelec, nkpts, target_k=0, link_index=None,
                      spin=None, contract_map=None, kmom=None,
                      kconserv=None):
-    """Return the determinant layout needed by RDM and spin operations.
+    """Return a determinant-layout map for RDM and spin operations.
 
-    This is intentionally different from
-    ``direct_spin1_kfci._as_contract_map``.  RDM operations require only a
-    ``KFCILayoutMap``; they do not build or validate the two-electron
-    contraction structures stored in a full ``KFCIContractMap``.
+    An existing ``contract_map`` is returned unchanged.  Otherwise the
+    function obtains momentum-aware link tables with :func:`_unpack_k` and
+    constructs a :class:`KFCILayoutMap` for ``target_k``.
+
+    This helper differs intentionally from
+    ``direct_spin1_kfci._as_contract_map``: the latter validates or builds a
+    full :class:`KFCIContractMap`, including two-electron contraction
+    structures.  RDM and spin kernels require only the determinant layout.
+
+    Parameters
+    ----------
+    norb, nelec, nkpts, target_k, link_index, spin, kmom, kconserv
+        See :func:`_unpack_k` for the link-generation arguments;
+        ``target_k`` selects the packed total-momentum sector.
+    contract_map : KFCILayoutMap or KFCIContractMap or None, optional
+        Existing compatible layout or full contraction map.
+
+    Returns
+    -------
+    layout : KFCILayoutMap or KFCIContractMap
+        Object exposing packed blocks, link tables, string maps, sector size,
+        and momentum arithmetic.
     """
     if contract_map is not None:
         return contract_map
@@ -150,7 +271,41 @@ def _as_contract_map(norb, nelec, nkpts, target_k=0, link_index=None,
 def embed_ksector_ci_to_full(fcivec, norb, nelec, nkpts, target_k=0,
                              link_index=None, spin=None, contract_map=None,
                              kmom=None, kconserv=None):
-    """Embed a momentum-sector vector in the full spin-string CI table."""
+    """Scatter a packed momentum-sector CI vector into the full CI table.
+
+    Determinants belonging to ``target_k`` are copied to their global alpha
+    and beta string addresses.  Entries belonging to every other total-
+    momentum sector are set to zero by the C kernel.
+
+    Parameters
+    ----------
+    fcivec : array_like, shape (sector_size,)
+        CI coefficients in packed momentum-block order.
+    norb : int
+        Total number of active orbitals.
+    nelec : int or tuple of two ints
+        Total electron count or ``(N_alpha, N_beta)``.
+    nkpts : int
+        Number of momentum points.
+    target_k : int, optional
+        Total-momentum sector represented by ``fcivec``.
+    link_index : tuple of two ndarrays or None, optional
+        Momentum-aware alpha/beta link tables used to build the layout.
+    spin : int or None, optional
+        Spin projection used to unpack an integer electron count.
+    contract_map : KFCILayoutMap or KFCIContractMap or None, optional
+        Precomputed compatible layout.
+    kmom : KPointMomentum or None, optional
+        Precomputed momentum arithmetic.
+    kconserv : ndarray or None, optional
+        Momentum-conservation table used when constructing ``kmom``.
+
+    Returns
+    -------
+    ci_full : ndarray, shape (nstra, nstrb), dtype complex128
+        Full alpha-by-beta spin-string coefficient table, where
+        ``nstra = C(norb, N_alpha)`` and ``nstrb = C(norb, N_beta)``.
+    """
     neleca, nelecb = _unpack_nelec(nelec, spin)
     contract_map = _as_contract_map(
         norb, (neleca, nelecb), nkpts, target_k=target_k,
@@ -184,7 +339,23 @@ def extract_ksector_ci_from_full(ci_full, norb, nelec, nkpts, target_k=0,
                                  link_index=None, spin=None,
                                  contract_map=None, kmom=None,
                                  kconserv=None):
-    """Extract one momentum sector from a full spin-string CI table."""
+    """Gather one packed total-momentum sector from a full CI table.
+
+    Parameters are the same as :func:`embed_ksector_ci_to_full`, except
+    ``ci_full`` has shape ``(nstra, nstrb)`` and contains coefficients at
+    global spin-string addresses.
+
+    Returns
+    -------
+    fcivec : ndarray, shape (sector_size,), dtype complex128
+        Coefficients in the packed block order described by the layout map.
+
+    Notes
+    -----
+    Layout resolution and the C pointer list intentionally mirror
+    :func:`embed_ksector_ci_to_full`; only the data-flow direction and the
+    final full-table dimension passed to C differ.
+    """
     neleca, nelecb = _unpack_nelec(nelec, spin)
     contract_map = _as_contract_map(
         norb, (neleca, nelecb), nkpts, target_k=target_k,
@@ -213,7 +384,29 @@ def extract_ksector_ci_from_full(ci_full, norb, nelec, nkpts, target_k=0,
 
 def make_rdm1s_ref(fcivec, norb, nelec, nkpts, target_k=0,
                    link_index=None, spin=None, kmom=None, kconserv=None):
-    """Build reference 1-RDMs through an embedded full-CI vector."""
+    """Build reference spin-resolved 1-RDMs by full-CI embedding.
+
+    The packed vector is first scattered into the full alpha-by-beta string
+    table and then passed to :func:`direct_spin1_cplx.make_rdm1s`.  This path
+    is primarily an independent reference for :func:`make_rdm1s`.
+
+    Parameters
+    ----------
+    fcivec, norb, nelec, nkpts, target_k, link_index, spin, kmom, kconserv
+        See :func:`embed_ksector_ci_to_full`.
+
+    Returns
+    -------
+    rdm1a, rdm1b : tuple of ndarrays
+        Alpha and beta 1-RDMs, each with shape ``(norb, norb)`` and dtype
+        ``complex128``.
+
+    Notes
+    -----
+    The embedding setup is intentionally repeated in :func:`make_rdm12s_ref`
+    so that each reference routine can call the corresponding full-CI RDM
+    implementation directly.
+    """
     ci_full = embed_ksector_ci_to_full(
         fcivec, norb, nelec, nkpts, target_k=target_k,
         link_index=link_index, spin=spin, kmom=kmom, kconserv=kconserv)
@@ -223,7 +416,24 @@ def make_rdm1s_ref(fcivec, norb, nelec, nkpts, target_k=0,
 
 def make_rdm1_ref(fcivec, norb, nelec, nkpts, target_k=0,
                   link_index=None, spin=None, kmom=None, kconserv=None):
-    """Build a reference spin-summed 1-RDM through full-CI embedding."""
+    """Build a reference spin-summed 1-RDM by full-CI embedding.
+
+    Parameters
+    ----------
+    fcivec, norb, nelec, nkpts, target_k, link_index, spin, kmom, kconserv
+        See :func:`make_rdm1s_ref`.
+
+    Returns
+    -------
+    rdm1 : ndarray, shape (norb, norb), dtype complex128
+        Spin-summed 1-RDM in the public ``(p, q)`` convention.
+
+    Notes
+    -----
+    The spin sum and conjugate transpose below are duplicated in
+    :func:`make_rdm1`; the reference and direct paths must retain the same
+    output convention.
+    """
     rdm1a, rdm1b = make_rdm1s_ref(
         fcivec, norb, nelec, nkpts, target_k=target_k,
         link_index=link_index, spin=spin, kmom=kmom, kconserv=kconserv)
@@ -233,7 +443,30 @@ def make_rdm1_ref(fcivec, norb, nelec, nkpts, target_k=0,
 def make_rdm12s_ref(fcivec, norb, nelec, nkpts, target_k=0,
                     link_index=None, reorder=True, spin=None, kmom=None,
                     kconserv=None):
-    """Build reference 1-/2-RDMs through an embedded full-CI vector."""
+    """Build reference spin-resolved 1-/2-RDMs by full-CI embedding.
+
+    Parameters
+    ----------
+    fcivec, norb, nelec, nkpts, target_k, link_index, spin, kmom, kconserv
+        See :func:`embed_ksector_ci_to_full`.
+    reorder : bool, optional
+        If true, convert the same-spin 2-RDMs from the raw excitation-
+        operator ordering to PySCF's reordered RDM convention.
+
+    Returns
+    -------
+    (rdm1a, rdm1b) : tuple of ndarrays
+        Alpha and beta 1-RDMs, each of shape ``(norb, norb)``.
+    (rdm2aa, rdm2ab, rdm2bb) : tuple of ndarrays
+        Alpha-alpha, alpha-beta, and beta-beta 2-RDMs, each of shape
+        ``(norb, norb, norb, norb)``.  All returned arrays have dtype
+        ``complex128``.
+
+    Notes
+    -----
+    This repeats the embedding step in :func:`make_rdm1s_ref` but calls the
+    full-CI routine that produces both RDM orders in one pass.
+    """
     ci_full = embed_ksector_ci_to_full(
         fcivec, norb, nelec, nkpts, target_k=target_k,
         link_index=link_index, spin=spin, kmom=kmom, kconserv=kconserv)
@@ -245,7 +478,28 @@ def make_rdm12s_ref(fcivec, norb, nelec, nkpts, target_k=0,
 def make_rdm12_ref(fcivec, norb, nelec, nkpts, target_k=0,
                    link_index=None, reorder=True, spin=None, kmom=None,
                    kconserv=None):
-    """Build reference spin-summed RDMs through full-CI embedding."""
+    """Build reference spin-summed 1-/2-RDMs by full-CI embedding.
+
+    Parameters
+    ----------
+    fcivec, norb, nelec, nkpts, target_k, link_index, reorder, spin, kmom,
+    kconserv
+        See :func:`make_rdm12s_ref`.
+
+    Returns
+    -------
+    rdm1 : ndarray, shape (norb, norb), dtype complex128
+        Spin-summed 1-RDM.
+    rdm2 : ndarray, shape (norb, norb, norb, norb), dtype complex128
+        Spin-summed 2-RDM.  The beta-alpha contribution is recovered from
+        ``rdm2ab`` by exchanging its particle-index pairs.
+
+    Notes
+    -----
+    The spin-combination formulas below are duplicated in
+    :func:`make_rdm12`; keeping them identical makes the embedded reference
+    and direct packed-sector results directly comparable.
+    """
     (dm1a, dm1b), (dm2aa, dm2ab, dm2bb) = make_rdm12s_ref(
         fcivec, norb, nelec, nkpts, target_k=target_k,
         link_index=link_index, reorder=reorder, spin=spin, kmom=kmom,
@@ -257,7 +511,35 @@ def make_rdm12_ref(fcivec, norb, nelec, nkpts, target_k=0,
 
 def _direct_rdm_inputs(fcivec, norb, nelec, nkpts, target_k, link_index,
                        spin, kmom, kconserv):
-    """Return contiguous CI and layout arrays for a direct RDM call."""
+    """Validate and prepare common inputs for direct packed-sector RDM calls.
+
+    Parameters
+    ----------
+    fcivec : array_like, shape (sector_size,)
+        Packed momentum-sector CI coefficients.
+    norb, nelec, nkpts, target_k, link_index, spin, kmom, kconserv
+        See :func:`embed_ksector_ci_to_full`.
+
+    Returns
+    -------
+    fcivec : ndarray, shape (sector_size,), dtype complex128
+        C-contiguous CI coefficients.  The input's dimensional shape is
+        retained, although direct kernels interpret its storage as flat.
+    layout : KFCILayoutMap or KFCIContractMap
+        Validated determinant layout used by the C kernel.
+
+    Raises
+    ------
+    ValueError
+        If the number of CI coefficients differs from the selected sector's
+        determinant count.
+
+    Notes
+    -----
+    This helper factors the layout construction and size check shared by
+    :func:`make_rdm1s` and :func:`make_rdm12s`; those functions still repeat
+    their output allocation and C-pointer setup because their ABIs differ.
+    """
     neleca, nelecb = _unpack_nelec(nelec, spin)
     layout = _as_contract_map(
         norb, (neleca, nelecb), nkpts, target_k=target_k,
@@ -272,7 +554,31 @@ def _direct_rdm_inputs(fcivec, norb, nelec, nkpts, target_k, link_index,
 
 def make_rdm1s(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
                spin=None, kmom=None, kconserv=None):
-    """Build spin-separated 1-RDMs directly in the momentum sector."""
+    """Build spin-resolved 1-RDMs directly in the packed momentum sector.
+
+    Parameters
+    ----------
+    fcivec, norb, nelec, nkpts, target_k, link_index, spin, kmom, kconserv
+        See :func:`_direct_rdm_inputs`.
+
+    Returns
+    -------
+    rdm1a, rdm1b : tuple of ndarrays
+        Alpha and beta 1-RDMs, each with shape ``(norb, norb)`` and dtype
+        ``complex128``.
+
+    Raises
+    ------
+    ValueError
+        If ``fcivec`` does not have the selected sector size.
+    MemoryError
+        If the C kernel cannot allocate its temporary storage.
+
+    Notes
+    -----
+    Unlike :func:`make_rdm1s_ref`, this routine never constructs the full
+    ``nstra * nstrb`` CI table.
+    """
     fcivec, layout = _direct_rdm_inputs(
         fcivec, norb, nelec, nkpts, target_k, link_index, spin, kmom,
         kconserv)
@@ -302,7 +608,23 @@ def make_rdm1s(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
 
 def make_rdm1(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
               spin=None, kmom=None, kconserv=None):
-    """Build a spin-summed 1-RDM directly in the momentum sector."""
+    """Build a spin-summed 1-RDM directly in the momentum sector.
+
+    Parameters
+    ----------
+    fcivec, norb, nelec, nkpts, target_k, link_index, spin, kmom, kconserv
+        See :func:`make_rdm1s`.
+
+    Returns
+    -------
+    rdm1 : ndarray, shape (norb, norb), dtype complex128
+        Spin-summed 1-RDM in the public ``(p, q)`` convention.
+
+    Notes
+    -----
+    The final spin sum and conjugate transpose duplicate
+    :func:`make_rdm1_ref` so both implementations expose the same convention.
+    """
     dm1a, dm1b = make_rdm1s(
         fcivec, norb, nelec, nkpts, target_k=target_k,
         link_index=link_index, spin=spin, kmom=kmom, kconserv=kconserv)
@@ -311,7 +633,38 @@ def make_rdm1(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
 
 def make_rdm12s(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
                 reorder=True, spin=None, kmom=None, kconserv=None):
-    """Build spin-separated RDMs directly in the momentum sector."""
+    """Build spin-resolved 1-/2-RDMs directly in the momentum sector.
+
+    Parameters
+    ----------
+    fcivec, norb, nelec, nkpts, target_k, link_index, spin, kmom, kconserv
+        See :func:`_direct_rdm_inputs`.
+    reorder : bool, optional
+        If true, convert the same-spin 2-RDMs from the raw excitation-
+        operator ordering to PySCF's reordered RDM convention.  The mixed-
+        spin block requires no such correction.
+
+    Returns
+    -------
+    (rdm1a, rdm1b) : tuple of ndarrays
+        Alpha and beta 1-RDMs, each of shape ``(norb, norb)`` and dtype
+        ``complex128``.
+    (rdm2aa, rdm2ab, rdm2bb) : tuple of ndarrays
+        Alpha-alpha, alpha-beta, and beta-beta 2-RDMs, each of shape
+        ``(norb, norb, norb, norb)`` and dtype ``complex128``.
+
+    Raises
+    ------
+    ValueError
+        If ``fcivec`` does not have the selected sector size.
+    MemoryError
+        If the C kernel cannot allocate its temporary storage.
+
+    Notes
+    -----
+    This shares input preparation with :func:`make_rdm1s`, but necessarily
+    repeats output allocation and C-pointer plumbing for the larger C ABI.
+    """
     fcivec, layout = _direct_rdm_inputs(
         fcivec, norb, nelec, nkpts, target_k, link_index, spin, kmom,
         kconserv)
@@ -357,7 +710,27 @@ def make_rdm12s(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
 
 def make_rdm12(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
                reorder=True, spin=None, kmom=None, kconserv=None):
-    """Build spin-summed RDMs directly in the momentum sector."""
+    """Build spin-summed 1-/2-RDMs directly in the momentum sector.
+
+    Parameters
+    ----------
+    fcivec, norb, nelec, nkpts, target_k, link_index, reorder, spin, kmom,
+    kconserv
+        See :func:`make_rdm12s`.
+
+    Returns
+    -------
+    rdm1 : ndarray, shape (norb, norb), dtype complex128
+        Spin-summed 1-RDM.
+    rdm2 : ndarray, shape (norb, norb, norb, norb), dtype complex128
+        Spin-summed 2-RDM, including the beta-alpha block reconstructed by
+        exchanging the two index pairs of ``rdm2ab``.
+
+    Notes
+    -----
+    The composition formulas duplicate :func:`make_rdm12_ref` deliberately,
+    providing a direct convention check between the C and reference paths.
+    """
     (dm1a, dm1b), (dm2aa, dm2ab, dm2bb) = make_rdm12s(
         fcivec, norb, nelec, nkpts, target_k=target_k,
         link_index=link_index, reorder=reorder, spin=spin, kmom=kmom,
@@ -370,7 +743,30 @@ def make_rdm12(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
 def contract_ss_embedded(fcivec, norb, nelec, nkpts, target_k=0,
                          link_index=None, spin=None, contract_map=None,
                          kmom=None, kconserv=None):
-    """Apply spin-squared through a full-space embedded CI vector."""
+    """Apply ``S**2`` through a full-space embedded CI vector.
+
+    This reference implementation scatters the packed vector into the full
+    determinant table, calls :func:`spin_op.contract_ss0`, and gathers the
+    selected momentum sector back into packed order.
+
+    Parameters
+    ----------
+    fcivec, norb, nelec, nkpts, target_k, link_index, spin, contract_map,
+    kmom, kconserv
+        See :func:`embed_ksector_ci_to_full`.
+
+    Returns
+    -------
+    ci1 : ndarray, shape (sector_size,), dtype complex128
+        Packed coefficients of ``S**2 |fcivec>``.
+
+    Notes
+    -----
+    The scatter/operate/gather sequence intentionally duplicates the data
+    mapping exercised independently by :func:`embed_ksector_ci_to_full` and
+    :func:`extract_ksector_ci_from_full`.  It provides a reference for the
+    direct packed-sector kernel in :func:`contract_ss`.
+    """
     ci_full = embed_ksector_ci_to_full(
         fcivec, norb, nelec, nkpts, target_k=target_k,
         link_index=link_index, spin=spin, contract_map=contract_map,
@@ -386,7 +782,34 @@ def contract_ss_embedded(fcivec, norb, nelec, nkpts, target_k=0,
 
 def contract_ss(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
                 spin=None, contract_map=None, kmom=None, kconserv=None):
-    """Apply spin-squared directly within a fixed momentum sector."""
+    """Apply ``S**2`` directly within a fixed packed momentum sector.
+
+    Parameters
+    ----------
+    fcivec : array_like, shape (sector_size,)
+        Packed CI coefficients.  They are converted to C-contiguous
+        ``complex128`` storage before entering the C kernel.
+    norb, nelec, nkpts, target_k, link_index, spin, contract_map, kmom,
+    kconserv
+        See :func:`embed_ksector_ci_to_full`.
+
+    Returns
+    -------
+    ci1 : ndarray, dtype complex128
+        Coefficients of ``S**2 |fcivec>`` with the same shape as the converted
+        input array.
+
+    Raises
+    ------
+    AssertionError
+        If the number of input coefficients differs from the layout's sector
+        size.
+
+    Notes
+    -----
+    This computes the same operation as :func:`contract_ss_embedded` while
+    avoiding the full alpha-by-beta determinant table.
+    """
     neleca, nelecb = _unpack_nelec(nelec, spin)
     contract_map = _as_contract_map(
         norb, (neleca, nelecb), nkpts, target_k=target_k,
@@ -427,7 +850,33 @@ def contract_ss(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
 def spin_square(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
                 spin=None, contract_map=None, kmom=None, kconserv=None,
                 **kwargs):
-    """Return the spin-squared expectation and spin multiplicity."""
+    """Return the ``S**2`` matrix element and corresponding multiplicity.
+
+    Parameters
+    ----------
+    fcivec : array_like, shape (sector_size,)
+        Packed CI coefficients.  The vector is normally expected to be
+        normalized; this function does not divide by its norm.
+    norb, nelec, nkpts, target_k, link_index, spin, contract_map, kmom,
+    kconserv
+        See :func:`contract_ss`.
+    **kwargs
+        Optional ``verbose`` level used when reporting a non-negligible
+        imaginary component of ``<fcivec|S**2|fcivec>``.
+
+    Returns
+    -------
+    ss : numpy.float64
+        Real part of ``<fcivec|S**2|fcivec>``.
+    multiplicity : numpy.float64
+        ``2*S + 1``, where ``S = sqrt(ss + 1/4) - 1/2``.
+
+    Notes
+    -----
+    If the spin-squared matrix element has an imaginary component larger than
+    ``1e-3``, a warning is emitted through the PySCF logger.  The real part is
+    still used to compute both return values.
+    """
     fcivec = np.asarray(fcivec, dtype=np.complex128, order="C")
     ci1 = contract_ss(
         fcivec, norb, nelec, nkpts, target_k=target_k,
