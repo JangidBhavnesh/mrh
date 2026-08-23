@@ -67,148 +67,226 @@ def _popcount_uint64(values):
 
 
 def _load_k_contract_lib():
-    """Load and configure the C library for k-FCI contraction."""
+    """Load and configure the C entry points for k-FCI contractions.
+
+    The library exports three kernels:
+
+    ``FCIcontract_1e_k``
+        Applies the one-electron Hamiltonian.  It receives the one-electron
+        integrals, packed input/output CI vectors, the six-column momentum
+        block table, alpha/beta link tables, string IDs and their momentum
+        offsets, global-to-block-local string maps, and the momentum label
+        representing zero transfer.  The kernel initializes the output.
+
+    ``FCIcontract_2e_k``
+        Applies the two-electron Hamiltonian from explicit structural maps.
+        The AB, AA, and BB arrays give source/destination addresses, fermionic
+        signs, and flattened ERI indices, grouped by source and destination
+        momentum blocks.  The kernel initializes the output and evaluates all
+        terms represented by those maps.  When ``explicit_ab`` is false, the
+        AB arrays are empty, so this call evaluates only the mapped AA and BB
+        terms before the streamed AB call below.
+
+    ``FCIcontract_2e_k_stream_ab``
+        Generates opposite-spin (alpha-beta) link pairs while contracting,
+        instead of storing the potentially very large explicit AB map.  Here
+        "stream" means on-the-fly traversal, not file or network I/O.  It is
+        also not restricted to contractions outside a momentum block: it
+        includes both within-block and between-block AB contributions.  An
+        alpha transfer ``dK`` is paired with the beta transfer ``-dK``, so a
+        source and destination may have different individual-spin momentum
+        blocks while remaining in the same total-momentum sector.  The kernel
+        accumulates into the output already containing the mapped AA/BB terms.
+
+    Every pointer below refers to a caller-owned, C-contiguous NumPy array.
+    ``ctypes`` records only the pointer/integer ABI; the Python call sites are
+    responsible for supplying the documented dtype, shape, and lifetime.
+
+    Returns
+    -------
+    ctypes.CDLL
+        Cached handle to ``libpbc_fci_contract_k``.
+    """
     global libpbcfci_k
     if libpbcfci_k is None:
         libpbcfci_k = load_library("libpbc_fci_contract_k")
+        # FCIcontract_1e_k arguments, in C-signature order.
         libpbcfci_k.FCIcontract_1e_k.argtypes = [
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_int,
-            ctypes.c_int,
-            ctypes.c_int,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_int,
-            ctypes.c_int,
-            ctypes.c_void_p,
-            ctypes.c_int,
-            ctypes.c_int,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_int,
+            ctypes.c_void_p,  # h1e: complex128[nkpts, ncas, ncas]
+            ctypes.c_void_p,  # ci0: input complex128[sector_size]
+            ctypes.c_void_p,  # ci1: output complex128[sector_size]
+            ctypes.c_int,     # nkpts: number of momentum points
+            ctypes.c_int,     # ncas: active orbitals per k-point
+            ctypes.c_int,     # nblocks: number of packed CI blocks
+            ctypes.c_void_p,  # blocks: int32[nblocks, 6]
+            ctypes.c_void_p,  # linka: int32[nstra, nlinka, 8]
+            ctypes.c_int,     # nstra: total number of alpha strings
+            ctypes.c_int,     # nlinka: alpha links per string
+            ctypes.c_void_p,  # linkb: int32[nstrb, nlinkb, 8]
+            ctypes.c_int,     # nstrb: total number of beta strings
+            ctypes.c_int,     # nlinkb: beta links per string
+            ctypes.c_void_p,  # stra_ids: alpha string IDs grouped by k
+            ctypes.c_void_p,  # stra_offsets: offsets into stra_ids
+            ctypes.c_void_p,  # strb_ids: beta string IDs grouped by k
+            ctypes.c_void_p,  # strb_offsets: offsets into strb_ids
+            ctypes.c_void_p,  # str2tot_a: alpha global-to-local map
+            ctypes.c_void_p,  # str2tot_b: beta global-to-local map
+            ctypes.c_int,     # dk_zero: label of zero momentum transfer
         ]
         libpbcfci_k.FCIcontract_1e_k.restype = None
+
+        # FCIcontract_2e_k arguments, in C-signature order.  Each ``*_addr``
+        # is local to its source/destination packed block; each ``*_eri_idx``
+        # indexes the flattened complex ERI array.
         libpbcfci_k.FCIcontract_2e_k.argtypes = [
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_int,
-            ctypes.c_int,
-            ctypes.c_int,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_int,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
+            ctypes.c_void_p,  # eri: flattened complex128 k-point ERIs
+            ctypes.c_void_p,  # ci0: input complex128[sector_size]
+            ctypes.c_void_p,  # ci1: output complex128[sector_size]
+            ctypes.c_int,     # nkpts: number of momentum points
+            ctypes.c_int,     # ncas: active orbitals per k-point
+            ctypes.c_int,     # nblocks: number of packed CI blocks
+            ctypes.c_void_p,  # blocks: int32[nblocks, 6]
+            ctypes.c_void_p,  # ab_group_tab: [dst_offset, begin, end]
+            ctypes.c_void_p,  # ab_group_offsets: groups by source block
+            ctypes.c_void_p,  # ab_src_addr: AB source determinant addresses
+            ctypes.c_void_p,  # ab_dst_addr: AB target determinant addresses
+            ctypes.c_void_p,  # ab_sign: AB products of fermionic signs
+            ctypes.c_void_p,  # ab_eri_idx_ab: ERI indices in AB ordering
+            ctypes.c_void_p,  # ab_eri_idx_ba: ERI indices in BA ordering
+            ctypes.c_int,     # nab_entries: number of explicit AB entries
+            ctypes.c_void_p,  # aa_group_tab: [dst, dst_na, begin, end]
+            ctypes.c_void_p,  # aa_group_offsets: groups by source block
+            ctypes.c_void_p,  # aa_src_addr: alpha source-row addresses
+            ctypes.c_void_p,  # aa_dst_addr: alpha target-row addresses
+            ctypes.c_void_p,  # aa_sign: alpha-alpha fermionic signs
+            ctypes.c_void_p,  # aa_eri_idx: alpha-alpha ERI indices
+            ctypes.c_void_p,  # bb_group_tab: [dst, dst_nb, begin, end]
+            ctypes.c_void_p,  # bb_group_offsets: groups by source block
+            ctypes.c_void_p,  # bb_src_addr: beta source-column addresses
+            ctypes.c_void_p,  # bb_dst_addr: beta target-column addresses
+            ctypes.c_void_p,  # bb_sign: beta-beta fermionic signs
+            ctypes.c_void_p,  # bb_eri_idx: beta-beta ERI indices
         ]
         libpbcfci_k.FCIcontract_2e_k.restype = None
+
+        # FCIcontract_2e_k_stream_ab arguments.  Unlike the mapped kernel, it
+        # needs raw link and string-layout tables to construct AB pairs on the
+        # fly.  It adds to ci1 rather than clearing it.
         libpbcfci_k.FCIcontract_2e_k_stream_ab.argtypes = [
-            ctypes.c_void_p,  # eri
-            ctypes.c_void_p,  # ci0
-            ctypes.c_void_p,  # ci1
-            ctypes.c_int,     # nkpts
-            ctypes.c_int,     # ncas
-            ctypes.c_int,     # nblocks
-            ctypes.c_void_p,  # blocks
-            ctypes.c_void_p,  # linka
-            ctypes.c_int,     # nstra
-            ctypes.c_int,     # nlinka
-            ctypes.c_void_p,  # linkb
-            ctypes.c_int,     # nstrb
-            ctypes.c_int,     # nlinkb
-            ctypes.c_void_p,  # stra_ids
-            ctypes.c_void_p,  # stra_offsets
-            ctypes.c_void_p,  # strb_ids
-            ctypes.c_void_p,  # strb_offsets
-            ctypes.c_void_p,  # str2tot_a
-            ctypes.c_void_p,  # str2tot_b
-            ctypes.c_void_p,  # kneg
+            ctypes.c_void_p,  # eri: flattened complex128 k-point ERIs
+            ctypes.c_void_p,  # ci0: input complex128[sector_size]
+            ctypes.c_void_p,  # ci1: accumulated complex128 output
+            ctypes.c_int,     # nkpts: number of momentum points
+            ctypes.c_int,     # ncas: active orbitals per k-point
+            ctypes.c_int,     # nblocks: number of packed CI blocks
+            ctypes.c_void_p,  # blocks: int32[nblocks, 6]
+            ctypes.c_void_p,  # linka: int32[nstra, nlinka, 8]
+            ctypes.c_int,     # nstra: total number of alpha strings
+            ctypes.c_int,     # nlinka: alpha links per string
+            ctypes.c_void_p,  # linkb: int32[nstrb, nlinkb, 8]
+            ctypes.c_int,     # nstrb: total number of beta strings
+            ctypes.c_int,     # nlinkb: beta links per string
+            ctypes.c_void_p,  # stra_ids: alpha string IDs grouped by k
+            ctypes.c_void_p,  # stra_offsets: offsets into stra_ids
+            ctypes.c_void_p,  # strb_ids: beta string IDs grouped by k
+            ctypes.c_void_p,  # strb_offsets: offsets into strb_ids
+            ctypes.c_void_p,  # str2tot_a: alpha global-to-local map
+            ctypes.c_void_p,  # str2tot_b: beta global-to-local map
+            ctypes.c_void_p,  # kneg[dK]: additive inverse of dK
         ]
         libpbcfci_k.FCIcontract_2e_k_stream_ab.restype = None
     return libpbcfci_k
 
 
 def _load_k_hdiag_lib():
-    """Load and configure the C library for the k-FCI diagonal."""
+    """Load and configure the C entry points for the k-FCI diagonal.
+
+    ``FCIhdiag_k`` initializes ``hdiag`` and adds its one-electron, mapped AB,
+    mapped AA, and mapped BB contributions.  In addition to the integral,
+    block, link, and string-layout arrays, it receives the same explicit
+    two-electron structural maps used by ``FCIcontract_2e_k``.  Only map
+    entries whose source and destination are the same determinant contribute
+    to the diagonal.
+
+    ``FCIhdiag_k_stream_ab`` is called afterward when the contract map omits
+    explicit AB entries.  It reconstructs and accumulates every diagonal AB
+    contribution directly from the alpha/beta links.  Unlike the full
+    streamed contraction, this routine is not an out-of-block contraction:
+    a Hamiltonian diagonal element has identical source and destination
+    determinants, so it never couples distinct determinants or blocks.  Its
+    "streaming" label only means that no explicit AB structural map is stored.
+
+    All pointer arguments are caller-owned, C-contiguous NumPy arrays.  The
+    comments beside the ``argtypes`` entries document their required order and
+    meaning; ``ctypes`` itself cannot validate the pointed-to dtype or shape.
+
+    Returns
+    -------
+    ctypes.CDLL
+        Cached handle to ``libpbc_kfci_hdiag``.
+    """
     global libpbckfci_hdiag
     if libpbckfci_hdiag is None:
         libpbckfci_hdiag = load_library("libpbc_kfci_hdiag")
+        # FCIhdiag_k arguments, in C-signature order.
         libpbckfci_hdiag.FCIhdiag_k.argtypes = [
-            ctypes.c_void_p,  # hdiag
-            ctypes.c_void_p,  # h1e
-            ctypes.c_void_p,  # eri
-            ctypes.c_int,     # nkpts
-            ctypes.c_int,     # ncas
-            ctypes.c_int,     # nblocks
-            ctypes.c_void_p,  # blocks
-            ctypes.c_void_p,  # linka
-            ctypes.c_int,     # nlinka
-            ctypes.c_void_p,  # linkb
-            ctypes.c_int,     # nlinkb
-            ctypes.c_void_p,  # stra_ids
-            ctypes.c_void_p,  # stra_offsets
-            ctypes.c_void_p,  # strb_ids
-            ctypes.c_void_p,  # strb_offsets
-            ctypes.c_int,     # dk_zero
-            ctypes.c_void_p,  # ab_group_tab
-            ctypes.c_void_p,  # ab_group_offsets
-            ctypes.c_void_p,  # ab_src_addr
-            ctypes.c_void_p,  # ab_dst_addr
-            ctypes.c_void_p,  # ab_sign
-            ctypes.c_void_p,  # ab_eri_idx_ab
-            ctypes.c_void_p,  # ab_eri_idx_ba
-            ctypes.c_void_p,  # aa_group_tab
-            ctypes.c_void_p,  # aa_group_offsets
-            ctypes.c_void_p,  # aa_src_addr
-            ctypes.c_void_p,  # aa_dst_addr
-            ctypes.c_void_p,  # aa_sign
-            ctypes.c_void_p,  # aa_eri_idx
-            ctypes.c_void_p,  # bb_group_tab
-            ctypes.c_void_p,  # bb_group_offsets
-            ctypes.c_void_p,  # bb_src_addr
-            ctypes.c_void_p,  # bb_dst_addr
-            ctypes.c_void_p,  # bb_sign
-            ctypes.c_void_p,  # bb_eri_idx
+            ctypes.c_void_p,  # hdiag: output complex128[sector_size]
+            ctypes.c_void_p,  # h1e: complex128[nkpts, ncas, ncas]
+            ctypes.c_void_p,  # eri: flattened complex128 k-point ERIs
+            ctypes.c_int,     # nkpts: number of momentum points
+            ctypes.c_int,     # ncas: active orbitals per k-point
+            ctypes.c_int,     # nblocks: number of packed CI blocks
+            ctypes.c_void_p,  # blocks: int32[nblocks, 6]
+            ctypes.c_void_p,  # linka: int32 alpha link table
+            ctypes.c_int,     # nlinka: alpha links per string
+            ctypes.c_void_p,  # linkb: int32 beta link table
+            ctypes.c_int,     # nlinkb: beta links per string
+            ctypes.c_void_p,  # stra_ids: alpha string IDs grouped by k
+            ctypes.c_void_p,  # stra_offsets: offsets into stra_ids
+            ctypes.c_void_p,  # strb_ids: beta string IDs grouped by k
+            ctypes.c_void_p,  # strb_offsets: offsets into strb_ids
+            ctypes.c_int,     # dk_zero: label of zero momentum transfer
+            ctypes.c_void_p,  # ab_group_tab: [dst_offset, begin, end]
+            ctypes.c_void_p,  # ab_group_offsets: groups by source block
+            ctypes.c_void_p,  # ab_src_addr: AB source determinant addresses
+            ctypes.c_void_p,  # ab_dst_addr: AB target determinant addresses
+            ctypes.c_void_p,  # ab_sign: AB products of fermionic signs
+            ctypes.c_void_p,  # ab_eri_idx_ab: ERI indices in AB ordering
+            ctypes.c_void_p,  # ab_eri_idx_ba: ERI indices in BA ordering
+            ctypes.c_void_p,  # aa_group_tab: [dst, dst_na, begin, end]
+            ctypes.c_void_p,  # aa_group_offsets: groups by source block
+            ctypes.c_void_p,  # aa_src_addr: alpha source-row addresses
+            ctypes.c_void_p,  # aa_dst_addr: alpha target-row addresses
+            ctypes.c_void_p,  # aa_sign: alpha-alpha fermionic signs
+            ctypes.c_void_p,  # aa_eri_idx: alpha-alpha ERI indices
+            ctypes.c_void_p,  # bb_group_tab: [dst, dst_nb, begin, end]
+            ctypes.c_void_p,  # bb_group_offsets: groups by source block
+            ctypes.c_void_p,  # bb_src_addr: beta source-column addresses
+            ctypes.c_void_p,  # bb_dst_addr: beta target-column addresses
+            ctypes.c_void_p,  # bb_sign: beta-beta fermionic signs
+            ctypes.c_void_p,  # bb_eri_idx: beta-beta ERI indices
         ]
         libpbckfci_hdiag.FCIhdiag_k.restype = None
+
+        # FCIhdiag_k_stream_ab arguments.  It needs only raw link/layout data
+        # because it constructs the diagonal AB contribution on the fly and
+        # accumulates it into the hdiag initialized by FCIhdiag_k.
         libpbckfci_hdiag.FCIhdiag_k_stream_ab.argtypes = [
-            ctypes.c_void_p,  # hdiag
-            ctypes.c_void_p,  # eri
-            ctypes.c_int,     # nkpts
-            ctypes.c_int,     # ncas
-            ctypes.c_int,     # nblocks
-            ctypes.c_void_p,  # blocks
-            ctypes.c_void_p,  # linka
-            ctypes.c_int,     # nlinka
-            ctypes.c_void_p,  # linkb
-            ctypes.c_int,     # nlinkb
-            ctypes.c_void_p,  # stra_ids
-            ctypes.c_void_p,  # stra_offsets
-            ctypes.c_void_p,  # strb_ids
-            ctypes.c_void_p,  # strb_offsets
-            ctypes.c_int,     # dk_zero
+            ctypes.c_void_p,  # hdiag: accumulated complex128 diagonal
+            ctypes.c_void_p,  # eri: flattened complex128 k-point ERIs
+            ctypes.c_int,     # nkpts: number of momentum points
+            ctypes.c_int,     # ncas: active orbitals per k-point
+            ctypes.c_int,     # nblocks: number of packed CI blocks
+            ctypes.c_void_p,  # blocks: int32[nblocks, 6]
+            ctypes.c_void_p,  # linka: int32 alpha link table
+            ctypes.c_int,     # nlinka: alpha links per string
+            ctypes.c_void_p,  # linkb: int32 beta link table
+            ctypes.c_int,     # nlinkb: beta links per string
+            ctypes.c_void_p,  # stra_ids: alpha string IDs grouped by k
+            ctypes.c_void_p,  # stra_offsets: offsets into stra_ids
+            ctypes.c_void_p,  # strb_ids: beta string IDs grouped by k
+            ctypes.c_void_p,  # strb_offsets: offsets into strb_ids
+            ctypes.c_int,     # dk_zero: label of zero momentum transfer
         ]
         libpbckfci_hdiag.FCIhdiag_k_stream_ab.restype = None
     return libpbckfci_hdiag
@@ -741,6 +819,11 @@ def contract_2e_k(eri, fcivec, norb, nelec, nkpts, target_k,
             contract_map.bb_eri_idx.ctypes.data_as(ctypes.c_void_p),
         )
         if not getattr(contract_map, "explicit_ab", True):
+            # The mapped call above cleared sigma_ci and added the explicit
+            # AA/BB terms.  Complete it with all AB terms generated directly
+            # from links.  These may stay in one (ka, kb) block or connect two
+            # such blocks; opposite alpha/beta transfers always preserve the
+            # selected total-momentum sector.
             link_indexa, link_indexb = contract_map.link_index
             libpbcfci.FCIcontract_2e_k_stream_ab(
                 eri.ctypes.data_as(ctypes.c_void_p),
@@ -1073,6 +1156,10 @@ def make_hdiag(h1e, eri, norb, nelec, nkpts, target_k=0, link_index=None,
             contract_map.bb_eri_idx.ctypes.data_as(ctypes.c_void_p),
         )
         if not getattr(contract_map, "explicit_ab", True):
+            # FCIhdiag_k initialized hdiag and added 1e plus mapped AA/BB
+            # terms.  The streamed kernel adds the omitted AB diagonal terms
+            # without constructing an explicit AB map.  A diagonal operation
+            # never transfers amplitude between packed momentum blocks.
             libpbcfci.FCIhdiag_k_stream_ab(
                 hdiag.ctypes.data_as(ctypes.c_void_p),
                 eri.ctypes.data_as(ctypes.c_void_p),
