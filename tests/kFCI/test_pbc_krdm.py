@@ -1,112 +1,17 @@
 #!/usr/bin/env python
-
-"""Tests for momentum-sector FCI reduced density matrices."""
-
 import unittest
 
 import numpy as np
-import scipy.linalg
-
-from pyscf import fci
 
 from mrh.my_pyscf.pbc.fci import direct_spin1_cplx
 from mrh.my_pyscf.pbc.fci import direct_spin1_kfci
-from mrh.my_pyscf.pbc.fci import kcistrings
 from mrh.my_pyscf.pbc.fci import krdm_helper
-from mrh.my_pyscf.pbc.fci.direct_spin1_kfci import _unpack
-from mrh.my_pyscf.pbc.fci.kcistrings import (
-    gen_k_sector_linkstr_info,
-    gen_k_sector_maps,
-)
 
+from kfci_test_utils import KFCIHelperFunctions
 
-class KFCIHelperFunctions:
-    """Convert integrals and CI vectors between sector and full layouts."""
+# Author: Bhavnesh Jangid
 
-    @staticmethod
-    def h1e_k_to_full(h1e_k):
-        """Arrange k-space one-electron integrals as a full matrix."""
-        return scipy.linalg.block_diag(*h1e_k)
-
-    @staticmethod
-    def eri_k_to_full(eri_k):
-        """Arrange momentum-conserving k-space integrals as a full tensor."""
-        nkpts, ncas = eri_k.shape[0], eri_k.shape[-1]
-        norb = nkpts * ncas
-        kmom = kcistrings.make_kpoint_momentum(nkpts)
-        eri_full = np.zeros((norb,) * 4, dtype=eri_k.dtype)
-        for kp, kq, kr in np.ndindex(nkpts, nkpts, nkpts):
-            ks = int(kmom.kconserv[kp, kq, kr])
-            p0, q0, r0, s0 = (
-                kp * ncas, kq * ncas, kr * ncas, ks * ncas)
-            eri_full[
-                p0:p0 + ncas, q0:q0 + ncas,
-                r0:r0 + ncas, s0:s0 + ncas] = eri_k[kp, kq, kr]
-        return eri_full
-
-    @staticmethod
-    def eri_full_to_k(eri_full, nkpts, ncas):
-        """Extract momentum-conserving blocks from a full ERI tensor."""
-        eri_view = eri_full.reshape((nkpts, ncas) * 4)
-        kmom = kcistrings.make_kpoint_momentum(nkpts)
-        eri_k = np.zeros(
-            (nkpts,) * 3 + (ncas,) * 4, dtype=eri_full.dtype)
-        for kp, kq, kr in np.ndindex(nkpts, nkpts, nkpts):
-            ks = int(kmom.kconserv[kp, kq, kr])
-            eri_k[kp, kq, kr] = eri_view[
-                kp, :, kq, :, kr, :, ks, :]
-        return eri_k
-
-    @staticmethod
-    def get_ksector_info(norb, nelec, nkpts, target_k):
-        """Generate momentum-sector string maps and block information."""
-        link_indexa, link_indexb = _unpack(
-            norb, nelec, None, nkpts)
-        straid_k, strbid_k = gen_k_sector_maps(
-            link_indexa, link_indexb, nkpts)[:2]
-        blocks = gen_k_sector_linkstr_info(
-            link_indexa, link_indexb, nkpts, target_k)
-        return link_indexa, link_indexb, straid_k, strbid_k, blocks
-
-    @staticmethod
-    def embed_sector_fcivec_to_full_ci(
-            fcivec_k, blocks, straid_k, strbid_k, nstra, nstrb):
-        """Embed a packed momentum-sector vector in the full CI table."""
-        ci_full = np.zeros((nstra, nstrb), dtype=fcivec_k.dtype)
-        for block in blocks:
-            ka, kb, na, nb, offset, size = map(int, block)
-            ci_block = fcivec_k[offset:offset + size].reshape(na, nb)
-            ci_full[np.ix_(straid_k[ka], strbid_k[kb])] = ci_block
-        return ci_full
-
-    def random_ksector_fcivec(self, nkpts, ncas, nelec, target_k=0,
-                              seed=12):
-        """Generate a normalized random sector vector and its maps."""
-        rng = np.random.default_rng(seed)
-        norb = nkpts * ncas
-        sector_info = self.get_ksector_info(
-            norb, nelec, nkpts, target_k)
-        link_indexa, link_indexb, straid_k, strbid_k, blocks = sector_info
-        sector_size = int(blocks[:, 5].sum())
-        fcivec_k = (rng.normal(size=sector_size)
-                    + 1j * rng.normal(size=sector_size))
-        fcivec_k /= np.linalg.norm(fcivec_k)
-        return (
-            fcivec_k, link_indexa, link_indexb, straid_k, strbid_k,
-            blocks)
-
-    def embed_random_ksector_fcivec_to_full_ci(
-            self, nkpts, ncas, nelec, target_k=0, seed=12):
-        """Generate a random sector vector and embed it in full CI space."""
-        norb = nkpts * ncas
-        sector_data = self.random_ksector_fcivec(
-            nkpts, ncas, nelec, target_k=target_k, seed=seed)
-        fcivec_k, linka, linkb, straid_k, strbid_k, blocks = sector_data
-        nstra = fci.cistring.num_strings(norb, nelec[0])
-        nstrb = fci.cistring.num_strings(norb, nelec[1])
-        ci_full = self.embed_sector_fcivec_to_full_ci(
-            fcivec_k, blocks, straid_k, strbid_k, nstra, nstrb)
-        return fcivec_k, ci_full, linka, linkb, straid_k, strbid_k, blocks
+"""Tests for momentum-sector FCI reduced density matrices."""
 
 
 def assert_rdm_consistency(rdm1, rdm2, rdm1s, rdm2s, rdm1_direct,
@@ -156,7 +61,7 @@ def assert_same_rdm(actual, reference):
 
 
 class KnownValues(unittest.TestCase):
-
+    # nkpts, ncas, nelec
     CASES = [
         (2, 2, (1, 1)),
         (2, 2, (2, 0)),
@@ -203,7 +108,7 @@ class KnownValues(unittest.TestCase):
         helper = KFCIHelperFunctions()
         for parity, nkpts, ncas, nelec in self.MULTIPLICITY_PARITY_CASES:
             for target_k in range(nkpts):
-                for reorder in (False, True):
+                for reorder in (False, True): # Comparing reordered and unreordered RDMs as well.
                     with self.subTest(
                             multiplicity_parity=parity, nkpts=nkpts,
                             ncas=ncas, nelec=nelec, target_k=target_k,
@@ -228,6 +133,7 @@ class KnownValues(unittest.TestCase):
                         reference12s = krdm_helper.make_rdm12s_ref(
                             fcivec, norb, nelec, nkpts,
                             target_k=target_k, reorder=reorder)
+                        # Comparing the direct and reference 1-2 RDMs
                         for actual_group, reference_group in zip(
                                 direct12s, reference12s):
                             for actual, reference in zip(
