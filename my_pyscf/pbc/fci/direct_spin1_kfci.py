@@ -712,7 +712,7 @@ def contract_2e_k(eri, fcivec, norb, nelec, nkpts, target_k,
     are packed into sparse source/destination block groups.
     For now I am using OpenMP threads follow lib.num_threads(), however in future
     need to benchmark and come up with a better threading strategy.
-    
+
     args:
         eri : ndarray, shape (nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas)
             Two-electron integrals in k-space, in chemist notation.
@@ -910,6 +910,54 @@ def contract_ham_k(h1e, eri, fcivec, norb, nelec, nkpts, target_k=0,
 
 def _add_same_spin_hdiag_py(hdiag, eri_flat, blocks, group_tab, group_offsets,
                             src_addr, dst_addr, sign, eri_idx, nkpts, spin):
+    """Accumulate diagonal AA or BB terms from a structural contraction map.
+
+    A same-spin structural entry describes a transformation of either an
+    alpha-string row (``spin == "a"``) or a beta-string column
+    (``spin == "b"``).  A Hamiltonian-diagonal contribution must satisfy both
+    of the following conditions:
+
+    * its source and destination momentum blocks have the same packed offset;
+    * its source and destination same-spin addresses are equal.
+
+    Entries that do not meet both conditions are off-diagonal and are skipped.
+    For an AA entry, the beta string is unchanged, so the selected alpha-row
+    value is added across every beta string in the block.  For a BB entry, the
+    alpha string is unchanged and the beta-column value is added across every
+    alpha string.
+
+    Parameters
+    ----------
+    hdiag : ndarray, shape (sector_size,)
+        Packed Hamiltonian diagonal.  It is updated in place.
+    eri_flat : ndarray
+        C-order flattened two-electron integral array.  ``eri_idx`` contains
+        indices into this array.
+    blocks : ndarray, shape (nblocks, 6)
+        Packed CI block records ``[ka, kb, na, nb, offset, size]``.
+    group_tab : ndarray, shape (ngroups, 4)
+        Same-spin group records
+        ``[destination_offset, destination_spin_size, entry0, entry1]``.
+    group_offsets : ndarray, shape (nkpts * nkpts + 1,)
+        Ranges of ``group_tab`` belonging to each flattened source block key
+        ``ka * nkpts + kb``.
+    src_addr, dst_addr : ndarray, shape (nentries,)
+        Source and destination row indices for AA, or column indices for BB,
+        local to their packed momentum blocks.
+    sign : ndarray, shape (nentries,)
+        Product of the two fermionic excitation signs for each entry.
+    eri_idx : ndarray, shape (nentries,)
+        Flattened ERI index associated with each structural entry.
+    nkpts : int
+        Number of momentum points; used to flatten ``(ka, kb)`` block keys.
+    spin : {"a", "b"}
+        Selects the alpha-alpha or beta-beta contraction map.
+
+    Returns
+    -------
+    None
+        Contributions are accumulated directly into ``hdiag``.
+    """
     block_offsets = -np.ones(nkpts * nkpts, dtype=np.int64)
     block_na = np.zeros(nkpts * nkpts, dtype=np.int64)
     block_nb = np.zeros(nkpts * nkpts, dtype=np.int64)
@@ -951,14 +999,15 @@ def _add_same_spin_hdiag_py(hdiag, eri_flat, blocks, group_tab, group_offsets,
 
 def make_hdiag_py(h1e, eri, norb, nelec, nkpts, target_k=0, link_index=None,
                   contract_map=None, log_obj=None, kmom=None):
-    '''
-    Diagonal of the k-FCI Hamiltonian in a fixed total momentum sector.
-    The diagonal is assembled from diagonal one-electron links and diagonal
-    entries in the precomputed two-electron contraction structures.
+    """Python reference implementation of :func:`make_hdiag`.
 
-    ``kmom`` may provide precomputed :class:`KPointMomentum` arithmetic
-    tables; they are constructed from ``nkpts`` when omitted.
-    '''
+    See ``make_hdiag`` for the argument and return-value documentation.  This
+    reference path requests an explicit AB structural map, then retains only
+    entries with identical source and destination determinants.  It evaluates
+    the one-electron, AB, AA, and BB diagonal contributions separately for
+    readability and testing.  Unlike the compiled path, its result dtype is
+    ``numpy.result_type(h1e, eri)`` rather than unconditionally ``complex128``.
+    """
     log = logger.new_logger(
         log_obj, getattr(log_obj, "verbose", logger.QUIET))
     t0 = (logger.process_clock(), logger.perf_counter())
@@ -1078,14 +1127,61 @@ def make_hdiag_py(h1e, eri, norb, nelec, nkpts, target_k=0, link_index=None,
 
 def make_hdiag(h1e, eri, norb, nelec, nkpts, target_k=0, link_index=None,
                contract_map=None, log_obj=None, kmom=None):
-    '''
-    C implementation of the diagonal of the k-FCI Hamiltonian in a fixed total
-    momentum sector.  The result is returned as complex128 to match the C
-    kernels used for the k-FCI Hamiltonian contractions.
+    """Build the k-FCI Hamiltonian diagonal in one total-momentum sector.
 
-    ``kmom`` may provide precomputed :class:`KPointMomentum` arithmetic
-    tables; they are constructed from ``nkpts`` when omitted.
-    '''
+    The returned element at packed address ``I`` is ``<I|H|I>``.  Determinants
+    are ordered by the six-column ``contract_map.blocks`` table, with each
+    block holding alpha strings of momentum ``ka`` and beta strings of momentum
+    ``kb``.  The compiled kernel initializes the output and adds four kinds of
+    diagonal contribution:
+
+    * one-electron self-links for the alpha and beta strings;
+    * opposite-spin alpha-beta (AB) two-electron entries;
+    * same-spin alpha-alpha (AA) entries, broadcast over beta spectators;
+    * same-spin beta-beta (BB) entries, broadcast over alpha spectators.
+
+    When ``contract_map.explicit_ab`` is false, the first C kernel adds the
+    one-electron and mapped AA/BB terms.  A second kernel then generates the AB
+    diagonal directly from link tables and accumulates it into the result.
+    Streaming avoids storing the large explicit AB map; because only diagonal
+    elements are requested, it never transfers amplitude between determinants
+    or packed momentum blocks.
+
+    Parameters
+    ----------
+    h1e : ndarray, shape (nkpts, ncas, ncas)
+        One-electron integrals in k-space, where
+        ``ncas = norb // nkpts``.  The integral is diagonal in k-point.
+    eri : ndarray, shape (nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas)
+        Two-electron integrals in the k-point storage convention used by
+        :func:`contract_2e_k`.
+    norb : int
+        Total number of active orbitals across all k-points.  It must be
+        divisible by ``nkpts``.
+    nelec : int or tuple of two ints
+        Total electron count or ``(N_alpha, N_beta)``.
+    nkpts : int
+        Number of k-points or momentum labels.
+    target_k : int, optional
+        Total-momentum sector whose packed determinant diagonal is built.
+    link_index : tuple of two ndarrays or KFCIContractMap or None, optional
+        Alpha and beta k-aware link tables.  A ``KFCIContractMap`` may also be
+        supplied here for compatibility; otherwise missing tables are built.
+    contract_map : KFCIContractMap or None, optional
+        Precomputed packed layout and two-electron structural maps.  Supplying
+        it avoids rebuilding those arrays.
+    log_obj : object or None, optional
+        Object used to configure PySCF timing and verbosity messages.
+    kmom : KPointMomentum or None, optional
+        Precomputed momentum arithmetic.  It is built from ``nkpts`` when no
+        contract map or explicit momentum object is supplied.
+
+    Returns
+    -------
+    hdiag : ndarray, shape (sector_size,), dtype complex128
+        Hamiltonian diagonal in the same packed block order as the sector CI
+        vectors consumed by :func:`contract_1e_k` and :func:`contract_2e_k`.
+    """
     log = logger.new_logger(
         log_obj, getattr(log_obj, "verbose", logger.QUIET))
     t0 = (logger.process_clock(), logger.perf_counter())
@@ -1252,8 +1348,9 @@ def make_hamiltonian_k(h1e, eri, norb, nelec, nkpts, target_k=0,
     return hmat
 
 
-def energy(h1e, eri, fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
-           contract_map=None, log_obj=None, kmom=None, contract_fn=None):
+def energy(h1e, eri, fcivec, norb, nelec, nkpts, target_k=0,
+           link_index=None, contract_map=None, log_obj=None,
+           kmom=None, contract_fn=None):
     '''
     Compute the k-FCI electronic energy for a CI vector.
     The one-electron and two-electron Hamiltonian contractions are evaluated
@@ -1287,6 +1384,12 @@ def make_rdm1s(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
     """Build spin-separated one-particle RDMs for a k-FCI vector.
 
     ``kmom`` optionally supplies precomputed momentum-arithmetic tables.
+
+    Returns
+    -------
+    rdm1s : tuple of two ndarrays
+        ``(dm1a, dm1b)``.  Each spin-resolved one-particle RDM has shape
+        ``(norb, norb)`` and dtype ``complex128``.
     """
     return krdm_helper.make_rdm1s(
         fcivec, norb, nelec, nkpts, target_k=target_k,
@@ -1298,6 +1401,11 @@ def make_rdm1(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
     """Build the spin-summed one-particle RDM for a k-FCI vector.
 
     ``kmom`` optionally supplies precomputed momentum-arithmetic tables.
+
+    Returns
+    -------
+    dm1 : ndarray, shape (norb, norb), dtype complex128
+        Spin-summed one-particle RDM.
     """
     return krdm_helper.make_rdm1(
         fcivec, norb, nelec, nkpts, target_k=target_k,
@@ -1307,7 +1415,17 @@ def make_rdm1(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
 def make_rdm12s(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
                 reorder=True, spin=None, kmom=None, kconserv=None):
     """Build spin-separated one- and two-particle RDMs.
+
     ``kmom`` optionally supplies precomputed momentum-arithmetic tables.
+
+    Returns
+    -------
+    rdm1s : tuple of two ndarrays
+        ``(dm1a, dm1b)``.  Each array has shape ``(norb, norb)`` and dtype
+        ``complex128``.
+    rdm2s : tuple of three ndarrays
+        ``(dm2aa, dm2ab, dm2bb)``.  Each spin-resolved two-particle RDM has
+        shape ``(norb, norb, norb, norb)`` and dtype ``complex128``.
     """
     return krdm_helper.make_rdm12s(
         fcivec, norb, nelec, nkpts, target_k=target_k,
@@ -1317,7 +1435,15 @@ def make_rdm12s(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
 def make_rdm12(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
                reorder=True, spin=None, kmom=None, kconserv=None):
     """Build spin-summed one- and two-particle RDMs.
+
     ``kmom`` optionally supplies precomputed momentum-arithmetic tables.
+
+    Returns
+    -------
+    dm1 : ndarray, shape (norb, norb), dtype complex128
+        Spin-summed one-particle RDM.
+    dm2 : ndarray, shape (norb, norb, norb, norb), dtype complex128
+        Spin-summed two-particle RDM.
     """
     return krdm_helper.make_rdm12(
         fcivec, norb, nelec, nkpts, target_k=target_k,
@@ -1829,7 +1955,14 @@ class FCISolver(direct_spin1.FCISolver):
 
     def make_rdm1s(self, fcivec, norb, nelec, nkpts=None, target_k=None,
                    link_index=None):
-        """Build spin-separated one-particle RDMs."""
+        """Build spin-separated one-particle RDMs.
+
+        Returns
+        -------
+        rdm1s : tuple of two ndarrays
+            ``(dm1a, dm1b)``, each with shape ``(norb, norb)`` and dtype
+            ``complex128``.
+        """
         nkpts, target_k = self._resolve_sector(nkpts, target_k)
         t0 = (logger.process_clock(), logger.perf_counter())
         result = make_rdm1s(
@@ -1841,7 +1974,13 @@ class FCISolver(direct_spin1.FCISolver):
 
     def make_rdm1(self, fcivec, norb, nelec, nkpts=None, target_k=None,
                   link_index=None):
-        """Build the spin-summed one-particle RDM."""
+        """Build the spin-summed one-particle RDM.
+
+        Returns
+        -------
+        dm1 : ndarray, shape (norb, norb), dtype complex128
+            Spin-summed one-particle RDM.
+        """
         nkpts, target_k = self._resolve_sector(nkpts, target_k)
         t0 = (logger.process_clock(), logger.perf_counter())
         result = make_rdm1(
@@ -1853,7 +1992,17 @@ class FCISolver(direct_spin1.FCISolver):
 
     def make_rdm12s(self, fcivec, norb, nelec, nkpts=None, target_k=None,
                     link_index=None, reorder=True):
-        """Build spin-separated one- and two-particle RDMs."""
+        """Build spin-separated one- and two-particle RDMs.
+
+        Returns
+        -------
+        rdm1s : tuple of two ndarrays
+            ``(dm1a, dm1b)``, each with shape ``(norb, norb)`` and dtype
+            ``complex128``.
+        rdm2s : tuple of three ndarrays
+            ``(dm2aa, dm2ab, dm2bb)``, each with shape
+            ``(norb, norb, norb, norb)`` and dtype ``complex128``.
+        """
         nkpts, target_k = self._resolve_sector(nkpts, target_k)
         t0 = (logger.process_clock(), logger.perf_counter())
         result = make_rdm12s(
@@ -1865,7 +2014,15 @@ class FCISolver(direct_spin1.FCISolver):
 
     def make_rdm12(self, fcivec, norb, nelec, nkpts=None, target_k=None,
                    link_index=None, reorder=True):
-        """Build spin-summed one- and two-particle RDMs."""
+        """Build spin-summed one- and two-particle RDMs.
+
+        Returns
+        -------
+        dm1 : ndarray, shape (norb, norb), dtype complex128
+            Spin-summed one-particle RDM.
+        dm2 : ndarray, shape (norb, norb, norb, norb), dtype complex128
+            Spin-summed two-particle RDM.
+        """
         nkpts, target_k = self._resolve_sector(nkpts, target_k)
         t0 = (logger.process_clock(), logger.perf_counter())
         result = make_rdm12(
