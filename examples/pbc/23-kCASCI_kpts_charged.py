@@ -1,4 +1,14 @@
 #!/usr/bin/env python
+
+"""Compute hole and particle energies with charged kCASCI.
+
+Positive ``charge`` removes an electron from the full k-mesh active space;
+negative ``charge`` adds one.  When ``target_k`` is omitted, charged kCASCI
+solves every many-electron momentum sector.  ``band_energies`` then combines
+those results with the neutral reference and reports each pole at the physical
+momentum of the removed or added electron.
+"""
+
 import numpy as np
 
 from pyscf import lib
@@ -6,20 +16,6 @@ from pyscf.pbc import gto
 from pyscf.pbc import scf
 
 from mrh.my_pyscf.pbc import mcscf
-
-"""
-Example of charged kCASCI calculations and extract quasiparticle energies.
-
-This example demonstrate the charged kCASCI to compute the N-1 and N+1 
-active-space problems.  Positive ``charge`` removes one electron from 
-the full k-mesh active space, and a negative ``charge`` adds
-one.  Omitting ``target_k`` makes the charged kCASCI driver reuse the
-transformed integrals while sweeping all allowed total momenta (0 to nkpts-1)
- 
-The ``band_energies`` helper combines the charged energies with the neutral
-reference and maps each many-electron total momentum to the physical momentum
-of the removed or added electron.
-"""
 
 intra_h = 0.74
 inter_h = 1.5
@@ -63,38 +59,39 @@ neutral.kmesh = kmesh
 neutral.fcisolver.conv_tol = 1e-10
 neutral.canonicalization = False
 e_neutral = neutral.kernel(mo_coeff)[0]
-
-# Omitting target_k solves every charged total-momentum sector using the same
-# transformed integrals.
-hole = mcscf.KCASCI(kmf, ncas, nelecas, ncore=0, charge=1,)
-particle = mcscf.KCASCI(kmf, ncas, nelecas, ncore=0, charge=-1,)
-for charged_mc in (hole, particle):
-    charged_mc.kmesh = kmesh
-    charged_mc.fcisolver.conv_tol = 1e-10
-    charged_mc.kernel(mo_coeff)
-
-hole_bands = hole.band_energies(e_neutral)
-particle_bands = particle.band_energies(e_neutral)
-hole_by_k = {band["momentum_index"]: band for band in hole_bands}
-particle_by_k = {band["momentum_index"]: band for band in particle_bands}
-
-print()
-print(f"neutral kCASCI energy     : {e_neutral.real:16.12f}")
-print(f"N-1 active-space sector   : {sum(hole.charged_nelecastot)} "
-      f"electrons in {hole.nkpts * hole.ncas} orbitals")
-print(f"N+1 active-space sector   : {sum(particle.charged_nelecastot)} "
-      f"electrons in {particle.nkpts * particle.ncas} orbitals")
-print()
-print("Quasiparticle energies (Eh)")
-print("  k   scaled kx   N-1 target   removal pole   "
-      "N+1 target   addition pole")
 scaled_kpts = cell.get_scaled_kpts(kpts)
-for k in np.argsort(scaled_kpts[:, 0]):
-    hole_band = hole_by_k[k]
-    particle_band = particle_by_k[k]
-    print(
-        f"{k:3d}  {scaled_kpts[k, 0]:10.6f}  "
-        f"{hole_band['target_k']:10d}  {hole_band['energy'].real:13.8f}  "
-        f"{particle_band['target_k']:10d}  "
-        f"{particle_band['energy'].real:13.8f}"
+
+
+def print_bands(label, mc, bands, pole):
+    """Print one charged sector ordered by physical crystal momentum."""
+    bands = sorted(
+        bands, key=lambda band: scaled_kpts[band["momentum_index"], 0],
     )
+    print(f"\n{label}: {sum(mc.charged_nelecastot)} electrons in "
+          f"{mc.nkpts * mc.ncas} orbitals")
+    print(f"  k   scaled kx   target_k   {pole} pole (Eh)")
+    for band in bands:
+        k = band["momentum_index"]
+        print(f"{k:3d}  {scaled_kpts[k, 0]:10.6f}  "
+              f"{band['target_k']:9d}  {band['energy'].real:17.8f}")
+
+
+# Hole calculation: charge=+1 solves the N-1 sectors.  The helper changes
+# their many-electron total momenta into removed-electron momenta.
+hole = mcscf.KCASCI(kmf, ncas, nelecas, ncore=0, charge=1)
+hole.kmesh = kmesh
+hole.fcisolver.conv_tol = 1e-10
+hole.kernel(mo_coeff)
+
+print(f"\nNeutral kCASCI energy: {e_neutral.real:16.12f}")
+print_bands("Hole (N-1)", hole, hole.band_energies(e_neutral), "removal")
+
+# Particle calculation: charge=-1 independently solves the N+1 sectors and
+# maps them to the momentum of the added electron.
+particle = mcscf.KCASCI(kmf, ncas, nelecas, ncore=0, charge=-1)
+particle.kmesh = kmesh
+particle.fcisolver.conv_tol = 1e-10
+particle.kernel(mo_coeff)
+print_bands(
+    "Particle (N+1)", particle, particle.band_energies(e_neutral), "addition",
+)
