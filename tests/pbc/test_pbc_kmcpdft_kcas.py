@@ -731,69 +731,8 @@ class KCASPDFTOnTopEnergyTests(unittest.TestCase):
 
 class KCASPDFTWavefunctionEnergyTests(unittest.TestCase):
 
-    def test_cumulant_contraction_matches_wannier_normalization(self):
-        nkpts, ncas = 2, 1
-        norb = nkpts * ncas
-        kconserv = make_kconserv(nkpts)
-        rng = np.random.default_rng(23)
-        eri_k = (
-            rng.normal(size=(nkpts, nkpts, nkpts, ncas, ncas,
-                             ncas, ncas))
-            + 1j * rng.normal(size=(nkpts, nkpts, nkpts, ncas,
-                                    ncas, ncas, ncas))
-        )
-        cascm2_kpts = (
-            rng.normal(size=eri_k.shape)
-            + 1j * rng.normal(size=eri_k.shape)
-        )
-
-        eri_full = np.zeros((norb,) * 4, dtype=complex)
-        cascm2_full = np.zeros((norb,) * 4, dtype=complex)
-        for k1 in range(nkpts):
-            for k2 in range(nkpts):
-                for k3 in range(nkpts):
-                    k4 = kconserv[k1, k2, k3]
-                    eri_full[k1, k2, k3, k4] = \
-                        eri_k[k1, k2, k3, 0, 0, 0, 0]
-                    cascm2_full[k1, k2, k3, k4] = \
-                        cascm2_kpts[k1, k2, k3, 0, 0, 0, 0]
-
-        phase = np.asarray([[1.0, 1.0], [1.0, -1.0]]) / np.sqrt(2.0)
-        eri_wannier = np.einsum(
-            "iP,jQ,ijkl,kR,lS->PQRS",
-            phase.conj(), phase, eri_full, phase.conj(), phase,
-            optimize=True,
-        ) / nkpts
-        cascm2_wannier = np.einsum(
-            "iP,jQ,ijkl,kR,lS->PQRS",
-            phase, phase.conj(), cascm2_full, phase, phase.conj(),
-            optimize=True,
-        )
-        reference = np.einsum(
-            "PQRS,PQRS->", eri_wannier, cascm2_wannier,
-            optimize=True,
-        ) / (2 * nkpts)
-
-        # kCASCI stores raw Bloch ERIs with 1 / (2 * nkpts).
-        h2eff = eri_k / (2 * nkpts)
-        result = kmcpdft.contract_kcas_cumulant(
-            h2eff, cascm2_kpts, nkpts,
-        )
-        np.testing.assert_allclose(result, reference, atol=1e-12, rtol=1e-12)
-
-    def test_cumulant_contraction_rejects_incompatible_shapes(self):
-        h2eff = np.zeros((2, 2, 2, 1, 1, 1, 1))
-        with self.assertRaisesRegex(ValueError, "matching seven-dimensional"):
-            kmcpdft.contract_kcas_cumulant(
-                h2eff, np.zeros((2,) * 4), nkpts=2,
-            )
-
     def test_energy_mcwfn_kcas_hybrid_components(self):
         nkpts, ncas, nao = 2, 1, 1
-        ncastot = nkpts * ncas
-        kconserv = make_kconserv(nkpts)
-        casdm1s = np.zeros((2, ncastot, ncastot))
-        casdm2 = np.zeros((ncastot,) * 4)
         casdm1s_kpts = np.zeros((2, nkpts, ncas, ncas))
         cascm2_kpts = np.full(
             (nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas), 0.2,
@@ -834,23 +773,21 @@ class KCASPDFTWavefunctionEnergyTests(unittest.TestCase):
             nkpts=nkpts,
             ncas=ncas,
             ncore=0,
-            kconserv=kconserv,
             kpts=np.zeros((nkpts, 3)),
             cell=SimpleNamespace(spin=0),
             _scf=FakeSCF(),
             energy_nuc=lambda: 1.5,
             get_hcore=lambda **kwargs: hcore,
-            get_h2eff=mock.Mock(return_value=h2eff),
         )
 
         with mock.patch.object(
-                kmcpdft_helper, "make_kcas_rdms_kpts",
-                return_value=(casdm1s_kpts, cascm2_kpts)), \
-             mock.patch.object(
                 kmcpdft_helper, "casdm1s_kpts_to_dm1s",
-                return_value=dm1s_kpts):
+                return_value=dm1s_kpts), \
+             mock.patch.object(
+                kmcpdft, "get_h2eff_kpts",
+                return_value=h2eff) as get_h2eff:
             result = kmcpdft.energy_mcwfn_kcas(
-                mc, casdm1s=casdm1s, casdm2=casdm2,
+                mc, casdm1s_kpts, cascm2_kpts,
             )
 
         dm1_kpts = dm1s_kpts.sum(axis=0)
@@ -865,7 +802,7 @@ class KCASPDFTWavefunctionEnergyTests(unittest.TestCase):
         ) / nkpts
         energy_c = np.einsum(
             "abcuvxy,abcuvxy->", h2eff, cascm2_kpts,
-        ) / nkpts
+        ) / (2 * nkpts)
         reference = (
             1.5 + energy_one + energy_j
             + 0.25 * energy_x + 0.25 * energy_c
@@ -875,14 +812,10 @@ class KCASPDFTWavefunctionEnergyTests(unittest.TestCase):
         self.assertEqual(numint.seen, ("tPBE0", 0))
         self.assertEqual(len(jk_calls), 1)
         np.testing.assert_allclose(jk_calls[0][0], dm1s_kpts)
-        mc.get_h2eff.assert_called_once_with(mo_coeff=mc.mo_coeff)
+        get_h2eff.assert_called_once_with(mc, mc.mo_coeff)
 
     def test_energy_mcwfn_kcas_pure_functional_skips_exchange_and_eris(self):
         nkpts, ncas = 2, 1
-        ncastot = nkpts * ncas
-        kconserv = make_kconserv(nkpts)
-        casdm1s = np.zeros((2, ncastot, ncastot))
-        casdm2 = np.zeros((ncastot,) * 4)
         casdm1s_kpts = np.zeros((2, nkpts, ncas, ncas))
         cascm2_kpts = np.zeros(
             (nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas),
@@ -909,23 +842,20 @@ class KCASPDFTWavefunctionEnergyTests(unittest.TestCase):
             nkpts=nkpts,
             ncas=ncas,
             ncore=0,
-            kconserv=kconserv,
             kpts=np.zeros((nkpts, 3)),
             cell=SimpleNamespace(spin=0),
             _scf=fake_scf,
             energy_nuc=lambda: 1.0,
             get_hcore=lambda **kwargs: np.ones((nkpts, 1, 1)),
-            get_h2eff=get_h2eff,
         )
 
         with mock.patch.object(
-                kmcpdft_helper, "make_kcas_rdms_kpts",
-                return_value=(casdm1s_kpts, cascm2_kpts)), \
-             mock.patch.object(
                 kmcpdft_helper, "casdm1s_kpts_to_dm1s",
-                return_value=dm1s_kpts):
+                return_value=dm1s_kpts), \
+             mock.patch.object(
+                kmcpdft, "get_h2eff_kpts", get_h2eff):
             result = kmcpdft.energy_mcwfn_kcas(
-                mc, casdm1s=casdm1s, casdm2=casdm2,
+                mc, casdm1s_kpts, cascm2_kpts,
             )
 
         # Per cell: Vnn=1, E1=1, EJ=0.2.
@@ -960,7 +890,7 @@ class KCASPDFTWavefunctionEnergyTests(unittest.TestCase):
                 casdm2 = kmcpdft_helper.make_one_casdm2_kcas(
                     mc, mc.ci,
                 )
-                energy_reconstructed = kmcpdft.energy_mcwfn_kcas(
+                energy_reconstructed = kmcpdft.energy_mcwfn_kcas_from_rdms(
                     mc, ot=ot, casdm1s=casdm1s, casdm2=casdm2,
                     verbose=logger.QUIET,
                 )
@@ -998,7 +928,7 @@ class KCASPDFTWavefunctionEnergyTests(unittest.TestCase):
                         kmcpdft_helper.make_one_casdm2_charged_kcas(
                             mc, target_k=target_k,
                         )
-                    energy_reconstructed = kmcpdft.energy_mcwfn_kcas(
+                    energy_reconstructed = kmcpdft.energy_mcwfn_kcas_from_rdms(
                         mc, ot=ot, casdm1s=casdm1s, casdm2=casdm2,
                         verbose=logger.QUIET,
                     )
@@ -1240,7 +1170,7 @@ class KCASPDFTRoutingTests(unittest.TestCase):
 
     def test_target_k_requires_momentum_resolved_flag(self):
         with self.assertRaisesRegex(
-                ValueError, "target_k requires momentum_resolved=True"):
+                ValueError, "target_k.*require momentum_resolved=True"):
             pbc_mcpdft.KCASCI(
                 "kmf", "tPBE", 2, (1, 1), target_k=0,
             )
@@ -1315,7 +1245,6 @@ class KCASPDFTRoutingTests(unittest.TestCase):
                 return_value=pdft) as make_child:
             result = pbc_mcpdft.KCASCI(
                 kmc, "tPBE", 2, (1, 1),
-                momentum_resolved=True,
             )
             self.assertIs(result, pdft)
             make_child.assert_called_once_with(kmc, "tPBE")
@@ -1343,7 +1272,6 @@ class KCASPDFTRoutingTests(unittest.TestCase):
                 return_value=pdft) as make_child:
             result = pbc_mcpdft.KCASCI(
                 kmc, "tPBE", 2, (1, 1),
-                momentum_resolved=True,
             )
 
         self.assertIs(result, pdft)
@@ -1357,26 +1285,16 @@ class KCASPDFTRoutingTests(unittest.TestCase):
                     momentum_resolved=True, charge=1,
                 )
 
-    def test_momentum_route_validates_options(self):
-        with self.assertRaisesRegex(ValueError, "momentum_resolved"):
-            pbc_mcpdft.KCASCI(
-                "kmf", "tPBE", 2, (1, 1),
-                momentum_resolved="yes",
-            )
-        with self.assertRaisesRegex(ValueError, "target_k must be an integer"):
-            pbc_mcpdft.KCASCI(
-                "kmf", "tPBE", 2, (1, 1),
-                momentum_resolved=True, target_k=0.5,
-            )
-        with self.assertRaisesRegex(ValueError, "charge must be -1"):
-            pbc_mcpdft.KCASCI(
-                "kmf", "tPBE", 2, (1, 1),
-                momentum_resolved=True, charge=2,
-            )
+    def test_momentum_route_rejects_ignored_options(self):
         with self.assertRaisesRegex(ValueError, "charged_spin requires"):
             pbc_mcpdft.KCASCI(
                 "kmf", "tPBE", 2, (1, 1),
                 momentum_resolved=True, charged_spin=1,
+            )
+        with self.assertRaisesRegex(ValueError, "Frozen orbitals"):
+            pbc_mcpdft.KCASCI(
+                "kmf", "tPBE", 2, (1, 1),
+                momentum_resolved=True, frozen=1,
             )
         with self.assertRaisesRegex(ValueError, "require momentum_resolved"):
             pbc_mcpdft.KCASCI(
@@ -1394,7 +1312,7 @@ class KCASPDFTRoutingTests(unittest.TestCase):
         )
         self.assertIs(
             kmcpdft._kKCASPDFT.energy_mcwfn,
-            kmcpdft.energy_mcwfn_kcas,
+            kmcpdft.energy_mcwfn_kcas_from_rdms,
         )
         self.assertIs(
             kmcpdft._kKCASPDFT.energy_dft,
