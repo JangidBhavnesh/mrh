@@ -428,6 +428,20 @@ class KCASCIIntegrationTests(unittest.TestCase):
             [band["energy"] for band in particle_bands],
             particle.nkpts * np.asarray([band["energy"] for band in per_cell])))
 
+        particle.stdout = io.StringIO()
+        printed_bands = particle.print_bands(
+            e_neutral, verbose=lib.logger.NOTE,
+        )
+        output = particle.stdout.getvalue()
+        self.assertIn("Particle (N+1)", output)
+        self.assertIn("addition pole", output)
+        scaled_kpts = particle.cell.get_scaled_kpts(particle.kpts)
+        scaled_kx = [
+            scaled_kpts[band["momentum_index"], 0]
+            for band in printed_bands
+        ]
+        self.assertEqual(scaled_kx, sorted(scaled_kx))
+
         dm1 = particle.make_rdm1(target_k=0)
         overlap = np.asarray(self.kmf.get_ovlp())
         electron_count = np.einsum("kij,kji->", dm1, overlap).real / particle.nkpts
