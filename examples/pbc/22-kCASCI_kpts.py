@@ -33,7 +33,6 @@ cell.atom = [
 ]
 cell.basis = "STO-6G"
 cell.unit = "Angstrom"
-cell.max_memory = 100000
 cell.ke_cutoff = 100
 cell.precision = 1e-10
 cell.verbose = lib.logger.INFO
