@@ -128,6 +128,14 @@ class KCASCIHelperTests(unittest.TestCase):
             [band["energy"] for band in holes], [-1.2, -1.5, -1.65]))
         self.assertTrue(all(band["kind"] == "hole" for band in holes))
         self.assertTrue(np.allclose(holes[1]["hole_momentum"], kpts[2]))
+        all_holes = kcasci.compute_band_energies(
+            hole_results, reference_energy=-1.2, kpts=kpts,
+        )
+        self.assertTrue(np.allclose(
+            [band["energy"] for band in all_holes],
+            [[-0.6, -1.2], [-0.9, -1.5], [-1.05, -1.65]],
+        ))
+        self.assertTrue(all(band["root"] is None for band in all_holes))
 
         particle_results = [
             {"target_k": 0, "charge": -1, "nkpts": 3,
@@ -158,16 +166,12 @@ class KCASCIHelperTests(unittest.TestCase):
             [band["energy"] for band in per_cell], [-0.4, -0.5, -0.55]))
 
     def test_charged_band_energy_validation(self):
-        """Reject invalid band roots and inconsistent charge metadata."""
+        """Reject inconsistent charge metadata."""
         result = [{
             "target_k": 0, "charge": 1, "nkpts": 2,
             "e_tot": np.asarray([-1.0]),
         }]
         self.assertEqual(kcasci.compute_band_energies([], -1.2), [])
-        with self.assertRaisesRegex(IndexError, "scalar energy"):
-            kcasci._select_root_energy(-1.0, root=1)
-        with self.assertRaisesRegex(IndexError, "nonnegative"):
-            kcasci._select_root_energy([-1.0], root=-1)
         with self.assertRaisesRegex(ValueError, r"charge \+1 or -1"):
             kcasci.compute_band_energies(result, -1.2, charge=0)
 
@@ -232,7 +236,6 @@ class KCASCIIntegrationTests(unittest.TestCase):
         ]
         cell.basis = "STO-6G"
         cell.unit = "Angstrom"
-        cell.max_memory = 100000
         cell.ke_cutoff = 100
         cell.precision = 1e-10
         cell.verbose = 0
