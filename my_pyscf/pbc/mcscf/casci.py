@@ -94,6 +94,27 @@ def h1e_kpts_for_cas(mc, mo_coeff=None, ncas=None, ncore=None):
     return h1e_kpts, ecore
 
 
+def get_h2eff_kpts(mc, mo_coeff=None):
+    """Build the normalized k-point active-space two-electron integrals.
+
+    Returns an array with shape ``(nkpts, nkpts, nkpts, ncas, ncas,
+    ncas, ncas)``.  The missing fourth momentum index is determined by
+    momentum conservation.
+    """
+    if mo_coeff is None:
+        mo_coeff = mc.mo_coeff
+
+    mo_coeff = np.asarray(mo_coeff)
+    ncore = mc.ncore
+    ncas = mc.ncas
+    nkpts = mc.nkpts
+    mo_cas = mo_coeff[:, :, ncore:ncore + ncas]
+    eri_k = mc._scf.with_df.ao2mo_7d(
+        mo_cas, kpts=mc._scf.kpts,
+    )
+    return np.asarray(eri_k) / nkpts
+
+
 def h1e_for_cas(mc, mo_coeff=None, ncas=None, ncore=None):
     '''
     Compute the 1e Hamiltonian for CAS space and core energy.
@@ -750,9 +771,6 @@ class PBCCASCI(PBCCASBASE):
             mo_coeff = self.mo_coeff
         
         mo_phase = get_mo_coeff_k2R(kmf, mo_coeff, ncore, ncas, kmesh=self.kmesh)[-1]
-        
-        kconserv = kpts_helper.get_kconserv(kmf.cell, kmf.kpts)
-        kpts = kmf.kpts
 
         # Do the ao2mo transformation in k-space and then transform the eris to r-space.
         # Basically, I am using the same eris integrals computed for the cell object.
@@ -768,16 +786,13 @@ class PBCCASCI(PBCCASBASE):
         #             eri_k[kp, kq, kr] = eri_pqrs.reshape(ncas, ncas, ncas,ncas)
         
         # There is optimized version as well:
-        mo_cas_kpts = np.array([mo_coeff[i][:, ncore:ncore+ncas] for i in range(nkpts)])
-        eri_k = kmf.with_df.ao2mo_7d(mo_cas_kpts, kpts=kpts)
-        
+        eri_k = get_h2eff_kpts(self, mo_coeff)
         kconserv = kpts_helper.get_kconserv(kmf.cell, kmf.kpts)
         
         mo_ks = mo_phase[kconserv]
         # This einsum looks very scary but it is just the transformation of the eris from k-space mo to r-space mo.
         eris = np.einsum('auR,bvS,abcuvwt,cwT,abctU->RSTU',
                          mo_phase.conj(), mo_phase, eri_k, mo_phase.conj(), mo_ks, optimize=True)
-        eris *= 1.0/nkpts
         
         assert eris.shape == (nkpts*ncas, nkpts*ncas, nkpts*ncas, nkpts*ncas)
         return eris
