@@ -1,5 +1,4 @@
 import numpy as np
-from functools import reduce
 
 from pyscf.lib import logger
 from pyscf.mcpdft.mcpdft import _PDFT
@@ -11,8 +10,8 @@ from mrh.my_pyscf.pbc.mcpdft.otfnalperiodic import (
     get_pbc_otfnal_kpts,
     otfnalperiodic_kpts,
 )
-from mrh.my_pyscf.pbc.mcscf.k2R import get_mo_coeff_k2R
-from mrh.my_pyscf.pbc.mcpdft._dms import dm2_cumulant_complex
+from mrh.my_pyscf.pbc.mcscf.casci import get_h2eff_kpts
+from mrh.my_pyscf.pbc.mcpdft.mcpdft import energy_mcwfn
 from mrh.my_pyscf.pbc.mcpdft import kmcpdft_helper
 '''
 Author: Bhavnesh Jangid
@@ -52,159 +51,20 @@ def make_one_casdm2 (mc, ci, state=0):
         _, casdm2 = fcisolver.make_rdm12 (ci, ncastot, nelecastot)
     return casdm2
 
-def energy_mcwfn(mc, mo_coeff=None, ci=None, ot=None, state=0, casdm1s=None,
-                casdm2=None, verbose=None):
-    # See pyscf.mcpdft.mcpdft.energy_mcwfn for details.
-
-    if ot is None: ot = mc.otfnal
-    if mo_coeff is None: mo_coeff = mc.mo_coeff
-    if ci is None: ci = mc.ci
-    if verbose is None: verbose = mc.verbose
-    if casdm1s is None: casdm1s = mc.make_one_casdm1s(ci=ci, state=state)
-    if casdm2 is None: casdm2 = mc.make_one_casdm2(ci=ci, state=state)
-    
-    cell = mc._scf.cell
-    nkpts = mc.nkpts
-    ncore = mc.ncore
-    ncas = mc.ncas
-    kmesh = mc.kmesh
-
-    # Get the MO_PHASE:
-    mo_phase = get_mo_coeff_k2R(mc._scf, mo_coeff, ncore, ncas, kmesh=kmesh)[-1]
-    log = logger.new_logger(mc, verbose=verbose)
-
-    # First, transform the casdm1s to dm1s for each k-point.
-    dm1s_kpts = []
-    for k in range(nkpts):
-        casdm1s_k = [reduce(np.dot, (mo_phase[k], casdm1s_, mo_phase[k].conj().T)) 
-                    for casdm1s_ in casdm1s]
-        dm1s =_dms.casdm1s_to_dm1s (ot, casdm1s_k, mo_coeff=mo_coeff[k], ncore=ncore, 
-                                        ncas=ncas)
-        dm1s_kpts.append(dm1s)
-    
-    # Making sure the tagging the dm1s doesn't create the weird problems
-    # for pbc.
-    dm1s_kpts = np.stack([np.asarray(dm1s) 
-                          for dm1s in dm1s_kpts], axis=1,)
-    
-    hyb_x, hyb_c = ot._numint.rsh_and_hybrid_coeff(ot.otxc, mc.mol.spin)[2]
-
-    Vnn = mc.energy_nuc()
-    h1e_kpts = mc.get_hcore(kpts=mc.kpts)
-    
-    assert h1e_kpts.ndim == 3 and dm1s_kpts.ndim == 4 and \
-        h1e_kpts.shape == dm1s_kpts[0].shape == dm1s_kpts[1].shape, \
-            'h1e_kpts and dm1s_kpts must have shape (nkpts,nao,nao)'
-
-    dm1_kpts = np.array([dm1s_kpts[0][i] + dm1s_kpts[1][i] 
-                         for i in range(nkpts)])
-    
-    if log.verbose >= logger.DEBUG or abs(hyb_x) > 1e-10:
-        vj_kpts, vk_kpts = mc._scf.get_jk(cell, dm_kpts=dm1s_kpts, kpts=mc.kpts)
-        vj_kpts = vj_kpts[0] + vj_kpts[1] # (nkpts, nao, nao)
-    else:
-        vj_kpts = mc._scf.get_jk(cell, dm_kpts=dm1_kpts, kpts=mc.kpts, 
-                                 hermi=1, with_k=False)[0]
-        
-        
-    Te_Vne = 1./nkpts * np.einsum('kij,kji->', h1e_kpts, dm1_kpts)
-    E_j = 1./nkpts * np.einsum('kij,kji->',vj_kpts, dm1_kpts) * 0.5
-
-    log.debug('CAS energy decomposition:')
-    log.debug('Vnn = %s', Vnn)
-    log.debug('Te + Vne = %s', Te_Vne)
-    log.debug('E_j = %s', E_j)
-
-    # Keeping this warning as it is.
-    if abs(hyb_x - hyb_c) > 1e-10:
-        log.warn("exchange and correlation hybridization differ")
-        log.warn("may lead to unphysical results, see https://github.com/pyscf/pyscf-forge/issues/128")
-
-    # Note: this is not the true exchange energy, but just the HF-like exchange
-    E_x = 0.0
-    if log.verbose >= logger.DEBUG or abs(hyb_x) > 1e-10:
-        # (vk_a * dm_a) + (vk_b * dm_b)
-        E_x = -1/nkpts * (np.einsum('kij,kji->', vk_kpts[0], dm1s_kpts[0]) +
-                         np.einsum('kij,kji->', vk_kpts[1], dm1s_kpts[1]))
-        E_x /= 2.0
-        log.debug("E_x = %s", E_x)
-        log.debug("Adding (%s) * E_x = %s", hyb_x, hyb_x * E_x)
-
-    # This is not correlation, but the 2-body cumulant tensored with the eri's:
-    # g_pqrs * l_pqrs / 2
-    E_c = 0.0
-    if log.verbose >= logger.DEBUG or abs(hyb_c) > 1e-10:
-        # Now compute the cascm2:
-        cascm2 = dm2_cumulant_complex(casdm2, casdm1s)
-        aeri = mc.get_h2eff(mo_coeff = mo_coeff)
-        ncastot = mc.ncas * mc.nkpts
-        assert aeri.ndim == 4 and aeri.shape == (ncastot,)*4
-        E_c = np.tensordot(aeri, cascm2, axes=4) / (2 * nkpts)
-        log.debug("E_c = %s", E_c)
-        log.debug("Adding (%s) * E_c = %s", hyb_c, hyb_c * E_c)
-
-    e_mcwfn = Vnn + Te_Vne + E_j + (hyb_x * E_x) + (hyb_c * E_c)
-    
-    return e_mcwfn
-
-
-def contract_kcas_cumulant(h2eff, cascm2_kpts, nkpts):
-    """Contract the kCASCI ERIs with the cumulant per primitive cell.
-
-    ``PBCKCASCI.get_h2eff`` includes both the supercell ``1 / nkpts``
-    normalization and the factor of one half used by the k-FCI Hamiltonian.
-    Dividing the contraction by ``nkpts`` therefore produces the MC-PDFT
-    cumulant contribution per primitive cell.
-    """
-    h2eff = np.asarray(h2eff)
-    cascm2_kpts = np.asarray(cascm2_kpts)
-    if h2eff.ndim != 7 or h2eff.shape != cascm2_kpts.shape:
-        raise ValueError(
-            "h2eff and cascm2_kpts must have matching seven-dimensional "
-            "k-space shapes",
-        )
-    if h2eff.shape[:3] != (nkpts, nkpts, nkpts):
-        raise ValueError("The ERI k-point dimensions do not match nkpts")
-    return np.einsum(
-        "abcuvxy,abcuvxy->", h2eff, cascm2_kpts,
-        optimize=True,
-    ) / nkpts
-
-
-def energy_mcwfn_kcas(mc, mo_coeff=None, ci=None, ot=None, state=0,
-                      casdm1s=None, casdm2=None, verbose=None,
-                      momentum_tol=1e-8):
-    """Compute the MC wavefunction part from momentum-resolved kCAS RDMs."""
+def energy_mcwfn_kcas(mc, casdm1s_kpts, cascm2_kpts, mo_coeff=None,
+                      ot=None, verbose=None):
+    """Compute the MC wavefunction energy from k-point active-space RDMs."""
     if ot is None:
         ot = mc.otfnal
     if mo_coeff is None:
         mo_coeff = mc.mo_coeff
-    if ci is None:
-        ci = mc.ci
     if verbose is None:
         verbose = mc.verbose
-    if casdm1s is None:
-        casdm1s = mc.make_one_casdm1s(ci=ci, state=state)
-    if casdm2 is None:
-        casdm2 = mc.make_one_casdm2(ci=ci, state=state)
 
     mo_coeff = np.asarray(mo_coeff)
     nkpts = mc.nkpts
-    ncas = mc.ncas
-    ncore = mc.ncore
-    if mo_coeff.ndim != 3 or mo_coeff.shape[0] != nkpts:
-        raise ValueError("mo_coeff must have shape (nkpts, nao, nmo)")
-
-    kconserv = getattr(mc, "kconserv", None)
-    if kconserv is None:
-        kconserv = kpts_helper.get_kconserv(mc.cell, mc.kpts)
-    casdm1s_kpts, cascm2_kpts = \
-        kmcpdft_helper.make_kcas_rdms_kpts(
-            casdm1s, casdm2, nkpts, ncas, kconserv,
-            momentum_tol=momentum_tol,
-        )
     dm1s_kpts = kmcpdft_helper.casdm1s_kpts_to_dm1s(
-        mc, casdm1s_kpts, mo_coeff, ncore,
+        mc, casdm1s_kpts, mo_coeff, mc.ncore,
     )
     dm1_kpts = dm1s_kpts[0] + dm1s_kpts[1]
 
@@ -212,15 +72,9 @@ def energy_mcwfn_kcas(mc, mo_coeff=None, ci=None, ot=None, state=0,
     hyb_x, hyb_c = ot._numint.rsh_and_hybrid_coeff(
         ot.otxc, mc.cell.spin,
     )[2]
-    energy_nuc = mc.energy_nuc()
     h1e_kpts = np.asarray(mc.get_hcore(kpts=mc.kpts))
-    if h1e_kpts.shape != dm1_kpts.shape:
-        raise ValueError(
-            "hcore and AO density matrices must have shape "
-            "(nkpts, nao, nao)",
-        )
-
-    if log.verbose >= logger.DEBUG or abs(hyb_x) > 1e-10:
+    with_exchange = log.verbose >= logger.DEBUG or abs(hyb_x) > 1e-10
+    if with_exchange:
         vj_spin, vk_kpts = mc._scf.get_jk(
             mc.cell, dm_kpts=dm1s_kpts, kpts=mc.kpts,
         )
@@ -232,13 +86,9 @@ def energy_mcwfn_kcas(mc, mo_coeff=None, ci=None, ot=None, state=0,
         )[0]
         vk_kpts = None
 
-    energy_one = np.einsum(
-        "kij,kji->", h1e_kpts, dm1_kpts,
-        optimize=True,
-    ) / nkpts
+    energy_one = np.einsum("kij,kji->", h1e_kpts, dm1_kpts) / nkpts
     energy_j = 0.5 * np.einsum(
         "kij,kji->", vj_kpts, dm1_kpts,
-        optimize=True,
     ) / nkpts
 
     if abs(hyb_x - hyb_c) > 1e-10:
@@ -249,34 +99,50 @@ def energy_mcwfn_kcas(mc, mo_coeff=None, ci=None, ot=None, state=0,
         )
 
     energy_x = 0.0
-    if log.verbose >= logger.DEBUG or abs(hyb_x) > 1e-10:
+    if with_exchange:
         energy_x = -0.5 * (
-            np.einsum(
-                "kij,kji->", vk_kpts[0], dm1s_kpts[0],
-                optimize=True,
-            )
-            + np.einsum(
-                "kij,kji->", vk_kpts[1], dm1s_kpts[1],
-                optimize=True,
-            )
+            np.einsum("kij,kji->", vk_kpts[0], dm1s_kpts[0])
+            + np.einsum("kij,kji->", vk_kpts[1], dm1s_kpts[1])
         ) / nkpts
 
     energy_c = 0.0
     if log.verbose >= logger.DEBUG or abs(hyb_c) > 1e-10:
-        h2eff = mc.get_h2eff(mo_coeff=mo_coeff)
-        energy_c = contract_kcas_cumulant(
-            h2eff, cascm2_kpts, nkpts,
-        )
+        energy_c = np.einsum(
+            "abcuvxy,abcuvxy->",
+            get_h2eff_kpts(mc, mo_coeff), cascm2_kpts,
+            optimize=True,
+        ) / (2 * nkpts)
 
-    log.debug("CAS energy decomposition:")
-    log.debug("Vnn = %s", energy_nuc)
-    log.debug("Te + Vne = %s", energy_one)
-    log.debug("E_j = %s", energy_j)
-    log.debug("E_x = %s", energy_x)
-    log.debug("E_c = %s", energy_c)
+    energy_nuc = mc.energy_nuc()
+    for label, value in (("Vnn", energy_nuc), ("Te + Vne", energy_one),
+                         ("E_j", energy_j), ("E_x", energy_x),
+                         ("E_c", energy_c)):
+        log.debug("%s = %s", label, value)
     return (
         energy_nuc + energy_one + energy_j
         + hyb_x * energy_x + hyb_c * energy_c
+    )
+
+
+def energy_mcwfn_kcas_from_rdms(
+        mc, mo_coeff=None, ci=None, ot=None, state=0, casdm1s=None,
+        casdm2=None, verbose=None, momentum_tol=1e-8):
+    """Convert dense kCAS RDMs and evaluate their MC wavefunction energy."""
+    mo_coeff = mc.mo_coeff if mo_coeff is None else mo_coeff
+    ci = mc.ci if ci is None else ci
+    if casdm1s is None:
+        casdm1s = mc.make_one_casdm1s(ci=ci, state=state)
+    if casdm2 is None:
+        casdm2 = mc.make_one_casdm2(ci=ci, state=state)
+    kconserv = getattr(mc, "kconserv", None)
+    if kconserv is None:
+        kconserv = kpts_helper.get_kconserv(mc.cell, mc.kpts)
+    rdms_kpts = kmcpdft_helper.make_kcas_rdms_kpts(
+        casdm1s, casdm2, mc.nkpts, mc.ncas, kconserv,
+        momentum_tol=momentum_tol,
+    )
+    return energy_mcwfn_kcas(
+        mc, *rdms_kpts, mo_coeff=mo_coeff, ot=ot, verbose=verbose,
     )
 
 
@@ -416,7 +282,7 @@ class _kKCASPDFT(_kMCPDFT):
 
     make_one_casdm1s = kmcpdft_helper.make_one_casdm1s_kcas
     make_one_casdm2 = kmcpdft_helper.make_one_casdm2_kcas
-    energy_mcwfn = energy_mcwfn_kcas
+    energy_mcwfn = energy_mcwfn_kcas_from_rdms
     energy_dft = energy_dft_kcas
 
 
