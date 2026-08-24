@@ -946,6 +946,47 @@ class ChargedPBCKCASCI(PBCKCASCI):
             reference_target_k=reference_target_k,
         )
 
+    def print_bands(self, reference_energy, root=0, kpts=None,
+                    per_cell=False, reference_target_k=None, verbose=None):
+        """Print momentum-ordered particle or hole poles."""
+        if kpts is None:
+            kpts = self.kpts
+        bands = self.band_energies(
+            reference_energy, root=root, kpts=kpts, per_cell=per_cell,
+            reference_target_k=reference_target_k,
+        )
+        if not bands:
+            return bands
+
+        scaled_kpts = self.cell.get_scaled_kpts(kpts)
+        bands.sort(key=lambda band: tuple(
+            scaled_kpts[band["momentum_index"]],
+        ))
+        label, pole = {
+            "hole": ("Hole (N-1)", "removal"),
+            "particle": ("Particle (N+1)", "addition"),
+        }[bands[0]["kind"]]
+        log = logger.new_logger(self, verbose)
+        log.note("")
+        log.note(
+            "%s: %d active electrons in %d active orbitals", label,
+            sum(self.charged_nelecastot), self.nkpts * self.ncas,
+        )
+        unit = "Eh/cell" if per_cell else "Eh"
+        log.note(
+            "  k       scaled k-point       target_k   %s pole (%s)",
+            pole, unit,
+        )
+        for band in bands:
+            k = band["momentum_index"]
+            sk = scaled_kpts[k]
+            log.note(
+                "%3d  %8.4f %8.4f %8.4f  %9d  %17.8f",
+                k, sk[0], sk[1], sk[2], band["target_k"],
+                band["energy"].real,
+            )
+        return bands
+
     get_band_energy = band_energies
     band_energy = band_energies
 
