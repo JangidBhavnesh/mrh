@@ -264,28 +264,8 @@ def kernel_chrkcasci(mc, mo_coeff=None, ci0=None, verbose=logger.NOTE,
     return results, e_tot_all, e_cas_all, ci_all, nelecastot, converged
 
 
-def _select_root_energy(energy, root=0):
-    """Select one root from a scalar or multiroot energy result."""
-    if not isinstance(root, (int, np.integer)):
-        raise ValueError("root must be an integer")
-    root = int(root)
-    if root < 0:
-        raise IndexError("root must be nonnegative")
-
-    energy = np.asarray(energy)
-    if energy.ndim == 0:
-        if root != 0:
-            raise IndexError("root index requested for a scalar energy")
-        return energy.item()
-    if root >= energy.shape[0]:
-        raise IndexError(
-            f"root {root} is unavailable for {energy.shape[0]} energies",
-        )
-    return energy[root].item()
-
-
 def compute_band_energies(charged_results, reference_energy, charge=None,
-                          root=0, kpts=None, nkpts=None, per_cell=False,
+                          root=None, kpts=None, nkpts=None, per_cell=False,
                           reference_target_k=None, kmom=None, cell=None,
                           kconserv=None):
     """Convert charged total energies to momentum-labeled particle/hole poles.
@@ -350,19 +330,20 @@ def compute_band_energies(charged_results, reference_energy, charge=None,
 
         momentum = band_k
         if kpts is not None: momentum = np.asarray(kpts[band_k]).copy()
-        e_charged = _select_root_energy(result["e_tot"], root=root)
-        e_reference = _select_root_energy(reference_energy, root=0)
+        e_charged = result["e_tot"]
+        if root is not None:
+            e_charged = e_charged[root]
         if kind == "hole":
-            energy = scale * (e_reference - e_charged)
+            energy = scale * (reference_energy - e_charged)
         else:
-            energy = scale * (e_charged - e_reference)
+            energy = scale * (e_charged - reference_energy)
 
         bands.append({
             "target_k": target_k,
             "momentum_index": band_k,
             momentum_key: momentum,
             "energy": energy,
-            "root": int(root),
+            "root": root,
             "charge": charge,
             "kind": kind,
         })
@@ -939,7 +920,7 @@ class ChargedPBCKCASCI(PBCKCASCI):
         self._finalize()
         return self.e_tot, self.e_cas, self.ci, self.mo_coeff, self.mo_energy
 
-    def band_energies(self, reference_energy, root=0, kpts=None,
+    def band_energies(self, reference_energy, root=None, kpts=None,
                       per_cell=False, reference_target_k=None):
         """Return quasiparticle energies from the stored charged results."""
         return compute_band_energies(
@@ -948,7 +929,7 @@ class ChargedPBCKCASCI(PBCKCASCI):
             reference_target_k=reference_target_k,
         )
 
-    def print_bands(self, reference_energy, root=0, kpts=None,
+    def print_bands(self, reference_energy, root=None, kpts=None,
                     per_cell=False, reference_target_k=None, verbose=None):
         """Print momentum-ordered particle or hole poles."""
         if kpts is None:
