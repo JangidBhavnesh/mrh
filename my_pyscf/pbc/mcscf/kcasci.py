@@ -14,6 +14,8 @@ from mrh.my_pyscf.pbc.mcscf.casci import (
     h1e_kpts_for_cas as h1e_for_cas,
 )
 
+MAX_MEMORY = getattr(__config__, "MAX_MEMORY", 4000)
+
 
 # Author: Bhavnesh Jangid
 
@@ -100,7 +102,7 @@ def kernel(mc, mo_coeff=None, ci0=None, verbose=logger.NOTE, envs=None):
 
     ncastot = nkpts * ncas
     nelecastot = (nkpts * nelecas[0], nkpts * nelecas[1])
-    max_memory = max(4000, mc.max_memory - lib.current_memory()[0])
+    max_memory = max(MAX_MEMORY, mc.max_memory - lib.current_memory()[0])
 
     mc.fcisolver.nkpts = nkpts
     mc.fcisolver.target_k = target_k
@@ -211,7 +213,7 @@ def kernel_chrkcasci(mc, mo_coeff=None, ci0=None, verbose=logger.NOTE,
             "target_k",
         )
 
-    max_memory = max(4000, mc.max_memory - lib.current_memory()[0])
+    max_memory = max(MAX_MEMORY, mc.max_memory - lib.current_memory()[0])
     results = []
     e_tot_all = []
     e_cas_all = []
