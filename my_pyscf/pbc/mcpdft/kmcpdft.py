@@ -1,9 +1,7 @@
 import numpy as np
 
 from pyscf.lib import logger
-from pyscf.mcpdft.mcpdft import _PDFT
 from pyscf.mcpdft import _dms
-from pyscf.pbc.dft import gen_grid as pbc_gen_grid
 from pyscf.pbc.lib import kpts_helper
 
 from mrh.my_pyscf.pbc.mcpdft.otfnalperiodic import (
@@ -11,7 +9,10 @@ from mrh.my_pyscf.pbc.mcpdft.otfnalperiodic import (
     otfnalperiodic_kpts,
 )
 from mrh.my_pyscf.pbc.mcscf.casci import get_h2eff_kpts
-from mrh.my_pyscf.pbc.mcpdft.mcpdft import energy_mcwfn
+from mrh.my_pyscf.pbc.mcpdft.mcpdft import (
+    _PeriodicMCPDFT,
+    energy_mcwfn,
+)
 from mrh.my_pyscf.pbc.mcpdft import kmcpdft_helper
 '''
 Author: Bhavnesh Jangid
@@ -87,23 +88,21 @@ def energy_mcwfn_kcas(mc, casdm1s_kpts, cascm2_kpts, mo_coeff=None,
         vk_kpts = None
 
     energy_one = np.einsum("kij,kji->", h1e_kpts, dm1_kpts) / nkpts
-    energy_j = 0.5 * np.einsum(
-        "kij,kji->", vj_kpts, dm1_kpts,
-    ) / nkpts
+    energy_j = 0.5 * np.einsum("kij,kji->", vj_kpts, dm1_kpts,) / nkpts
 
+    # This part is basically copied and kept same as in molecular MC-PDFT code.
     if abs(hyb_x - hyb_c) > 1e-10:
-        log.warn("exchange and correlation hybridization differ")
-        log.warn(
+        msg = (
+            "exchange and correlation hybridization differ "
             "may lead to unphysical results, see "
             "https://github.com/pyscf/pyscf-forge/issues/128",
         )
+        log.warn(msg)
 
     energy_x = 0.0
     if with_exchange:
-        energy_x = -0.5 * (
-            np.einsum("kij,kji->", vk_kpts[0], dm1s_kpts[0])
-            + np.einsum("kij,kji->", vk_kpts[1], dm1s_kpts[1])
-        ) / nkpts
+        energy_x = -0.5 * (np.einsum("kij,kji->", vk_kpts[0], dm1s_kpts[0])
+                           + np.einsum("kij,kji->", vk_kpts[1], dm1s_kpts[1])) / nkpts
 
     energy_c = 0.0
     if log.verbose >= logger.DEBUG or abs(hyb_c) > 1e-10:
@@ -200,7 +199,7 @@ def energy_tot_charged_kcas(mc, mo_coeff=None, ci=None, ot=None, state=0,
         ot=ot, mo_coeff=mo_coeff, casdm1s=casdm1s,
         casdm2=casdm2,
     )
-    e_tot = e_mcwfn + e_ot
+    e_tot = (e_mcwfn + e_ot).real
     logger.note(
         mc,
         "MC-PDFT charged target_k %d state %d E = %s, Eot(%s) = %s",
@@ -209,7 +208,7 @@ def energy_tot_charged_kcas(mc, mo_coeff=None, ci=None, ot=None, state=0,
     return e_tot, e_ot
 
 
-class _kMCPDFT(_PDFT):
+class _kMCPDFT(_PeriodicMCPDFT):
     '''
     k-MC-PDFT for periodic systems at the gamma point or k-points.
     This class is adding or replacing the functionalities which are not 
@@ -217,39 +216,7 @@ class _kMCPDFT(_PDFT):
     '''
 
     momentum_resolved = False
-
-    def _init_ot_grids(self, my_ot, grids_attr=None):
-        '''
-        Initialization of on-top functional and grids for periodic systems.
-        '''
-        if grids_attr is None:
-            grids_attr = {}
-
-        old_grids = getattr(self, 'grids', None)
-
-        if isinstance(my_ot, (str, np.bytes_)):
-            # Note: I have changed the input arg. for below function.
-            self.otfnal = get_pbc_otfnal_kpts(self._scf, my_ot)
-        else:
-            self.otfnal = my_ot
-
-        pbc_grid_types = (
-            pbc_gen_grid.UniformGrids,
-            pbc_gen_grid.BeckeGrids,
-        )
-
-        if isinstance(old_grids, pbc_grid_types):
-            self.otfnal.grids = old_grids
-        else:
-            self.otfnal.grids = pbc_gen_grid.BeckeGrids(self.cell,)
-
-        self.otfnal.grids.__dict__.update(grids_attr)
-
-        for key, value in grids_attr.items():
-            assert getattr(self.otfnal.grids, key, None) == value
-
-        self.otfnal.verbose = self.verbose
-        self.otfnal.stdout = self.stdout    
+    _get_pbc_otfnal = staticmethod(get_pbc_otfnal_kpts)
     
     def multi_state(self, method='Lin'):
         raise NotImplementedError(f"StateAverageMix not available for {method}")
@@ -258,16 +225,14 @@ class _kMCPDFT(_PDFT):
     make_one_casdm2 = make_one_casdm2
     energy_mcwfn = energy_mcwfn
 
+    def energy_tot(self, *args, **kwargs):
+        e_tot, e_ot = super().energy_tot(*args, **kwargs)
+        return e_tot.real, e_ot
+
     def dump_chk(self, *args, **kwargs):
         logger.warn(self, "dump_chk is not supported for k-MC-PDFT")
         pass
 
-    def nuc_grad_method(self):
-        raise NotImplementedError("Nuclear gradients are not implemented for k-MC-PDFT")
-    
-    def dip_moment(self):
-        raise NotImplementedError("Dipole moment is not implemented for k-MC-PDFT")
-    
     def get_energy_decomposition(self, *args, **kwargs):
         raise NotImplementedError("Energy decomposition is not implemented for k-MC-PDFT")
 
