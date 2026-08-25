@@ -13,13 +13,74 @@ from mrh.my_pyscf.pbc.mcpdft.mcpdft import (
     _PeriodicMCPDFT,
     energy_mcwfn,
 )
-from mrh.my_pyscf.pbc.mcpdft import kmcpdft_helper
+from mrh.my_pyscf.pbc.mcpdft import _dms as pbc_dms
 '''
 Author: Bhavnesh Jangid
 k-MC-PDFT for periodic systems at the gamma point or k-points.
 '''
 
 _get_fcisolver = _dms._get_fcisolver
+
+
+def _select_charged_kcas_result(mc, target_k=None):
+    """Select one stored charged KCASCI momentum-sector result."""
+    nkpts = int(mc.nkpts)
+    if nkpts <= 0:
+        raise ValueError("nkpts must be positive")
+
+    results = list(getattr(mc, "charged_results", ()))
+    if target_k is None:
+        target_k = getattr(mc, "target_k", None)
+    if target_k is None:
+        if len(results) != 1:
+            raise ValueError(
+                "target_k is required when multiple charged KCASCI "
+                "sectors are available",
+            )
+        target_k = results[0]["target_k"]
+    if not isinstance(target_k, (int, np.integer)):
+        raise ValueError("target_k must be an integer")
+    target_k = int(target_k) % nkpts
+
+    matches = [
+        result for result in results
+        if int(result["target_k"]) % nkpts == target_k
+    ]
+    if not matches:
+        raise ValueError(
+            f"No charged KCASCI result is available for target_k={target_k}",
+        )
+    if len(matches) > 1:
+        raise ValueError(
+            f"Multiple charged KCASCI results are available for "
+            f"target_k={target_k}",
+        )
+    return matches[0]
+
+
+def _get_charged_kcas_rdm_context(mc, ci=None, state=0, target_k=None):
+    """Resolve RDM arguments after selecting a charged momentum sector."""
+    result = _select_charged_kcas_result(mc, target_k=target_k)
+    return pbc_dms._get_charged_kcas_rdm_context(
+        mc, result, ci=ci, state=state,
+    )
+
+
+def make_one_casdm1s_charged_kcas(mc, ci=None, state=0, target_k=None):
+    """Build a charged kCASCI 1-RDM for one selected momentum sector."""
+    result = _select_charged_kcas_result(mc, target_k=target_k)
+    return pbc_dms.make_one_casdm1s_charged_kcas(
+        mc, result, ci=ci, state=state,
+    )
+
+
+def make_one_casdm2_charged_kcas(mc, ci=None, state=0, target_k=None):
+    """Build a charged kCASCI 2-RDM for one selected momentum sector."""
+    result = _select_charged_kcas_result(mc, target_k=target_k)
+    return pbc_dms.make_one_casdm2_charged_kcas(
+        mc, result, ci=ci, state=state,
+    )
+
 
 # Need to redefine the casdm1s and casdm2 because of shape mismatch.
 def make_one_casdm1s (mc, ci, state=0):
@@ -64,7 +125,7 @@ def energy_mcwfn_kcas(mc, casdm1s_kpts, cascm2_kpts, mo_coeff=None,
 
     mo_coeff = np.asarray(mo_coeff)
     nkpts = mc.nkpts
-    dm1s_kpts = kmcpdft_helper.casdm1s_kpts_to_dm1s(
+    dm1s_kpts = pbc_dms.casdm1s_kpts_to_dm1s(
         mc, casdm1s_kpts, mo_coeff, mc.ncore,
     )
     dm1_kpts = dm1s_kpts[0] + dm1s_kpts[1]
@@ -136,7 +197,7 @@ def energy_mcwfn_kcas_from_rdms(
     kconserv = getattr(mc, "kconserv", None)
     if kconserv is None:
         kconserv = kpts_helper.get_kconserv(mc.cell, mc.kpts)
-    rdms_kpts = kmcpdft_helper.make_kcas_rdms_kpts(
+    rdms_kpts = pbc_dms.make_kcas_rdms_kpts(
         casdm1s, casdm2, mc.nkpts, mc.ncas, kconserv,
         momentum_tol=momentum_tol,
     )
@@ -171,9 +232,7 @@ def energy_dft_kcas(mc, mo_coeff=None, ci=None, ot=None, state=0,
 def energy_tot_charged_kcas(mc, mo_coeff=None, ci=None, ot=None, state=0,
                             target_k=None, verbose=None):
     """Evaluate MC-PDFT for one charged KCASCI momentum sector and root."""
-    result = kmcpdft_helper._select_charged_kcas_result(
-        mc, target_k=target_k,
-    )
+    result = _select_charged_kcas_result(mc, target_k=target_k)
     target_k = int(result["target_k"]) % int(mc.nkpts)
     if ot is None:
         ot = mc.otfnal
@@ -245,8 +304,8 @@ class _kKCASPDFT(_kMCPDFT):
 
     momentum_resolved = True
 
-    make_one_casdm1s = kmcpdft_helper.make_one_casdm1s_kcas
-    make_one_casdm2 = kmcpdft_helper.make_one_casdm2_kcas
+    make_one_casdm1s = pbc_dms.make_one_casdm1s_kcas
+    make_one_casdm2 = pbc_dms.make_one_casdm2_kcas
     energy_mcwfn = energy_mcwfn_kcas_from_rdms
     energy_dft = energy_dft_kcas
 
@@ -254,8 +313,8 @@ class _kKCASPDFT(_kMCPDFT):
 class _kChargedKCASPDFT(_kKCASPDFT):
     """k-MC-PDFT specialization for charged KCASCI momentum sectors."""
 
-    make_one_casdm1s = kmcpdft_helper.make_one_casdm1s_charged_kcas
-    make_one_casdm2 = kmcpdft_helper.make_one_casdm2_charged_kcas
+    make_one_casdm1s = make_one_casdm1s_charged_kcas
+    make_one_casdm2 = make_one_casdm2_charged_kcas
     energy_tot = energy_tot_charged_kcas
 
     def compute_pdft_energy_(self, mo_coeff=None, ci=None, ot=None,
@@ -287,7 +346,7 @@ class _kChargedKCASPDFT(_kKCASPDFT):
         if target_k is None:
             results = list(self.charged_results)
         else:
-            results = [kmcpdft_helper._select_charged_kcas_result(
+            results = [_select_charged_kcas_result(
                 self, target_k=target_k,
             )]
         if not results:
