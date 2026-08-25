@@ -19,7 +19,7 @@ from mrh.my_pyscf.pbc.mcscf.k2R import get_mo_coeff_k2R_wokmf
 from mrh.my_pyscf.pbc.mcscf.mc1step import _get_casdm2_kpts as _basis_transform_casdm2_kpts
 from mrh.my_pyscf.pbc.mcpdft.kotpd import get_ontop_pair_density_kpts
 from mrh.my_pyscf.pbc.mcpdft._dms import dm2_cumulant_complex
-from mrh.my_pyscf.pbc.mcpdft import kmcpdft_helper
+from mrh.my_pyscf.pbc.mcpdft import _dms as pbc_dms
 
 # Author: Bhavnesh Jangid
 
@@ -166,7 +166,7 @@ def _energy_ot_from_kpts(ot, casdm1s_kpts, cascm2_kpts, mo_coeff,
     if ncore < 0 or ncore + ncas > mo_coeff.shape[2]:
         raise ValueError("ncore and ncas are incompatible with mo_coeff")
 
-    dm1s_kpts = kmcpdft_helper.casdm1s_kpts_to_dm1s(
+    dm1s_kpts = pbc_dms.casdm1s_kpts_to_dm1s(
         ot, casdm1s_kpts, mo_coeff, ncore,
     )
 
@@ -299,7 +299,7 @@ class otfnalperiodic_kpts(otfnal):
         if kconserv is None:
             kconserv = kpts_helper.get_kconserv(ot.cell, ot.kpts)
         casdm1s_kpts, cascm2_kpts = \
-            kmcpdft_helper.make_kcas_rdms_kpts(
+            pbc_dms.make_kcas_rdms_kpts(
                 casdm1s, casdm2, nkpts, ncas, kconserv,
                 momentum_tol=momentum_tol,
             )
