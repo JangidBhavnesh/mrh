@@ -1,7 +1,4 @@
 #!/usr/bin/env python
-
-
-
 import numpy as np
 
 from pyscf import lib
@@ -11,11 +8,8 @@ from mrh.my_pyscf.pbc import mcpdft
 
 # Author: Bhavnesh Jangid
 
-"""Example to run the  k-MC-PDFT in one total-momentum sector.
-
-Note that the ``mcpdft.KCASCI`` uses conventional periodic CASCI by default.  Set
-``momentum_resolved=True`` to use kCASCI instead, and select any one sector
-with ``target_k`` (0, nkpts-1).
+"""
+Example to run the  k-MC-PDFT in one total-momentum sector.
 """
 
 cell = gto.Cell()
@@ -38,7 +32,7 @@ kmf.conv_tol = 1e-9
 kmf.kernel()
 
 target_k = 1
-kmc = mcpdft.KCASCI(kmf, "tPBE", 2, 2, ncore=0, momentum_resolved=True, target_k=target_k,)
+kmc = mcpdft.KCASCI(kmf, "tPBE", 2, 2, momentum_resolved=True, target_k=target_k,)
 kmc.kmesh = kmesh
 kmc.kernel(np.asarray(kmf.mo_coeff))
 

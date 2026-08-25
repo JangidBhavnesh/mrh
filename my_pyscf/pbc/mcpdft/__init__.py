@@ -2,9 +2,10 @@
 import copy
 
 from pyscf import mcscf
-from pyscf.pbc import scf, dft
+from pyscf.pbc import scf
 
 from mrh.my_pyscf.pbc import mcscf as pbc_mcscf
+from mrh.my_pyscf.pbc.mcscf import _sanity_check_for_kmf
 from mrh.my_pyscf.pbc.mcpdft.mcpdft import get_mcpdft_child_class as get_pbc_mcpdft_child_class_gamma
 from mrh.my_pyscf.pbc.mcpdft.kmcpdft import (
     get_charged_kcas_mcpdft_child_class,
@@ -13,24 +14,9 @@ from mrh.my_pyscf.pbc.mcpdft.kmcpdft import (
 )
 
 # Author: Bhavnesh Jangid
-# Implementing MC-PDFT at gamma point and k-MC-PDFT. For initialization, I am using different function,.
-# (as sanity checks will be different.) However, I will try to import as much code from molecular PDFT 
-# and same code structure.
 
-def _sanity_check_for_kmf(kmf0):
-    """Validate that the input is a periodic Hartree-Fock object."""
-    assert isinstance(kmf0, scf.hf.SCF),  \
-        "PBC MC-PDFT only works with periodic SCF objects"
-
-    if isinstance(kmf0, dft.krks.KRKS) or isinstance(kmf0, dft.kuks.KUKS) \
-        or isinstance(kmf0, dft.rks.RKS) or isinstance(kmf0, dft.uks.UKS):
-        raise NotImplementedError("PBC MC-PDFT only works with periodic HF objects.")
-        # In this case, probably one need to regenerate the 3C integrals.
-
-    if isinstance(kmf0, scf.kuhf.KUHF):
-        kmf0 = scf.addons.convert_to_rhf(kmf0)
-    
-    return kmf0
+# Implementing MC-PDFT at gamma point and k-MC-PDFT while reusing the
+# periodic MCSCF input validation and as much molecular PDFT code as possible.
 
 def _MCPDFT (mc_class, kmc_or_kmf, ot, ncas, nelecas, ncore=None, frozen=None,
             get_mcpdft_child_class=get_mcpdft_child_class,
