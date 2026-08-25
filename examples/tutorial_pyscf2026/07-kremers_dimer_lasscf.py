@@ -35,14 +35,14 @@ H      3.053960000000   1.039990000000  -1.529140000000
 H      3.367270000000  -0.612150000000  -1.514110000000'''
 basis = {'C': 'sto-3g','H': 'sto-3g','O': 'sto-3g','N': 'sto-3g','Cr': 'cc-pvdz'}
 mol = gto.M (atom=xyz, spin=6, charge=3, basis=basis,
-           verbose=4, output='06-kremers_dimer_lasscf.log') 
+           verbose=4, output='07-kremers_dimer_lasscf.log') 
 mf = scf.ROHF(mol)
 mf.kernel () 
 
 # Using "AVAS" to try to automatically find the 3d orbitals
 from pyscf.mcscf import avas
 ncas, nelecas, mo_coeff = avas.kernel (mf, ['Cr 3d'], openshell_option=3)
-molden.from_mo (mol, '06-kremers_dimer_lasscf_avas_guess.molden', mo_coeff, occ=mf.mo_occ)
+molden.from_mo (mol, '07-kremers_dimer_lasscf_avas_guess.molden', mo_coeff, occ=mf.mo_occ)
 
 # There are two different algorithms implemented
 #from mrh.my_pyscf.mcscf.lasscf_sync_o0 import LASSCF
@@ -55,11 +55,11 @@ las = LASSCF (mf, (7,7), ((5,2),(2,5)))
 #mo_coeff = las.localize_init_guess ([[0,],[1,]], mo_coeff, mo_occ=mf.mo_occ)
 mo_coeff = las.set_fragments_([[0,],[1,]], mo_coeff, mo_occ=mf.mo_occ)
 
-molden.from_mo (mol, '06-kremers_dimer_lasscf_localized_guess.molden', mo_coeff)
+molden.from_mo (mol, '07-kremers_dimer_lasscf_localized_guess.molden', mo_coeff)
 
 las.kernel (mo_coeff)
 
 from mrh.my_pyscf.tools import molden as my_molden
-my_molden.from_lasscf (las, '06-kremers_dimer_lasscf.molden')
+my_molden.from_lasscf (las, '07-kremers_dimer_lasscf.molden')
 
 
