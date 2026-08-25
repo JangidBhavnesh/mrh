@@ -11,7 +11,8 @@ from pyscf.pbc import gto, scf
 
 from mrh.my_pyscf.pbc import mcscf, mcpdft as pbc_mcpdft
 from mrh.my_pyscf.pbc.fci import direct_spin1_kfci
-from mrh.my_pyscf.pbc.mcpdft import kmcpdft, kmcpdft_helper
+from mrh.my_pyscf.pbc.mcpdft import _dms as pbc_dms
+from mrh.my_pyscf.pbc.mcpdft import kmcpdft
 from mrh.my_pyscf.pbc.mcpdft._dms import dm2_cumulant_complex
 from mrh.my_pyscf.pbc.mcpdft import otfnalperiodic
 
@@ -87,7 +88,7 @@ class KCASPDFTRDMTests(unittest.TestCase):
             nkpts=3, target_k=None, charged_results=results,
         )
 
-        result = kmcpdft_helper._select_charged_kcas_result(
+        result = kmcpdft._select_charged_kcas_result(
             mc, target_k=-1,
         )
 
@@ -99,7 +100,7 @@ class KCASPDFTRDMTests(unittest.TestCase):
             nkpts=3, target_k=4, charged_results=results,
         )
 
-        result = kmcpdft_helper._select_charged_kcas_result(mc)
+        result = kmcpdft._select_charged_kcas_result(mc)
 
         self.assertIs(result, results[0])
 
@@ -109,7 +110,7 @@ class KCASPDFTRDMTests(unittest.TestCase):
             nkpts=3, target_k=None, charged_results=results,
         )
 
-        result = kmcpdft_helper._select_charged_kcas_result(mc)
+        result = kmcpdft._select_charged_kcas_result(mc)
 
         self.assertIs(result, results[0])
 
@@ -121,7 +122,7 @@ class KCASPDFTRDMTests(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(ValueError, "target_k is required"):
-            kmcpdft_helper._select_charged_kcas_result(mc)
+            kmcpdft._select_charged_kcas_result(mc)
 
     def test_select_charged_result_rejects_missing_sector(self):
         mc = SimpleNamespace(
@@ -131,7 +132,7 @@ class KCASPDFTRDMTests(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(ValueError, "target_k=1"):
-            kmcpdft_helper._select_charged_kcas_result(mc, target_k=1)
+            kmcpdft._select_charged_kcas_result(mc, target_k=1)
 
     def test_select_charged_result_rejects_duplicate_sector(self):
         mc = SimpleNamespace(
@@ -141,7 +142,7 @@ class KCASPDFTRDMTests(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(ValueError, "Multiple charged"):
-            kmcpdft_helper._select_charged_kcas_result(mc)
+            kmcpdft._select_charged_kcas_result(mc)
 
     def test_get_charged_context_uses_sector_ci_and_electron_count(self):
         solver = RecordingSolver()
@@ -154,7 +155,7 @@ class KCASPDFTRDMTests(unittest.TestCase):
         mc.charged_results = [result]
         mc.charged_nelecastot = (9, 9)
 
-        context = kmcpdft_helper._get_charged_kcas_rdm_context(mc)
+        context = kmcpdft._get_charged_kcas_rdm_context(mc)
 
         self.assertEqual(
             context,
@@ -171,7 +172,7 @@ class KCASPDFTRDMTests(unittest.TestCase):
             "nelecastot": (2, 1),
         }]
 
-        context = kmcpdft_helper._get_charged_kcas_rdm_context(
+        context = kmcpdft._get_charged_kcas_rdm_context(
             mc, ci=["override-0", "override-1"], state=1,
         )
 
@@ -187,7 +188,7 @@ class KCASPDFTRDMTests(unittest.TestCase):
         mc.charged_results = [{"target_k": 0, "ci": "charged-ci"}]
         mc.charged_nelecastot = (1, 0)
 
-        context = kmcpdft_helper._get_charged_kcas_rdm_context(mc)
+        context = kmcpdft._get_charged_kcas_rdm_context(mc)
 
         self.assertEqual(context[3], (1, 0))
 
@@ -199,7 +200,7 @@ class KCASPDFTRDMTests(unittest.TestCase):
         }]
 
         with self.assertRaisesRegex(ValueError, "has no CI vector"):
-            kmcpdft_helper._get_charged_kcas_rdm_context(mc)
+            kmcpdft._get_charged_kcas_rdm_context(mc)
 
     def test_get_charged_context_rejects_invalid_electron_count(self):
         mc = make_mc(RecordingSolver(), target_k=0, nkpts=2, ncas=1)
@@ -210,7 +211,7 @@ class KCASPDFTRDMTests(unittest.TestCase):
         }]
 
         with self.assertRaisesRegex(ValueError, "invalid for ncastot=2"):
-            kmcpdft_helper._get_charged_kcas_rdm_context(mc)
+            kmcpdft._get_charged_kcas_rdm_context(mc)
 
     def test_get_charged_context_rejects_malformed_electron_count(self):
         mc = make_mc(RecordingSolver(), target_k=0, nkpts=2, ncas=1)
@@ -221,7 +222,7 @@ class KCASPDFTRDMTests(unittest.TestCase):
         }]
 
         with self.assertRaisesRegex(ValueError, "alpha and beta counts"):
-            kmcpdft_helper._get_charged_kcas_rdm_context(mc)
+            kmcpdft._get_charged_kcas_rdm_context(mc)
 
     def test_make_one_charged_casdm1s_uses_sector_context(self):
         solver = RecordingSolver()
@@ -232,7 +233,7 @@ class KCASPDFTRDMTests(unittest.TestCase):
             "nelecastot": (3, 2),
         }]
 
-        casdm1s = kmcpdft_helper.make_one_casdm1s_charged_kcas(mc)
+        casdm1s = kmcpdft.make_one_casdm1s_charged_kcas(mc)
 
         self.assertEqual(casdm1s.shape, (2, 6, 6))
         self.assertEqual(
@@ -249,7 +250,7 @@ class KCASPDFTRDMTests(unittest.TestCase):
             {"target_k": 1, "ci": "sector-1", "nelecastot": (1, 0)},
         ]
 
-        kmcpdft_helper.make_one_casdm1s_charged_kcas(
+        kmcpdft.make_one_casdm1s_charged_kcas(
             mc,
             ci=["override-root-0", "override-root-1"],
             state=1,
@@ -275,7 +276,7 @@ class KCASPDFTRDMTests(unittest.TestCase):
         }]
 
         with self.assertRaisesRegex(ValueError, "charged KCASCI 1-RDM"):
-            kmcpdft_helper.make_one_casdm1s_charged_kcas(mc)
+            kmcpdft.make_one_casdm1s_charged_kcas(mc)
 
     def test_make_one_charged_casdm2_uses_rdm12_and_sector_context(self):
         calls = []
@@ -294,7 +295,7 @@ class KCASPDFTRDMTests(unittest.TestCase):
             "nelecastot": (3, 2),
         }]
 
-        casdm2 = kmcpdft_helper.make_one_casdm2_charged_kcas(mc)
+        casdm2 = kmcpdft.make_one_casdm2_charged_kcas(mc)
 
         self.assertEqual(casdm2.shape, (6, 6, 6, 6))
         self.assertEqual(
@@ -312,7 +313,7 @@ class KCASPDFTRDMTests(unittest.TestCase):
             "nelecastot": (1, 0),
         }]
 
-        casdm2 = kmcpdft_helper.make_one_casdm2_charged_kcas(mc)
+        casdm2 = kmcpdft.make_one_casdm2_charged_kcas(mc)
 
         self.assertEqual(casdm2.shape, (2, 2, 2, 2))
         self.assertEqual(
@@ -329,7 +330,7 @@ class KCASPDFTRDMTests(unittest.TestCase):
             {"target_k": 1, "ci": "sector-1", "nelecastot": (1, 0)},
         ]
 
-        kmcpdft_helper.make_one_casdm2_charged_kcas(
+        kmcpdft.make_one_casdm2_charged_kcas(
             mc,
             ci=["override-root-0", "override-root-1"],
             state=1,
@@ -355,13 +356,13 @@ class KCASPDFTRDMTests(unittest.TestCase):
         }]
 
         with self.assertRaisesRegex(ValueError, "charged KCASCI 2-RDM"):
-            kmcpdft_helper.make_one_casdm2_charged_kcas(mc)
+            kmcpdft.make_one_casdm2_charged_kcas(mc)
 
     def test_make_one_casdm1s_passes_target_sector(self):
         solver = RecordingSolver()
         mc = make_mc(solver, target_k=5)
 
-        casdm1s = kmcpdft_helper.make_one_casdm1s_kcas(mc, "ci")
+        casdm1s = pbc_dms.make_one_casdm1s_kcas(mc, "ci")
 
         self.assertEqual(casdm1s.shape, (2, 6, 6))
         self.assertEqual(
@@ -374,7 +375,7 @@ class KCASPDFTRDMTests(unittest.TestCase):
         solver = RecordingSolver(nroots=2)
         mc = make_mc(solver, target_k=1, nkpts=2, ncas=1)
 
-        kmcpdft_helper.make_one_casdm1s_kcas(
+        pbc_dms.make_one_casdm1s_kcas(
             mc, ["root-0", "root-1"], state=1,
         )
 
@@ -388,7 +389,7 @@ class KCASPDFTRDMTests(unittest.TestCase):
         solver = RecordingSolver()
         mc = make_mc(solver, target_k=-1)
 
-        casdm2 = kmcpdft_helper.make_one_casdm2_kcas(mc, "ci")
+        casdm2 = pbc_dms.make_one_casdm2_kcas(mc, "ci")
 
         self.assertEqual(casdm2.shape, (6, 6, 6, 6))
         self.assertEqual(
@@ -408,7 +409,7 @@ class KCASPDFTRDMTests(unittest.TestCase):
                 return np.eye(norb), np.zeros((norb,) * 4)
 
         mc = make_mc(RDM12Solver(), target_k=0, nkpts=2, ncas=1)
-        casdm2 = kmcpdft_helper.make_one_casdm2_kcas(mc, "ci")
+        casdm2 = pbc_dms.make_one_casdm2_kcas(mc, "ci")
 
         self.assertEqual(casdm2.shape, (2, 2, 2, 2))
         self.assertEqual(
@@ -419,7 +420,7 @@ class KCASPDFTRDMTests(unittest.TestCase):
     def test_invalid_target_k_is_rejected(self):
         mc = make_mc(RecordingSolver(), target_k=None)
         with self.assertRaisesRegex(ValueError, "target_k must be an integer"):
-            kmcpdft_helper.make_one_casdm1s_kcas(mc, "ci")
+            pbc_dms.make_one_casdm1s_kcas(mc, "ci")
 
     def test_invalid_rdm_shapes_are_rejected(self):
         class BadShapeSolver(RecordingSolver):
@@ -431,9 +432,9 @@ class KCASPDFTRDMTests(unittest.TestCase):
 
         mc = make_mc(BadShapeSolver(), nkpts=2, ncas=1)
         with self.assertRaisesRegex(ValueError, "1-RDM shape"):
-            kmcpdft_helper.make_one_casdm1s_kcas(mc, "ci")
+            pbc_dms.make_one_casdm1s_kcas(mc, "ci")
         with self.assertRaisesRegex(ValueError, "2-RDM shape"):
-            kmcpdft_helper.make_one_casdm2_kcas(mc, "ci")
+            pbc_dms.make_one_casdm2_kcas(mc, "ci")
 
 
 class KCASPDFTKBlockTests(unittest.TestCase):
@@ -451,7 +452,7 @@ class KCASPDFTKBlockTests(unittest.TestCase):
                 casdm1s[spin, p0:p0 + ncas, p0:p0 + ncas] = block
                 expected[spin, k] = block
 
-        result = kmcpdft_helper.casdm1s_to_kpts(
+        result = pbc_dms.casdm1s_to_kpts(
             casdm1s, nkpts, ncas,
         )
         np.testing.assert_allclose(result, expected)
@@ -461,11 +462,11 @@ class KCASPDFTKBlockTests(unittest.TestCase):
         casdm1s[0, 0, 1] = 1e-3
 
         with self.assertRaisesRegex(ValueError, "momentum-forbidden"):
-            kmcpdft_helper.casdm1s_to_kpts(
+            pbc_dms.casdm1s_to_kpts(
                 casdm1s, nkpts=2, ncas=1, momentum_tol=1e-8,
             )
 
-        result = kmcpdft_helper.casdm1s_to_kpts(
+        result = pbc_dms.casdm1s_to_kpts(
             casdm1s, nkpts=2, ncas=1, momentum_tol=None,
         )
         np.testing.assert_allclose(result, 0.0)
@@ -484,7 +485,7 @@ class KCASPDFTKBlockTests(unittest.TestCase):
                     cascm2[k1, k2, k3, k4] = value
                     expected[k1, k2, k3, 0, 0, 0, 0] = value
 
-        result = kmcpdft_helper.cascm2_to_kpts(
+        result = pbc_dms.cascm2_to_kpts(
             cascm2, nkpts, ncas, kconserv,
         )
         np.testing.assert_allclose(result, expected)
@@ -497,7 +498,7 @@ class KCASPDFTKBlockTests(unittest.TestCase):
         cascm2[0, 0, 0, forbidden_k4] = 1e-4
 
         with self.assertRaisesRegex(ValueError, "momentum-forbidden"):
-            kmcpdft_helper.cascm2_to_kpts(
+            pbc_dms.cascm2_to_kpts(
                 cascm2, nkpts, 1, kconserv,
             )
 
@@ -510,12 +511,12 @@ class KCASPDFTKBlockTests(unittest.TestCase):
         casdm1s[1] = np.diag([0.3 + 0.0j, 0.7 + 0.0j])
         casdm2 = np.zeros((ncastot,) * 4, dtype=complex)
 
-        dm1s_kpts, cascm2_kpts = kmcpdft_helper.make_kcas_rdms_kpts(
+        dm1s_kpts, cascm2_kpts = pbc_dms.make_kcas_rdms_kpts(
             casdm1s, casdm2, nkpts, ncas, kconserv,
         )
 
         cumulant = dm2_cumulant_complex(casdm2, casdm1s)
-        expected_cumulant = kmcpdft_helper.cascm2_to_kpts(
+        expected_cumulant = pbc_dms.cascm2_to_kpts(
             cumulant, nkpts, ncas, kconserv,
         )
         np.testing.assert_allclose(
@@ -526,13 +527,13 @@ class KCASPDFTKBlockTests(unittest.TestCase):
     def test_invalid_kconserv_is_rejected(self):
         cascm2 = np.zeros((2,) * 4)
         with self.assertRaisesRegex(ValueError, "kconserv shape"):
-            kmcpdft_helper.cascm2_to_kpts(
+            pbc_dms.cascm2_to_kpts(
                 cascm2, 2, 1, np.zeros((2, 2), dtype=int),
             )
         bad_kconserv = np.zeros((2, 2, 2), dtype=int)
         bad_kconserv[0, 0, 0] = 2
         with self.assertRaisesRegex(ValueError, "indices"):
-            kmcpdft_helper.cascm2_to_kpts(
+            pbc_dms.cascm2_to_kpts(
                 cascm2, 2, 1, bad_kconserv,
             )
 
@@ -560,7 +561,7 @@ class KCASPDFTKBlockTests(unittest.TestCase):
                 casdm1s = solver.make_rdm1s(ci, norb, nelec)
                 _, casdm2 = solver.make_rdm12(ci, norb, nelec)
                 casdm1s_kpts, cascm2_kpts = \
-                    kmcpdft_helper.make_kcas_rdms_kpts(
+                    pbc_dms.make_kcas_rdms_kpts(
                         casdm1s, casdm2, nkpts, ncas, kconserv,
                     )
 
@@ -596,7 +597,7 @@ class KCASPDFTOnTopEnergyTests(unittest.TestCase):
         )
 
         with mock.patch.object(
-                kmcpdft_helper, "make_kcas_rdms_kpts",
+                pbc_dms, "make_kcas_rdms_kpts",
                 return_value=(prepared_dm1s, prepared_cm2)) as prepare, \
              mock.patch.object(
                 otfnalperiodic, "_energy_ot_from_kpts",
@@ -781,7 +782,7 @@ class KCASPDFTWavefunctionEnergyTests(unittest.TestCase):
         )
 
         with mock.patch.object(
-                kmcpdft_helper, "casdm1s_kpts_to_dm1s",
+                pbc_dms, "casdm1s_kpts_to_dm1s",
                 return_value=dm1s_kpts), \
              mock.patch.object(
                 kmcpdft, "get_h2eff_kpts",
@@ -850,7 +851,7 @@ class KCASPDFTWavefunctionEnergyTests(unittest.TestCase):
         )
 
         with mock.patch.object(
-                kmcpdft_helper, "casdm1s_kpts_to_dm1s",
+                pbc_dms, "casdm1s_kpts_to_dm1s",
                 return_value=dm1s_kpts), \
              mock.patch.object(
                 kmcpdft, "get_h2eff_kpts", get_h2eff):
@@ -884,10 +885,10 @@ class KCASPDFTWavefunctionEnergyTests(unittest.TestCase):
                 mc.canonicalization = False
                 energy_kcas = mc.kernel(mo_coeff)[0]
 
-                casdm1s = kmcpdft_helper.make_one_casdm1s_kcas(
+                casdm1s = pbc_dms.make_one_casdm1s_kcas(
                     mc, mc.ci,
                 )
-                casdm2 = kmcpdft_helper.make_one_casdm2_kcas(
+                casdm2 = pbc_dms.make_one_casdm2_kcas(
                     mc, mc.ci,
                 )
                 energy_reconstructed = kmcpdft.energy_mcwfn_kcas_from_rdms(
@@ -921,11 +922,11 @@ class KCASPDFTWavefunctionEnergyTests(unittest.TestCase):
                 for result in mc.charged_results:
                     target_k = result["target_k"]
                     casdm1s = \
-                        kmcpdft_helper.make_one_casdm1s_charged_kcas(
+                        kmcpdft.make_one_casdm1s_charged_kcas(
                             mc, target_k=target_k,
                         )
                     casdm2 = \
-                        kmcpdft_helper.make_one_casdm2_charged_kcas(
+                        kmcpdft.make_one_casdm2_charged_kcas(
                             mc, target_k=target_k,
                         )
                     energy_reconstructed = kmcpdft.energy_mcwfn_kcas_from_rdms(
@@ -1317,11 +1318,11 @@ class KCASPDFTRoutingTests(unittest.TestCase):
     def test_kcas_pdft_mixin_uses_momentum_methods(self):
         self.assertIs(
             kmcpdft._kKCASPDFT.make_one_casdm1s,
-            kmcpdft_helper.make_one_casdm1s_kcas,
+            pbc_dms.make_one_casdm1s_kcas,
         )
         self.assertIs(
             kmcpdft._kKCASPDFT.make_one_casdm2,
-            kmcpdft_helper.make_one_casdm2_kcas,
+            pbc_dms.make_one_casdm2_kcas,
         )
         self.assertIs(
             kmcpdft._kKCASPDFT.energy_mcwfn,
@@ -1335,11 +1336,11 @@ class KCASPDFTRoutingTests(unittest.TestCase):
     def test_charged_kcas_pdft_mixin_uses_sector_rdm_methods(self):
         self.assertIs(
             kmcpdft._kChargedKCASPDFT.make_one_casdm1s,
-            kmcpdft_helper.make_one_casdm1s_charged_kcas,
+            kmcpdft.make_one_casdm1s_charged_kcas,
         )
         self.assertIs(
             kmcpdft._kChargedKCASPDFT.make_one_casdm2,
-            kmcpdft_helper.make_one_casdm2_charged_kcas,
+            kmcpdft.make_one_casdm2_charged_kcas,
         )
         self.assertIs(
             kmcpdft._kChargedKCASPDFT.energy_tot,
