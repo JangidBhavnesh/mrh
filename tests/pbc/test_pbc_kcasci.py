@@ -15,6 +15,49 @@ from mrh.my_pyscf.pbc.mcscf import kcasci
 
 # Author: Bhavnesh Jangid
 
+# The reference energies are the per-cell total energies generated with the 
+# commit:69a0340711baea687d0aadd99d0c18a427ab1dd5
+
+THREE_K_NEUTRAL_REFERENCE_ENERGIES = (
+    -1.470102921533587,
+    -1.262884393685463,
+    -1.262884393685464,
+)
+
+THREE_K_CHARGED_REFERENCE_ENERGIES = {
+    1: (
+        -1.147816186679004,
+        -1.191635629937168,
+        -1.191635629937171,
+    ),
+    -1: (
+        -1.136544208043976,
+        -1.308553153122311,
+        -1.308553153122315,
+    ),
+}
+
+
+def _make_periodic_h2_cell():
+    """Build the periodic H2 cell shared by the kCASCI energy tests."""
+    intra_h = 0.74
+    inter_h = 1.5
+    vacuum = 17.5
+
+    cell = pgto.Cell()
+    cell.a = np.diag([intra_h + inter_h, intra_h + inter_h, vacuum])
+    cell.atom = [
+        ["H", (0.0, 0.0, vacuum / 2.0)],
+        ["H", (intra_h, 0.0, vacuum / 2.0)],
+    ]
+    cell.basis = "STO-6G"
+    cell.unit = "Angstrom"
+    cell.ke_cutoff = 100
+    cell.precision = 1e-10
+    cell.verbose = 0
+    cell.build()
+    return cell
+
 """
 Reference-energy tests for momentum-resolved periodic CASCI.
 """
@@ -25,22 +68,7 @@ class KCASCIReferenceEnergyTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         """Build the shared two-k-point KRHF reference."""
-        intra_h = 0.74
-        inter_h = 1.5
-        vacuum = 17.5
-
-        cell = pgto.Cell()
-        cell.a = np.diag([intra_h + inter_h, intra_h + inter_h, vacuum])
-        cell.atom = [
-            ["H", (0.0, 0.0, vacuum / 2.0)],
-            ["H", (intra_h, 0.0, vacuum / 2.0)],
-        ]
-        cell.basis = "STO-6G"
-        cell.unit = "Angstrom"
-        cell.ke_cutoff = 100
-        cell.precision = 1e-10
-        cell.verbose = 0
-        cell.build()
+        cell = _make_periodic_h2_cell()
 
         cls.kmesh = [2, 1, 1]
         kpts = cell.make_kpts(cls.kmesh, wrap_around=True)
@@ -94,25 +122,20 @@ class KCASCIReferenceEnergyTests(unittest.TestCase):
         mo_coeff = np.asarray(kmf.mo_coeff)
 
         for charge in (1, -1):
-            charged = mcscf.KCASCI(
-                kmf, 2, 2, ncore=0, charge=charge,
-            )
+            charged = mcscf.KCASCI(kmf, 2, 2, ncore=0, charge=charge,)
             charged.kmesh = kmesh
             charged.verbose = charged.fcisolver.verbose = 0
             e_charged = charged.kernel(mo_coeff)[0]
 
             nelecas = 2 - charge
-            reference = mcscf.KCASCI(
-                kmf, 2, nelecas, ncore=0, target_k=0,
-            )
+            reference = mcscf.KCASCI(kmf, 2, nelecas, ncore=0, target_k=0,)
             reference.kmesh = kmesh
             reference.verbose = reference.fcisolver.verbose = 0
             e_reference = kcasci.kernel(reference, mo_coeff, verbose=0)[0]
 
             self.assertEqual(sum(charged.charged_nelecastot), nelecas)
-            self.assertTrue(np.allclose(
-                e_charged, e_reference, atol=1e-10, rtol=1e-10,
-            ))
+            self.assertTrue(np.allclose(e_charged, e_reference, 
+                                        atol=1e-10, rtol=1e-10,))
 
     def test_single_determinant_kcasci_equals_krhf(self):
         """Recover KRHF from a single-determinant active space."""
@@ -295,6 +318,72 @@ class KCASCIReferenceEnergyTests(unittest.TestCase):
         hole.kernel(self.mo_coeff)
         self.assertEqual(hole.charged_nelecastot, (1, 2))
         self.assertEqual(hole.charged_results[0]["nelecastot"], (1, 2))
+
+
+class KCASCIThreeKPointReferenceEnergyTests(unittest.TestCase):
+    """Compare three-sector periodic H2 energies with fixed references."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.cell = _make_periodic_h2_cell()
+        cls.kmesh = [3, 1, 1]
+        kpts = cls.cell.make_kpts(cls.kmesh, wrap_around=True)
+        cls.kmf = scf.KRHF(cls.cell, kpts=kpts).density_fit(
+            auxbasis="def2-svp-jkfit",
+        )
+        cls.kmf.max_cycle = 1000
+        cls.kmf.exxdiv = None
+        cls.kmf.conv_tol = 1e-10
+        cls.kmf.verbose = 0
+        cls.kmf.kernel()
+        if not cls.kmf.converged:
+            raise RuntimeError("Three-k-point KRHF reference did not converge")
+        cls.mo_coeff = np.asarray(cls.kmf.mo_coeff)
+
+    def make_kcasci(self, target_k=None, charge=None):
+        mc = mcscf.KCASCI(
+            self.kmf, 2, 2, ncore=0, target_k=target_k, charge=charge,
+        )
+        mc.kmesh = self.kmesh
+        mc.verbose = 0
+        mc.fcisolver.verbose = 0
+        mc.canonicalization = False
+        return mc
+
+    def assert_reference_energy(self, actual, reference, *, sector):
+        self.assertAlmostEqual(
+            float(np.real(actual)), reference, places=7,
+            msg=(f"{sector} energy mismatch: actual={actual}, reference={reference}"),
+        )
+
+    def test_neutral_energies_for_all_target_k(self):
+        """Check the neutral CAS(2,2) energy in all three momentum sectors."""
+        for target_k, reference in enumerate(
+                THREE_K_NEUTRAL_REFERENCE_ENERGIES):
+            with self.subTest(target_k=target_k):
+                mc = self.make_kcasci(target_k=target_k)
+                energy = mc.kernel(self.mo_coeff)[0]
+                self.assert_reference_energy(
+                    energy, reference, sector=f"neutral target_k={target_k}",
+                )
+
+    def test_charged_energies_for_all_target_k(self):
+        """Check N-1 and N+1 energies in all three momentum sectors."""
+        for charge, references in THREE_K_CHARGED_REFERENCE_ENERGIES.items():
+            mc = self.make_kcasci(charge=charge)
+            energies = np.asarray(mc.kernel(self.mo_coeff)[0])
+            self.assertEqual(energies.shape, (3,))
+            self.assertEqual(
+                [result["target_k"] for result in mc.charged_results],
+                [0, 1, 2],
+            )
+            for target_k, (energy, reference) in enumerate(
+                    zip(energies, references)):
+                with self.subTest(charge=charge, target_k=target_k):
+                    self.assert_reference_energy(
+                        energy, reference,
+                        sector=f"charge={charge:+d} target_k={target_k}",
+                    )
 
 
 if __name__ == "__main__":
