@@ -36,22 +36,20 @@ H      3.053960000000   1.039990000000  -1.529140000000
 H      3.367270000000  -0.612150000000  -1.514110000000'''
 basis = {'C': 'sto-3g','H': 'sto-3g','O': 'sto-3g','N': 'sto-3g','Cr': 'cc-pvdz'}
 mol = gto.M (atom=xyz, spin=6, charge=3, basis=basis,
-             verbose=4, output='05-kremers_dimer_apc.log') 
+             verbose=4, output='05-kremers_dimer_downsample.log') 
 mol.max_memory=8000
 mf = scf.ROHF(mol)
-mf.chkfile = '05-kremers_dimer_apc.chk'
+mf.chkfile = '05-kremers_dimer_downsample.chk'
 mf.kernel () 
 
-# Using "AVAS" to try to automatically find the 3d orbitals
-from pyscf.mcscf import apc
-ncas, nelecas, mo_coeff = apc.APC (mf, max_size=14).kernel ()
-molden.from_mo (mol, '05-kremers_dimer_apc_guess.molden', mo_coeff, occ=mf.mo_occ)
-
-# AVAS gives a tuple for nelecas. I want to get the open-shell singlet so I have to sum it
-nelecas = nelecas[0] + nelecas[1]
+# Using previous AVAS calculation to initialize smaller active-space calculation
+from pyscf.mcscf import chkfile
+avas_mol, avas_mc_data = chkfile.load_mcscf ('04-kremers_dimer_avas.chk')
+mo_coeff = avas_mc_data['mo_coeff']
+molden.from_mo (mol, '05-kremers_dimer_downsample_guess.molden', mo_coeff, occ=mf.mo_occ)
 
 # Optimizing orbitals for the open-shell singlet
-mc = mcscf.CASSCF (mf, ncas, (nelecas//2,nelecas//2))
+mc = mcscf.CASSCF (mf, 10, (3,3))
 
 # Guarantee spin singlet (instead of, i.e., ms=0 triplet)
 mc.fcisolver = csf_solver (mol, smult=1)
@@ -59,7 +57,7 @@ mc.kernel (mo_coeff)
 
 # QOL over PySCF's molden tools: sets E of active orbitals to 0 so jmol doesn't scramble them as badly
 from mrh.my_pyscf.tools import molden as my_molden
-my_molden.from_mcscf (mc, '05-kremers_dimer_apc.molden', cas_natorb=True)
+my_molden.from_mcscf (mc, '05-kremers_dimer_downsample.molden', cas_natorb=True)
 
 
 
