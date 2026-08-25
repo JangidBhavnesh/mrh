@@ -977,6 +977,8 @@ class KCASPDFTEndToEndTests(unittest.TestCase):
         self.assertFalse(conventional.momentum_resolved)
         self.assertTrue(momentum.momentum_resolved)
         self.assertEqual(momentum.target_k, 0)
+        self.assertTrue(np.isrealobj(conventional.e_tot))
+        self.assertTrue(np.isrealobj(momentum.e_tot))
         np.testing.assert_allclose(
             momentum.e_mcscf, conventional.e_mcscf,
             atol=1e-9, rtol=1e-9,
@@ -1107,9 +1109,20 @@ class KCASPDFTEndToEndTests(unittest.TestCase):
         self.assertEqual(hole.charged_pdft_results[0]["target_k"], 1)
         self.assertEqual(np.ndim(hole.e_tot), 0)
         self.assertEqual(np.ndim(hole.e_ot), 0)
+        self.assertTrue(np.isrealobj(hole.e_tot))
 
 
 class KCASPDFTRoutingTests(unittest.TestCase):
+
+    def test_kmcpdft_energy_tot_is_real(self):
+        mc = object.__new__(kmcpdft._kMCPDFT)
+        with mock.patch.object(
+                kmcpdft._PeriodicMCPDFT, "energy_tot",
+                return_value=(1.25 + 2.0j, 0.5 + 0.25j)):
+            e_tot, e_ot = mc.energy_tot()
+
+        self.assertEqual(e_tot, 1.25)
+        self.assertEqual(e_ot, 0.5 + 0.25j)
 
     def test_second_order_krhf_is_routed_as_mean_field(self):
         _, kmf, _, _ = build_periodic_h2()
@@ -1352,15 +1365,15 @@ class KCASPDFTRoutingTests(unittest.TestCase):
             verbose=logger.QUIET,
             make_one_casdm1s=mock.Mock(return_value=casdm1s),
             make_one_casdm2=mock.Mock(return_value=casdm2),
-            energy_mcwfn=mock.Mock(return_value=1.25),
-            energy_dft=mock.Mock(return_value=0.5),
+            energy_mcwfn=mock.Mock(return_value=1.25 + 0.2j),
+            energy_dft=mock.Mock(return_value=0.5 - 0.1j),
         )
 
         result = kmcpdft.energy_tot_charged_kcas(
             mc, target_k=-1, state=1,
         )
 
-        self.assertEqual(result, (1.75, 0.5))
+        self.assertEqual(result, (1.75, 0.5 - 0.1j))
         ot.reset.assert_called_once_with(mol="mol")
         mc.make_one_casdm1s.assert_called_once_with(
             ci="sector-1", state=1, target_k=1,
