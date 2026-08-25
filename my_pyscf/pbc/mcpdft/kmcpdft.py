@@ -401,7 +401,7 @@ class _kChargedKCASPDFT(_kKCASPDFT):
             ])
         return self.e_tot, self.e_ot, self.charged_pdft_results
 
-    def band_energies(self, reference_energy, root=0, kpts=None,
+    def band_energies(self, reference_energy, root=None, kpts=None,
                       per_cell=False, reference_target_k=None):
         """Return quasiparticle energies from charged MC-PDFT results."""
         from mrh.my_pyscf.pbc.mcscf import kcasci
