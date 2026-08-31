@@ -15,7 +15,7 @@ mc = mcscf.CASSCF (scf.RHF (mol).run (), 6, 6).run (mo_coeff, natorb=True)
 print ("CASSCF(6,6)/cc-pVDZ energy of water from OpenMolcas orbital guess:", mc.e_tot)
 
 # ALong with the above, if one wants to use the OpenMolcas grid then
-# they would require the corresponding `GridFile` from OpenMolcas.
+# they would require the corresponding `GridFile` from OpenMolcas. (v26.06, commit: 4b455201fbc72197d5123208d5ff834d8e656c9f)
 # In OpenMolcas, one can generate the grid file using the following input:
 '''
 &SEWARD
