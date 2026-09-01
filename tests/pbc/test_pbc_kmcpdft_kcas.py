@@ -169,9 +169,9 @@ class KCASPDFTWavefunctionEnergyTests(unittest.TestCase):
                 casdm2 = pbc_dms.make_one_casdm2_kcas(
                     mc, mc.ci,
                 )
-                energy_reconstructed = kmcpdft.energy_mcwfn_kcas_from_rdms(
+                energy_reconstructed = kmcpdft.energy_mcwfn(
                     mc, ot=ot, casdm1s=casdm1s, casdm2=casdm2,
-                    verbose=logger.QUIET,
+                    verbose=logger.QUIET, rdm_representation="bloch",
                 )
 
                 np.testing.assert_allclose(
@@ -207,9 +207,9 @@ class KCASPDFTWavefunctionEnergyTests(unittest.TestCase):
                         kmcpdft.make_one_casdm2_charged_kcas(
                             mc, target_k=target_k,
                         )
-                    energy_reconstructed = kmcpdft.energy_mcwfn_kcas_from_rdms(
+                    energy_reconstructed = kmcpdft.energy_mcwfn(
                         mc, ot=ot, casdm1s=casdm1s, casdm2=casdm2,
-                        verbose=logger.QUIET,
+                        verbose=logger.QUIET, rdm_representation="bloch",
                     )
                     np.testing.assert_allclose(
                         energy_reconstructed, result["e_tot"],
