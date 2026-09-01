@@ -109,7 +109,7 @@ class otfnalperiodic_gamma(otfnal):
             E_ot += ot.eval_ot (rho, Pi, dderiv=0, weights=weight)[0].dot (weight)
             t0 = logger.timer (ot, 'on-top energy calculation', *t0)
         return E_ot
-    
+
     energy_ot.__doc__ = otfnal.energy_ot.__doc__
 
     def reset(self, mol=None):
@@ -134,35 +134,30 @@ def _energy_ot_from_kpts(ot, casdm1s_kpts, cascm2_kpts, mo_coeff,
     casdm1s_kpts = np.asarray(casdm1s_kpts)
     cascm2_kpts = np.asarray(cascm2_kpts)
     kconserv = np.asarray(kconserv)
+
     if mo_coeff.ndim != 3:
-        raise ValueError(
-            "mo_coeff must have shape (nkpts, nao, nmo)",
-        )
+        raise ValueError("mo_coeff must have shape (nkpts, nao, nmo)",)
 
     nkpts, nao = mo_coeff.shape[:2]
+
     if casdm1s_kpts.ndim != 4 or casdm1s_kpts.shape[:2] != (2, nkpts):
-        raise ValueError(
-            "casdm1s_kpts must have shape (2, nkpts, ncas, ncas)",
-        )
+        raise ValueError("casdm1s_kpts must have shape (2, nkpts, ncas, ncas)",)
+
     ncas = casdm1s_kpts.shape[2]
     expected_dm1_shape = (2, nkpts, ncas, ncas)
     if casdm1s_kpts.shape != expected_dm1_shape:
-        raise ValueError(
-            f"Expected casdm1s_kpts shape {expected_dm1_shape}, "
-            f"got {casdm1s_kpts.shape}",
-        )
+        raise ValueError(f"Expected casdm1s_kpts shape {expected_dm1_shape}, "
+                         f"got {casdm1s_kpts.shape}",)
     expected_cm2_shape = (
         nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas,
     )
     if cascm2_kpts.shape != expected_cm2_shape:
-        raise ValueError(
-            f"Expected cascm2_kpts shape {expected_cm2_shape}, "
-            f"got {cascm2_kpts.shape}",
-        )
+        raise ValueError(f"Expected cascm2_kpts shape {expected_cm2_shape}, "
+                         f"got {cascm2_kpts.shape}",)
+
     if kconserv.shape != (nkpts, nkpts, nkpts):
-        raise ValueError(
-            "kconserv must have shape (nkpts, nkpts, nkpts)",
-        )
+        raise ValueError(f"kconserv must have shape (nkpts, nkpts, nkpts)",)
+
     if ncore < 0 or ncore + ncas > mo_coeff.shape[2]:
         raise ValueError("ncore and ncas are incompatible with mo_coeff")
 
@@ -171,12 +166,15 @@ def _energy_ot_from_kpts(ot, casdm1s_kpts, cascm2_kpts, mo_coeff,
     )
 
     ni = ot._numint
+
+
     make_rho_alpha, nset_a, nao_a = ni._gen_rho_evaluator(
         ot.cell, dm1s_kpts[0], hermi, False,
     )
     make_rho_beta, nset_b, nao_b = ni._gen_rho_evaluator(
         ot.cell, dm1s_kpts[1], hermi, False,
     )
+
     if nset_a != 1 or nset_b != 1:
         raise NotImplementedError("k-MC-PDFT requires one density set")
     if nao_a != nao or nao_b != nao:
@@ -215,100 +213,101 @@ def _energy_ot_from_kpts(ot, casdm1s_kpts, cascm2_kpts, mo_coeff,
     return energy_ot
 
 
-class otfnalperiodic_kpts(otfnal):
-    '''
-    Child class to define the otfnal class for periodic systems with k-points.
-    '''
-    def energy_ot (ot, casdm1s, casdm2, mo_coeff, ncore, max_memory=param.MAX_MEMORY, hermi=1):
-        '''
-        See the docstring of pyscf/mcpdft/otfnal.energy_ot for more information.
-        # Note: the casdm1s and casdm2 are in the wannier orbital basis. We need to transform
-        them to the block mo-orbital basis for k-points calculations.
-        '''
+def _prepare_wannier_rdms(ot, casdm1s, casdm2, mo_coeff, ncore):
+    """Transform Wannier-basis RDMs to momentum blocks."""
+    mo_coeff = np.asarray(mo_coeff)
+    casdm1s = np.asarray(casdm1s)
+    casdm2 = np.asarray(casdm2)
+    assert mo_coeff.ndim == 3
 
-        xctype = ot.xctype
-        dtype = mo_coeff.dtype
-        if xctype == 'HF':
-            return 0.0
-        
-        assert mo_coeff.ndim == 3, "The mo_coeff should be 3D array for k-points calculations"
-        
-        ncastot = casdm2.shape[0]
-        nkpts = mo_coeff.shape[0]
-        ncas = ncastot // nkpts
-        
-        cell = ot.cell
-        kpts = ot.kpts
+    nkpts = mo_coeff.shape[0]
+    ncastot = casdm2.shape[0]
+    ncas = ncastot // nkpts
+    assert getattr(ot, 'kmesh', None) is not None
+    assert casdm2.shape == (ncastot,) * 4
+    assert casdm1s.shape == (2, ncastot, ncastot)
 
-        assert nkpts == mo_coeff.shape[0], "The number of k-points in mo_coeff and casdm2 should be same"
-        assert getattr(ot, 'kmesh', None) is not None, "The kmesh attribute should be set in the otfnal object"
+    mo_phase = get_mo_coeff_k2R_wokmf(
+        ot.cell, mo_coeff, ncore, ncas, ot.kpts, kmesh=ot.kmesh,
+    )[-1]
 
-        mo_phase = get_mo_coeff_k2R_wokmf(cell, mo_coeff, ncore, ncas, 
-                                          kpts, kmesh=ot.kmesh)[-1]
-        
-        assert casdm2.shape == (ncastot,)*4
-        assert casdm1s[0].shape == casdm1s[1].shape == (ncastot, ncastot)
+    cascm2 = dm2_cumulant_complex(casdm2, casdm1s)
+    cascm2_kpts = np.zeros(
+        (nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas),
+        dtype=mo_coeff.dtype,
+    )
 
-        # We need to use the modified dm2_cumulant function for complex orbitals.
-        cascm2 = dm2_cumulant_complex(casdm2, casdm1s)
-        cascm2_kpts = np.zeros((nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas), dtype=dtype)
-
-        kconserv = kpts_helper.get_kconserv(cell, kpts)
-        for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
-            k4 = kconserv[k1, k2, k3]
-            dm2_k = _basis_transform_casdm2_kpts(cascm2, mo_phase, (k1, k2, k3, k4))
-            cascm2_kpts[k1, k2, k3] = dm2_k
-        
-        # Transform the Wannier-basis active 1-RDM to each k-point.
-        casdm1s_kpts = []
-        for k in range(nkpts):
-            casdm1s_k = [reduce(np.dot, (mo_phase[k], casdm1s_, mo_phase[k].conj().T)) 
-                        for casdm1s_ in casdm1s]
-            casdm1s_kpts.append(casdm1s_k)
-        casdm1s_kpts = np.asarray(casdm1s_kpts).transpose(1, 0, 2, 3)
-
-        return _energy_ot_from_kpts(
-            ot, casdm1s_kpts, cascm2_kpts, mo_coeff, ncore, kconserv,
-            max_memory=max_memory, hermi=hermi,
+    kconserv = kpts_helper.get_kconserv(ot.cell, ot.kpts)
+    for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
+        k4 = kconserv[k1, k2, k3]
+        cascm2_kpts[k1, k2, k3] = _basis_transform_casdm2_kpts(
+            cascm2, mo_phase, (k1, k2, k3, k4),
         )
 
-    def energy_ot_kcas(ot, casdm1s, casdm2, mo_coeff, ncore,
-                       max_memory=param.MAX_MEMORY, hermi=1,
-                       momentum_tol=1e-8):
-        """Evaluate the on-top energy directly from Bloch-basis kCAS RDMs."""
+    casdm1s_kpts = []
+    for k in range(nkpts):
+        casdm1s_kpts.append([reduce(np.dot,(mo_phase[k], dm1, mo_phase[k].conj().T),
+            dm1
+        ) for dm1 in casdm1s])
+    casdm1s_kpts = np.asarray(casdm1s_kpts).transpose(1, 0, 2, 3)
+    return casdm1s_kpts, cascm2_kpts, kconserv
+
+
+def _prepare_bloch_rdms(ot, casdm1s, casdm2, mo_coeff, momentum_tol):
+    """Extract momentum blocks from flattened Bloch-basis RDMs."""
+    mo_coeff = np.asarray(mo_coeff)
+    casdm2 = np.asarray(casdm2)
+    if mo_coeff.ndim != 3:
+        raise ValueError("mo_coeff must have shape (nkpts, nao, nmo)")
+    if casdm2.ndim != 4 or len(set(casdm2.shape)) != 1:
+        raise ValueError("casdm2 must have shape (ncas * nkpts,) * 4")
+
+    nkpts = mo_coeff.shape[0]
+    ncastot = casdm2.shape[0]
+    if ncastot % nkpts:
+        raise ValueError("The active RDM size must be divisible by nkpts")
+    ncas = ncastot // nkpts
+    kconserv = getattr(ot, 'kconserv', None)
+    if kconserv is None:
+        kconserv = kpts_helper.get_kconserv(ot.cell, ot.kpts)
+    casdm1s_kpts, cascm2_kpts = pbc_dms.make_kcas_rdms_kpts(
+        casdm1s, casdm2, nkpts, ncas, kconserv,
+        momentum_tol=momentum_tol,
+    )
+    return casdm1s_kpts, cascm2_kpts, kconserv
+
+
+def _prepare_kpts_rdms(ot, casdm1s, casdm2, mo_coeff, ncore,
+                       representation, momentum_tol):
+    """Prepare active RDMs for the shared k-point evaluator."""
+    if representation == 'wannier':
+        return _prepare_wannier_rdms(
+            ot, casdm1s, casdm2, mo_coeff, ncore,
+        )
+    if representation == 'bloch':
+        return _prepare_bloch_rdms(
+            ot, casdm1s, casdm2, mo_coeff, momentum_tol,
+        )
+    raise ValueError(f"Unknown RDM representation {representation!r}")
+
+
+class otfnalperiodic_kpts(otfnal):
+    """On-top functional for periodic k-point calculations."""
+
+    def energy_ot(ot, casdm1s, casdm2, mo_coeff, ncore,
+                  max_memory=param.MAX_MEMORY, hermi=1,
+                  rdm_representation='wannier', momentum_tol=1e-8):
+        """Evaluate the on-top energy from Wannier- or Bloch-basis RDMs."""
         if ot.xctype == 'HF':
             return 0.0
-
-        mo_coeff = np.asarray(mo_coeff)
-        if mo_coeff.ndim != 3:
-            raise ValueError(
-                "mo_coeff must have shape (nkpts, nao, nmo)",
-            )
-        nkpts = mo_coeff.shape[0]
-        casdm2 = np.asarray(casdm2)
-        if casdm2.ndim != 4 or len(set(casdm2.shape)) != 1:
-            raise ValueError(
-                "casdm2 must have shape (ncas * nkpts,) * 4",
-            )
-        ncastot = casdm2.shape[0]
-        if ncastot % nkpts:
-            raise ValueError("The active RDM size must be divisible by nkpts")
-        ncas = ncastot // nkpts
-
-        kconserv = getattr(ot, 'kconserv', None)
-        if kconserv is None:
-            kconserv = kpts_helper.get_kconserv(ot.cell, ot.kpts)
-        casdm1s_kpts, cascm2_kpts = \
-            pbc_dms.make_kcas_rdms_kpts(
-                casdm1s, casdm2, nkpts, ncas, kconserv,
-                momentum_tol=momentum_tol,
-            )
+        casdm1s_kpts, cascm2_kpts, kconserv = _prepare_kpts_rdms(
+            ot, casdm1s, casdm2, mo_coeff, ncore,
+            rdm_representation, momentum_tol,
+        )
         return _energy_ot_from_kpts(
             ot, casdm1s_kpts, cascm2_kpts, mo_coeff, ncore, kconserv,
             max_memory=max_memory, hermi=hermi,
         )
-    
-    energy_ot.__doc__ = otfnal.energy_ot.__doc__
 
 def _get_ks_obj(kmc_or_kmf_or_cell, khf=False, kpts=None):
     '''
