@@ -1435,8 +1435,9 @@ class LASSCF_HessianOperator (sparse_linalg.LinearOperator):
                 log.debug('H2eff gpu kernel is not working')
                 lib.logger.debug(np.max((h2eff_sub-h2eff_sub2)*(h2eff_sub-h2eff_sub2)))
                 exit()
-        elif gpu:
-            h2eff_sub = self._update_h2eff_sub_gpu (gpu, mo1, umat, h2eff_sub)
+        # TODO: debug or remove
+        #elif gpu:
+        #    h2eff_sub = self._update_h2eff_sub_gpu (gpu, mo1, umat, h2eff_sub)
         else:
             h2eff_sub = self._update_h2eff_sub (mo1, umat, h2eff_sub)
         t0=log.timer('update_h2eff_sub',*t0)

@@ -614,8 +614,8 @@ class ImpuritySolver ():
         las = self.mol._las
         gpu = las.use_gpu
         if h2eff_sub is None: h2eff_sub = las.ao2mo (mo_coeff)
-        if e_states is None: e_states = las.energy_nuc () + las.states_energy_elec (
-            mo_coeff=mo_coeff, ci=ci, h2eff=h2eff_sub)
+        if e_states is None: e_states = las.energy_nuc () + np.array (las.states_energy_elec (
+            mo_coeff=mo_coeff, ci=ci, h2eff=h2eff_sub))
         e_tot = np.dot (las.weights, e_states)
         if dm1s is None: dm1s = las.make_rdm1s (mo_coeff=mo_coeff, ci=ci)
         if veff is None: veff = las.get_veff (dm=dm1s)
