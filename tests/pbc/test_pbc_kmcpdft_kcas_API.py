@@ -584,7 +584,7 @@ class KCASPDFTKBlockTests(unittest.TestCase):
 
 class KCASPDFTOnTopEnergyTests(unittest.TestCase):
 
-    def test_energy_ot_kcas_uses_direct_kspace_preparation(self):
+    def test_energy_ot_uses_bloch_kspace_preparation(self):
         nkpts, ncas = 2, 1
         ncastot = nkpts * ncas
         kconserv = make_kconserv(nkpts)
@@ -611,8 +611,9 @@ class KCASPDFTOnTopEnergyTests(unittest.TestCase):
              mock.patch.object(
                 otfnalperiodic, "get_mo_coeff_k2R_wokmf",
                 side_effect=AssertionError("unexpected Wannier transform")):
-            energy = otfnalperiodic.otfnalperiodic_kpts.energy_ot_kcas(
+            energy = otfnalperiodic.otfnalperiodic_kpts.energy_ot(
                 ot, casdm1s, casdm2, mo_coeff, ncore=0,
+                rdm_representation="bloch",
             )
 
         self.assertEqual(energy, 1.25)
@@ -1255,7 +1256,7 @@ class KCASPDFTRoutingTests(unittest.TestCase):
         )
 
     def test_energy_dft_kcas_delegates_to_direct_ot_method(self):
-        ot = SimpleNamespace(energy_ot_kcas=mock.Mock(return_value=0.75))
+        ot = SimpleNamespace(energy_ot=mock.Mock(return_value=0.75))
         mc = SimpleNamespace(
             otfnal=ot,
             mo_coeff="mo",
@@ -1271,9 +1272,10 @@ class KCASPDFTRoutingTests(unittest.TestCase):
         )
 
         self.assertEqual(result, 0.75)
-        ot.energy_ot_kcas.assert_called_once_with(
+        ot.energy_ot.assert_called_once_with(
             casdm1s, casdm2, "mo", 2,
-            max_memory=1234, hermi=1, momentum_tol=1e-8,
+            max_memory=1234, hermi=1, rdm_representation="bloch",
+            momentum_tol=1e-8,
         )
 
 
