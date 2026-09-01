@@ -2,12 +2,8 @@ import numpy as np
 
 from pyscf.mcpdft.mcpdft import _PDFT
 from pyscf.pbc.dft import gen_grid as pbc_gen_grid
-from pyscf.pbc.lib import kpts_helper
 
-from mrh.my_pyscf.pbc.mcscf.k2R import get_mo_coeff_k2R
-from mrh.my_pyscf.pbc.mcpdft._dms import dm2_cumulant_complex
 from mrh.my_pyscf.pbc.mcpdft.otfnalperiodic import (
-    _basis_transform_casdm2_kpts,
     get_pbc_otfnal_gamma,
 )
 
@@ -21,46 +17,6 @@ is that the grids are defined for periodic systems.
 Previously, this was hosted in the mrh/my_pyscf/mcpdft folder. However, I have moved it to 
 this file to make sure periodic MC-PDFT is hosted in right folder.
 '''
-
-
-def energy_mcwfn(mc, mo_coeff=None, ci=None, ot=None, state=0,
-                 casdm1s=None, casdm2=None, verbose=None):
-    """Transform Wannier CAS RDMs and evaluate the k-point MC energy."""
-    mo_coeff = mc.mo_coeff if mo_coeff is None else np.asarray(mo_coeff)
-    ci = mc.ci if ci is None else ci
-    if casdm1s is None:
-        casdm1s = mc.make_one_casdm1s(ci=ci, state=state)
-    if casdm2 is None:
-        casdm2 = mc.make_one_casdm2(ci=ci, state=state)
-
-    nkpts, ncas = mc.nkpts, mc.ncas
-    mo_phase = get_mo_coeff_k2R(
-        mc._scf, mo_coeff, mc.ncore, ncas, kmesh=mc.kmesh,
-    )[-1]
-    casdm1s_kpts = np.asarray([
-        [phase @ dm @ phase.conj().T for phase in mo_phase]
-        for dm in casdm1s
-    ])
-
-    cascm2 = dm2_cumulant_complex(casdm2, casdm1s)
-    kconserv = getattr(mc, "kconserv", None)
-    if kconserv is None:
-        kconserv = kpts_helper.get_kconserv(mc.cell, mc.kpts)
-    cascm2_kpts = np.empty(
-        (nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas),
-        dtype=cascm2.dtype,
-    )
-    for k1, k2, k3 in kpts_helper.loop_kkk(nkpts):
-        k4 = kconserv[k1, k2, k3]
-        cascm2_kpts[k1, k2, k3] = _basis_transform_casdm2_kpts(
-            cascm2, mo_phase, (k1, k2, k3, k4),
-        )
-
-    from mrh.my_pyscf.pbc.mcpdft.kmcpdft import energy_mcwfn_kcas
-    return energy_mcwfn_kcas(
-        mc, casdm1s_kpts, cascm2_kpts, mo_coeff=mo_coeff,
-        ot=ot, verbose=verbose,
-    )
 
 
 class _PeriodicMCPDFT(_PDFT):
