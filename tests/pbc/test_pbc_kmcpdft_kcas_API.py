@@ -729,7 +729,7 @@ class KCASPDFTOnTopEnergyTests(unittest.TestCase):
 
 class KCASPDFTWavefunctionEnergyTests(unittest.TestCase):
 
-    def test_energy_mcwfn_kcas_hybrid_components(self):
+    def test_energy_mcwfn_from_kpts_hybrid_components(self):
         nkpts, ncas, nao = 2, 1, 1
         casdm1s_kpts = np.zeros((2, nkpts, ncas, ncas))
         cascm2_kpts = np.full(
@@ -784,7 +784,7 @@ class KCASPDFTWavefunctionEnergyTests(unittest.TestCase):
              mock.patch.object(
                 kmcpdft, "get_h2eff_kpts",
                 return_value=h2eff) as get_h2eff:
-            result = kmcpdft.energy_mcwfn_kcas(
+            result = kmcpdft._energy_mcwfn_from_kpts(
                 mc, casdm1s_kpts, cascm2_kpts,
             )
 
@@ -812,7 +812,7 @@ class KCASPDFTWavefunctionEnergyTests(unittest.TestCase):
         np.testing.assert_allclose(jk_calls[0][0], dm1s_kpts)
         get_h2eff.assert_called_once_with(mc, mc.mo_coeff)
 
-    def test_energy_mcwfn_kcas_pure_functional_skips_exchange_and_eris(self):
+    def test_energy_mcwfn_from_kpts_pure_functional_skips_exchange_and_eris(self):
         nkpts, ncas = 2, 1
         casdm1s_kpts = np.zeros((2, nkpts, ncas, ncas))
         cascm2_kpts = np.zeros(
@@ -852,7 +852,7 @@ class KCASPDFTWavefunctionEnergyTests(unittest.TestCase):
                 return_value=dm1s_kpts), \
              mock.patch.object(
                 kmcpdft, "get_h2eff_kpts", get_h2eff):
-            result = kmcpdft.energy_mcwfn_kcas(
+            result = kmcpdft._energy_mcwfn_from_kpts(
                 mc, casdm1s_kpts, cascm2_kpts,
             )
 
@@ -1077,6 +1077,14 @@ class KCASPDFTRoutingTests(unittest.TestCase):
             )
 
     def test_kcas_pdft_mixin_uses_momentum_methods(self):
+        self.assertEqual(
+            kmcpdft._MCPDFTCPLX._mcwfn_rdm_representation,
+            "wannier",
+        )
+        self.assertEqual(
+            kmcpdft._kCASPDFT._mcwfn_rdm_representation,
+            "bloch",
+        )
         self.assertIs(
             kmcpdft._kCASPDFT.make_one_casdm1s,
             pbc_dms.make_one_casdm1s_kcas,
@@ -1087,7 +1095,7 @@ class KCASPDFTRoutingTests(unittest.TestCase):
         )
         self.assertIs(
             kmcpdft._kCASPDFT.energy_mcwfn,
-            kmcpdft.energy_mcwfn_kcas_from_rdms,
+            kmcpdft.energy_mcwfn,
         )
         self.assertIs(
             kmcpdft._kCASPDFT.energy_dft,
