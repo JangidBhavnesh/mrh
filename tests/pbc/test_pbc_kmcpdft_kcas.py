@@ -79,7 +79,7 @@ class KCASPDFTReferenceEnergyTests(unittest.TestCase):
     def make_pdft(self, target_k=None, charge=None):
         mc = pbc_mcpdft.KCASCI(
             self.kmf, "tPBE", 2, 2, ncore=0,
-            momentum_resolved=True, target_k=target_k, charge=charge,
+            target_k=target_k, charge=charge,
             grids_attr={"level": 1},
         )
         mc.kmesh = self.kmesh
@@ -221,13 +221,12 @@ class KCASPDFTEndToEndTests(unittest.TestCase):
 
     grids_attr = {"level": 1}
 
-    def make_pdft(self, ncas, target_k=None, momentum_resolved=False,
-                  charge=None, charged_spin=None):
+    def make_pdft(self, ncas, target_k=None, charge=None,
+                  charged_spin=None):
         _, kmf, kmesh, _ = build_periodic_h2()
         kwargs = {
             "ncore": 0,
             "grids_attr": self.grids_attr,
-            "momentum_resolved": momentum_resolved,
         }
         if target_k is not None:
             kwargs["target_k"] = target_k
@@ -247,7 +246,7 @@ class KCASPDFTEndToEndTests(unittest.TestCase):
         _, _, _, mo_coeff = build_periodic_h2()
         conventional = self.make_pdft(ncas=2)
         momentum = self.make_pdft(
-            ncas=2, momentum_resolved=True, target_k=0,
+            ncas=2, target_k=0,
         )
 
         conventional.kernel(mo_coeff)
@@ -274,7 +273,7 @@ class KCASPDFTEndToEndTests(unittest.TestCase):
     def test_nonzero_target_matches_existing_kcasci_route(self):
         _, kmf, kmesh, mo_coeff = build_periodic_h2()
         direct = self.make_pdft(
-            ncas=2, momentum_resolved=True, target_k=1,
+            ncas=2, target_k=1,
         )
         direct.kernel(mo_coeff)
 
@@ -286,7 +285,6 @@ class KCASPDFTEndToEndTests(unittest.TestCase):
         kcas.kernel(mo_coeff)
         wrapped = pbc_mcpdft.KCASCI(
             kcas, "tPBE", 2, 2, ncore=0,
-            momentum_resolved=True,
             grids_attr=self.grids_attr,
         )
         wrapped.verbose = 0
@@ -308,7 +306,7 @@ class KCASPDFTEndToEndTests(unittest.TestCase):
         _, kmf, _, mo_coeff = build_periodic_h2()
         conventional = self.make_pdft(ncas=1)
         momentum = self.make_pdft(
-            ncas=1, momentum_resolved=True, target_k=0,
+            ncas=1, target_k=0,
         )
 
         conventional.kernel(mo_coeff)
@@ -327,13 +325,13 @@ class KCASPDFTEndToEndTests(unittest.TestCase):
     def test_charged_hole_and_particle_sector_sweeps(self):
         _, _, _, mo_coeff = build_periodic_h2()
         neutral = self.make_pdft(
-            ncas=2, momentum_resolved=True, target_k=0,
+            ncas=2, target_k=0,
         )
         hole = self.make_pdft(
-            ncas=2, momentum_resolved=True, charge=1,
+            ncas=2, charge=1,
         )
         particle = self.make_pdft(
-            ncas=2, momentum_resolved=True, charge=-1,
+            ncas=2, charge=-1,
         )
 
         neutral.kernel(mo_coeff)
@@ -377,7 +375,7 @@ class KCASPDFTEndToEndTests(unittest.TestCase):
     def test_charged_explicit_sector_returns_scalar_energy(self):
         _, _, _, mo_coeff = build_periodic_h2()
         hole = self.make_pdft(
-            ncas=2, momentum_resolved=True, charge=1, target_k=1,
+            ncas=2, charge=1, target_k=1,
         )
 
         hole.kernel(mo_coeff)

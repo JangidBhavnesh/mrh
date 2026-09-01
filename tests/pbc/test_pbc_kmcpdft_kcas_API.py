@@ -910,7 +910,7 @@ class KCASPDFTRoutingTests(unittest.TestCase):
                 return_value=momentum_pdft) as make_momentum_pdft:
             result = pbc_mcpdft.KCASCI(
                 second_order_kmf, "tPBE", 2, 2, ncore=0,
-                momentum_resolved=True, target_k=1,
+                target_k=1,
             )
 
         self.assertIs(result, momentum_pdft)
@@ -936,13 +936,6 @@ class KCASPDFTRoutingTests(unittest.TestCase):
             ncore=0, frozen=None,
         )
 
-    def test_target_k_requires_momentum_resolved_flag(self):
-        with self.assertRaisesRegex(
-                ValueError, "target_k.*require momentum_resolved=True"):
-            pbc_mcpdft.KCASCI(
-                "kmf", "tPBE", 2, (1, 1), target_k=0,
-            )
-
     def test_momentum_route_constructs_kcasci_with_target(self):
         kmf = object()
         kmc = SimpleNamespace()
@@ -958,7 +951,7 @@ class KCASPDFTRoutingTests(unittest.TestCase):
                 return_value=pdft) as make_child:
             result = pbc_mcpdft.KCASCI(
                 kmf, "tPBE", 2, (1, 1), ncore=0,
-                momentum_resolved=True, target_k=3,
+                target_k=3,
                 grids_level=4,
             )
 
@@ -985,8 +978,7 @@ class KCASPDFTRoutingTests(unittest.TestCase):
                 return_value=pdft) as make_child:
             result = pbc_mcpdft.KCASCI(
                 kmf, "tPBE", 2, (1, 1), ncore=0,
-                momentum_resolved=True, charge=1,
-                charged_spin=1, grids_level=4,
+                charge=1, charged_spin=1, grids_level=4,
             )
 
         self.assertIs(result, pdft)
@@ -1020,7 +1012,7 @@ class KCASPDFTRoutingTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "conflicts"):
                 pbc_mcpdft.KCASCI(
                     kmc, "tPBE", 2, (1, 1),
-                    momentum_resolved=True, target_k=1,
+                    target_k=1,
                 )
 
     def test_existing_charged_kcasci_uses_charged_wrapper(self):
@@ -1050,23 +1042,17 @@ class KCASPDFTRoutingTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "charge conflicts"):
                 pbc_mcpdft.KCASCI(
                     kmc, "tPBE", 2, (1, 1),
-                    momentum_resolved=True, charge=1,
+                    charge=1,
                 )
 
     def test_momentum_route_rejects_ignored_options(self):
         with self.assertRaisesRegex(ValueError, "charged_spin requires"):
             pbc_mcpdft.KCASCI(
-                "kmf", "tPBE", 2, (1, 1),
-                momentum_resolved=True, charged_spin=1,
+                "kmf", "tPBE", 2, (1, 1), charged_spin=1,
             )
         with self.assertRaisesRegex(ValueError, "Frozen orbitals"):
             pbc_mcpdft.KCASCI(
-                "kmf", "tPBE", 2, (1, 1),
-                momentum_resolved=True, frozen=1,
-            )
-        with self.assertRaisesRegex(ValueError, "require momentum_resolved"):
-            pbc_mcpdft.KCASCI(
-                "kmf", "tPBE", 2, (1, 1), charge=1,
+                "kmf", "tPBE", 2, (1, 1), target_k=0, frozen=1,
             )
 
     def test_kcas_pdft_mixin_uses_momentum_methods(self):
