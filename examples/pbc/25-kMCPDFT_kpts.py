@@ -31,7 +31,7 @@ kmf.exxdiv = None
 kmf.kernel()
 
 target_k = 1
-kmc = mcpdft.KCASCI(kmf, "tPBE", 2, 2, momentum_resolved=True, target_k=target_k,)
+kmc = mcpdft.KCASCI(kmf, "tPBE", 2, 2, target_k=target_k)
 kmc.kmesh = kmesh
 kmc.kernel(np.asarray(kmf.mo_coeff))
 
