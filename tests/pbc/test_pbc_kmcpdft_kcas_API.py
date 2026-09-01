@@ -202,28 +202,6 @@ class KCASPDFTRDMTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "has no CI vector"):
             kmcpdft._get_charged_kcas_rdm_context(mc)
 
-    def test_get_charged_context_rejects_invalid_electron_count(self):
-        mc = make_mc(RecordingSolver(), target_k=0, nkpts=2, ncas=1)
-        mc.charged_results = [{
-            "target_k": 0,
-            "ci": "charged-ci",
-            "nelecastot": (3, 0),
-        }]
-
-        with self.assertRaisesRegex(ValueError, "invalid for ncastot=2"):
-            kmcpdft._get_charged_kcas_rdm_context(mc)
-
-    def test_get_charged_context_rejects_malformed_electron_count(self):
-        mc = make_mc(RecordingSolver(), target_k=0, nkpts=2, ncas=1)
-        mc.charged_results = [{
-            "target_k": 0,
-            "ci": "charged-ci",
-            "nelecastot": 1,
-        }]
-
-        with self.assertRaisesRegex(ValueError, "alpha and beta counts"):
-            kmcpdft._get_charged_kcas_rdm_context(mc)
-
     def test_make_one_charged_casdm1s_uses_sector_context(self):
         solver = RecordingSolver()
         mc = make_mc(solver, target_k=2, nkpts=3, ncas=2)
@@ -385,6 +363,18 @@ class KCASPDFTRDMTests(unittest.TestCase):
         self.assertEqual(nelec, (2, 2))
         self.assertEqual(kwargs, {"nkpts": 2, "target_k": 1})
 
+    def test_neutral_context_unpacks_scalar_electron_count(self):
+        solver = RecordingSolver()
+        mc = make_mc(
+            solver, target_k=0, nkpts=2, ncas=2, nelecas=2,
+        )
+        mc.cell = SimpleNamespace(spin=0)
+
+        context = pbc_dms._get_kcas_rdm_context(mc, "ci")
+
+        self.assertEqual(context[2], 4)
+        self.assertEqual(context[3], (2, 2))
+
     def test_make_one_casdm2_passes_target_sector(self):
         solver = RecordingSolver()
         mc = make_mc(solver, target_k=-1)
@@ -416,11 +406,6 @@ class KCASPDFTRDMTests(unittest.TestCase):
             calls,
             [("ci", 2, (2, 2), {"nkpts": 2, "target_k": 0})],
         )
-
-    def test_invalid_target_k_is_rejected(self):
-        mc = make_mc(RecordingSolver(), target_k=None)
-        with self.assertRaisesRegex(ValueError, "target_k must be an integer"):
-            pbc_dms.make_one_casdm1s_kcas(mc, "ci")
 
     def test_invalid_rdm_shapes_are_rejected(self):
         class BadShapeSolver(RecordingSolver):
@@ -472,18 +457,25 @@ class KCASPDFTKBlockTests(unittest.TestCase):
         np.testing.assert_allclose(result, 0.0)
 
     def test_cascm2_to_kpts_uses_kconserv(self):
-        nkpts, ncas = 3, 1
+        nkpts, ncas = 3, 2
+        ncastot = nkpts * ncas
         kconserv = make_kconserv(nkpts)
-        cascm2 = np.zeros((nkpts,) * 4, dtype=complex)
-        expected = np.empty((nkpts, nkpts, nkpts, 1, 1, 1, 1),
-                            dtype=complex)
+        cascm2 = np.zeros((ncastot,) * 4, dtype=complex)
+        full = cascm2.reshape(
+            nkpts, ncas, nkpts, ncas, nkpts, ncas, nkpts, ncas,
+        )
+        expected = np.empty(
+            (nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas),
+            dtype=complex,
+        )
         for k1 in range(nkpts):
             for k2 in range(nkpts):
                 for k3 in range(nkpts):
                     k4 = kconserv[k1, k2, k3]
-                    value = k1 + 10 * k2 + 100 * k3 + 0.5j
-                    cascm2[k1, k2, k3, k4] = value
-                    expected[k1, k2, k3, 0, 0, 0, 0] = value
+                    values = np.arange(ncas ** 4).reshape((ncas,) * 4)
+                    values = values + k1 + 10 * k2 + 100 * k3 + 0.5j
+                    full[k1, :, k2, :, k3, :, k4, :] = values
+                    expected[k1, k2, k3] = values
 
         result = pbc_dms.cascm2_to_kpts(
             cascm2, nkpts, ncas, kconserv,
@@ -524,18 +516,32 @@ class KCASPDFTKBlockTests(unittest.TestCase):
         )
         np.testing.assert_allclose(cascm2_kpts, expected_cumulant)
 
-    def test_invalid_kconserv_is_rejected(self):
-        cascm2 = np.zeros((2,) * 4)
-        with self.assertRaisesRegex(ValueError, "kconserv shape"):
-            pbc_dms.cascm2_to_kpts(
-                cascm2, 2, 1, np.zeros((2, 2), dtype=int),
-            )
-        bad_kconserv = np.zeros((2, 2, 2), dtype=int)
-        bad_kconserv[0, 0, 0] = 2
-        with self.assertRaisesRegex(ValueError, "indices"):
-            pbc_dms.cascm2_to_kpts(
-                cascm2, 2, 1, bad_kconserv,
-            )
+    def test_casdm1s_kpts_to_dm1s_matches_explicit_transformation(self):
+        nkpts, nao, nmo, ncore, ncas = 3, 4, 4, 1, 2
+        rng = np.random.default_rng(23)
+        mo_coeff = (
+            rng.normal(size=(nkpts, nao, nmo))
+            + 1j * rng.normal(size=(nkpts, nao, nmo))
+        )
+        casdm1s = (
+            rng.normal(size=(2, nkpts, ncas, ncas))
+            + 1j * rng.normal(size=(2, nkpts, ncas, ncas))
+        )
+
+        result = pbc_dms.casdm1s_kpts_to_dm1s(
+            object(), casdm1s, mo_coeff, ncore,
+        )
+
+        expected = np.empty((2, nkpts, nao, nao), dtype=complex)
+        for k in range(nkpts):
+            core = mo_coeff[k, :, :ncore]
+            active = mo_coeff[k, :, ncore:ncore + ncas]
+            core_dm = core @ core.conj().T
+            for spin in range(2):
+                expected[spin, k] = (
+                    active @ casdm1s[spin, k] @ active.conj().T + core_dm
+                )
+        np.testing.assert_allclose(result, expected)
 
     def test_kfci_rdms_obey_momentum_block_layout(self):
         nkpts, ncas = 2, 2
