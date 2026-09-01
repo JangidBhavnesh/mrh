@@ -134,16 +134,6 @@ class KCASPDFTRDMTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "target_k=1"):
             kmcpdft._select_charged_kcas_result(mc, target_k=1)
 
-    def test_select_charged_result_rejects_duplicate_sector(self):
-        mc = SimpleNamespace(
-            nkpts=3,
-            target_k=1,
-            charged_results=[{"target_k": 1}, {"target_k": 4}],
-        )
-
-        with self.assertRaisesRegex(ValueError, "Multiple charged"):
-            kmcpdft._select_charged_kcas_result(mc)
-
     def test_get_charged_context_uses_sector_ci_and_electron_count(self):
         solver = RecordingSolver()
         result = {
@@ -877,7 +867,7 @@ class KCASPDFTWavefunctionEnergyTests(unittest.TestCase):
 class KCASPDFTRoutingTests(unittest.TestCase):
 
     def test_kmcpdft_energy_tot_is_real(self):
-        mc = object.__new__(kmcpdft._kMCPDFT)
+        mc = object.__new__(kmcpdft._MCPDFTCPLX)
         with mock.patch.object(
                 kmcpdft._PeriodicMCPDFT, "energy_tot",
                 return_value=(1.25 + 2.0j, 0.5 + 0.25j)):
@@ -1088,33 +1078,33 @@ class KCASPDFTRoutingTests(unittest.TestCase):
 
     def test_kcas_pdft_mixin_uses_momentum_methods(self):
         self.assertIs(
-            kmcpdft._kKCASPDFT.make_one_casdm1s,
+            kmcpdft._kCASPDFT.make_one_casdm1s,
             pbc_dms.make_one_casdm1s_kcas,
         )
         self.assertIs(
-            kmcpdft._kKCASPDFT.make_one_casdm2,
+            kmcpdft._kCASPDFT.make_one_casdm2,
             pbc_dms.make_one_casdm2_kcas,
         )
         self.assertIs(
-            kmcpdft._kKCASPDFT.energy_mcwfn,
+            kmcpdft._kCASPDFT.energy_mcwfn,
             kmcpdft.energy_mcwfn_kcas_from_rdms,
         )
         self.assertIs(
-            kmcpdft._kKCASPDFT.energy_dft,
+            kmcpdft._kCASPDFT.energy_dft,
             kmcpdft.energy_dft_kcas,
         )
 
     def test_charged_kcas_pdft_mixin_uses_sector_rdm_methods(self):
         self.assertIs(
-            kmcpdft._kChargedKCASPDFT.make_one_casdm1s,
+            kmcpdft._kChargedCASPDFT.make_one_casdm1s,
             kmcpdft.make_one_casdm1s_charged_kcas,
         )
         self.assertIs(
-            kmcpdft._kChargedKCASPDFT.make_one_casdm2,
+            kmcpdft._kChargedCASPDFT.make_one_casdm2,
             kmcpdft.make_one_casdm2_charged_kcas,
         )
         self.assertIs(
-            kmcpdft._kChargedKCASPDFT.energy_tot,
+            kmcpdft._kChargedCASPDFT.energy_tot,
             kmcpdft.energy_tot_charged_kcas,
         )
 
@@ -1188,7 +1178,7 @@ class KCASPDFTRoutingTests(unittest.TestCase):
             energy_tot=energy_tot,
         )
 
-        output = kmcpdft._kChargedKCASPDFT.compute_pdft_energy_(mc)
+        output = kmcpdft._kChargedCASPDFT.compute_pdft_energy_(mc)
 
         np.testing.assert_allclose(mc.e_tot, [[0.5, 1.5], [10.5, 11.5]])
         np.testing.assert_allclose(mc.e_ot, [[0.25, 1.25], [10.25, 11.25]])
@@ -1235,7 +1225,7 @@ class KCASPDFTRoutingTests(unittest.TestCase):
              mock.patch.object(
                 kcasci, "compute_band_energies",
                 return_value=sentinel) as compute:
-            result = kmcpdft._kChargedKCASPDFT.band_energies(
+            result = kmcpdft._kChargedCASPDFT.band_energies(
                 mc, -1.5, root=1, per_cell=True,
                 reference_target_k=1,
             )

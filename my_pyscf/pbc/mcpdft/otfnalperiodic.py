@@ -246,9 +246,10 @@ def _prepare_wannier_rdms(ot, casdm1s, casdm2, mo_coeff, ncore):
 
     casdm1s_kpts = []
     for k in range(nkpts):
-        casdm1s_kpts.append([reduce(np.dot,(mo_phase[k], dm1, mo_phase[k].conj().T),
-            dm1
-        ) for dm1 in casdm1s])
+        casdm1s_kpts.append([
+            reduce(np.dot, (mo_phase[k], dm1, mo_phase[k].conj().T))
+            for dm1 in casdm1s
+        ])
     casdm1s_kpts = np.asarray(casdm1s_kpts).transpose(1, 0, 2, 3)
     return casdm1s_kpts, cascm2_kpts, kconserv
 

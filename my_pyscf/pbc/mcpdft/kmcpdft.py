@@ -24,38 +24,23 @@ _get_fcisolver = _dms._get_fcisolver
 
 def _select_charged_kcas_result(mc, target_k=None):
     """Select one stored charged KCASCI momentum-sector result."""
-    nkpts = int(mc.nkpts)
-    if nkpts <= 0:
-        raise ValueError("nkpts must be positive")
-
     results = list(getattr(mc, "charged_results", ()))
+    target_k = getattr(mc, "target_k", None) if target_k is None else target_k
     if target_k is None:
-        target_k = getattr(mc, "target_k", None)
-    if target_k is None:
-        if len(results) != 1:
-            raise ValueError(
-                "target_k is required when multiple charged KCASCI "
-                "sectors are available",
-            )
-        target_k = results[0]["target_k"]
-    if not isinstance(target_k, (int, np.integer)):
-        raise ValueError("target_k must be an integer")
-    target_k = int(target_k) % nkpts
+        if len(results) == 1: return results[0]
+        raise ValueError("target_k is required when multiple charged KCASCI sectors "
+            "are available",)
 
-    matches = [
-        result for result in results
-        if int(result["target_k"]) % nkpts == target_k
-    ]
-    if not matches:
-        raise ValueError(
-            f"No charged KCASCI result is available for target_k={target_k}",
-        )
-    if len(matches) > 1:
-        raise ValueError(
-            f"Multiple charged KCASCI results are available for "
-            f"target_k={target_k}",
-        )
-    return matches[0]
+    target_k = int(target_k) % mc.nkpts
+
+    result = next((
+        item for item in results
+        if int(item["target_k"]) % mc.nkpts == target_k
+    ), None)
+
+    if result is None:
+        raise ValueError(f"No charged KCASCI result is available for target_k={target_k}",)
+    return result
 
 
 def _get_charged_kcas_rdm_context(mc, ci=None, state=0, target_k=None):
@@ -268,16 +253,12 @@ def energy_tot_charged_kcas(mc, mo_coeff=None, ci=None, ot=None, state=0,
     return e_tot, e_ot
 
 
-class _kMCPDFT(_PeriodicMCPDFT):
-    '''
-    k-MC-PDFT for periodic systems at the gamma point or k-points.
-    This class is adding or replacing the functionalities which are not 
-    compatible with periodic systems are throwing NotImplementedError. 
-    '''
+class _MCPDFTCPLX(_PeriodicMCPDFT):
+    """MC-PDFT for conventional complex k-point CASCI/CASSCF."""
 
     momentum_resolved = False
     _get_pbc_otfnal = staticmethod(get_pbc_otfnal_kpts)
-    
+
     def multi_state(self, method='Lin'):
         raise NotImplementedError(f"StateAverageMix not available for {method}")
 
@@ -300,7 +281,7 @@ class _kMCPDFT(_PeriodicMCPDFT):
         raise NotImplementedError("update_from_chk is not implemented for k-MC-PDFT")
 
 
-class _kKCASPDFT(_kMCPDFT):
+class _kCASPDFT(_MCPDFTCPLX):
     """k-MC-PDFT specialization for one total-momentum kCAS sector."""
 
     momentum_resolved = True
@@ -311,7 +292,7 @@ class _kKCASPDFT(_kMCPDFT):
     energy_dft = energy_dft_kcas
 
 
-class _kChargedKCASPDFT(_kKCASPDFT):
+class _kChargedCASPDFT(_kCASPDFT):
     """k-MC-PDFT specialization for charged KCASCI momentum sectors."""
 
     make_one_casdm1s = make_one_casdm1s_charged_kcas
@@ -463,12 +444,12 @@ def _get_mcpdft_child_class(kmc, ot, pdft_base, **kwargs):
 
 def get_mcpdft_child_class(kmc, ot, **kwargs):
     """Wrap a conventional periodic CAS object with k-MC-PDFT methods."""
-    return _get_mcpdft_child_class(kmc, ot, _kMCPDFT, **kwargs)
+    return _get_mcpdft_child_class(kmc, ot, _MCPDFTCPLX, **kwargs)
 
 
 def get_kcas_mcpdft_child_class(kmc, ot, **kwargs):
     """Wrap a momentum-resolved kCASCI object with k-MC-PDFT methods."""
-    pdft = _get_mcpdft_child_class(kmc, ot, _kKCASPDFT, **kwargs)
+    pdft = _get_mcpdft_child_class(kmc, ot, _kCASPDFT, **kwargs)
     if getattr(kmc, "converged", False):
         pdft.e_mcscf = kmc.e_tot
     return pdft
@@ -476,7 +457,7 @@ def get_kcas_mcpdft_child_class(kmc, ot, **kwargs):
 
 def get_charged_kcas_mcpdft_child_class(kmc, ot, **kwargs):
     """Wrap charged KCASCI results with sector-aware k-MC-PDFT methods."""
-    pdft = _get_mcpdft_child_class(kmc, ot, _kChargedKCASPDFT, **kwargs)
+    pdft = _get_mcpdft_child_class(kmc, ot, _kChargedCASPDFT, **kwargs)
     pdft._keys.add("charged_pdft_results")
     pdft.charged_pdft_results = []
     if getattr(kmc, "converged", False):

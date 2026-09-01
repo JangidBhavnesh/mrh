@@ -8,9 +8,7 @@ from mrh.my_pyscf.pbc import mcpdft
 
 # Author: Bhavnesh Jangid
 
-"""
-Example to run the  k-MC-PDFT in one total-momentum sector.
-"""
+"""Run momentum-resolved kCAS-PDFT in one total-momentum sector."""
 
 cell = gto.Cell()
 cell.a = np.diag([2.24, 2.24, 12.0])
