@@ -19,6 +19,23 @@ from mrh.my_pyscf.pbc.mcpdft.kmcpdft import (
 # Implementing MC-PDFT at gamma point and k-MC-PDFT while reusing the
 # periodic MCSCF input validation and as much molecular PDFT code as possible.
 
+"""
+Periodic MC-PDFT Structure.
+
+Driver hierarchy::
+
+    PySCF _PDFT
+    └── _PeriodicMCPDFT
+        ├── _MCPDFT
+        │    └── Gamma-point CASCI/CASSCF
+        └── _MCPDFTCPLX
+            ├── based on cplx CASCI/CASSCF
+            └── _kCASPDFT
+                ├── neutral momentum-resolved kCASCI
+                └── _kChargedCASPDFT
+                    └── charged sectors and band energies
+"""
+
 def _MCPDFT (mc_class, kmc_or_kmf, ot, ncas, nelecas, ncore=None, frozen=None,
             get_mcpdft_child_class=get_mcpdft_child_class,
             allow_frozen=False, **kwargs):
