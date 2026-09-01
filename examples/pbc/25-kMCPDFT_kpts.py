@@ -28,7 +28,6 @@ kmesh = [3, 1, 1]
 kpts = cell.make_kpts(kmesh, wrap_around=True)
 kmf = scf.KRHF(cell, kpts=kpts).density_fit()
 kmf.exxdiv = None
-kmf.conv_tol = 1e-9
 kmf.kernel()
 
 target_k = 1
