@@ -990,7 +990,7 @@ class KCASPDFTRoutingTests(unittest.TestCase):
             kmc, "tPBE", grids_level=4,
         )
 
-    def test_existing_kcasci_sector_is_preserved_and_validated(self):
+    def test_existing_kcasci_sector_is_preserved_or_reset(self):
         from mrh.my_pyscf.pbc.mcscf.kcasci import PBCKCASCI
 
         kmc = object.__new__(PBCKCASCI)
@@ -1009,11 +1009,21 @@ class KCASPDFTRoutingTests(unittest.TestCase):
             self.assertIs(result, pdft)
             make_child.assert_called_once_with(kmc, "tPBE")
 
-            with self.assertRaisesRegex(ValueError, "conflicts"):
-                pbc_mcpdft.KCASCI(
+            reset_kmc = SimpleNamespace(charge=0)
+            with mock.patch.object(
+                    pbc_mcpdft.pbc_mcscf, "KCASCI",
+                    return_value=reset_kmc) as reset_kcasci, \
+                 mock.patch.object(pbc_mcpdft.logger, "warn") as warn:
+                result = pbc_mcpdft.KCASCI(
                     kmc, "tPBE", 2, (1, 1),
                     target_k=1,
                 )
+            self.assertIs(result, pdft)
+            reset_kcasci.assert_called_once_with(
+                kmc._scf, 2, (1, 1), ncore=None, target_k=1,
+            )
+            make_child.assert_called_with(reset_kmc, "tPBE")
+            warn.assert_called_once()
 
     def test_existing_charged_kcasci_uses_charged_wrapper(self):
         from mrh.my_pyscf.pbc.mcscf.kcasci import ChargedPBCKCASCI
@@ -1039,11 +1049,25 @@ class KCASPDFTRoutingTests(unittest.TestCase):
 
         with mock.patch.object(
                 pbc_mcpdft, "_sanity_check_for_kmf"):
-            with self.assertRaisesRegex(ValueError, "charge conflicts"):
-                pbc_mcpdft.KCASCI(
+            reset_kmc = SimpleNamespace(charge=1)
+            with mock.patch.object(
+                    pbc_mcpdft.pbc_mcscf, "KCASCI",
+                    return_value=reset_kmc) as reset_kcasci, \
+                 mock.patch.object(
+                    pbc_mcpdft, "get_charged_kcas_mcpdft_child_class",
+                    return_value=pdft) as make_reset_child, \
+                 mock.patch.object(pbc_mcpdft.logger, "warn") as warn:
+                result = pbc_mcpdft.KCASCI(
                     kmc, "tPBE", 2, (1, 1),
                     charge=1,
                 )
+            self.assertIs(result, pdft)
+            reset_kcasci.assert_called_once_with(
+                kmc._scf, 2, (1, 1), ncore=None, target_k=None,
+                charge=1, charged_spin=1,
+            )
+            make_reset_child.assert_called_once_with(reset_kmc, "tPBE")
+            warn.assert_called_once()
 
     def test_momentum_route_rejects_ignored_options(self):
         with self.assertRaisesRegex(ValueError, "charged_spin requires"):
