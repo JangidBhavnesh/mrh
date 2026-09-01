@@ -75,25 +75,20 @@ def kCASSCFPDFT(kmc_or_kmf, ot, ncas, nelecas, ncore=None, frozen=None, **kwargs
                 **kwargs)
 
 def kCASCIPDFT(kmc_or_kmf, ot, ncas, nelecas, ncore=None, frozen=None,
-               momentum_resolved=False, target_k=None, charge=None,
-               charged_spin=None, **kwargs):
+               target_k=None, charge=None, charged_spin=None, **kwargs):
     """Construct conventional or momentum-resolved k-CASCI-PDFT.
 
     Existing kCASCI objects select the momentum-resolved route automatically.
-    For a mean-field input, set ``momentum_resolved=True`` and optionally pass
-    ``target_k`` and ``charge``; otherwise conventional periodic CASCI is used.
+    For a mean-field input, ``target_k`` selects a neutral momentum sector and
+    a nonzero ``charge`` selects charged momentum sectors.  With neither,
+    conventional periodic CASCI is used.
     """
     from mrh.my_pyscf.pbc.mcscf.kcasci import PBCKCASCI
 
     is_kcasci = isinstance(kmc_or_kmf, PBCKCASCI)
-    momentum_resolved = momentum_resolved or is_kcasci
-    if not momentum_resolved:
-        if (target_k is not None or charge not in (None, 0)
-                or charged_spin is not None):
-            raise ValueError(
-                "target_k, charge, and charged_spin require "
-                "momentum_resolved=True",
-            )
+    use_kcasci = (is_kcasci or target_k is not None
+                  or charge not in (None, 0) or charged_spin is not None)
+    if not use_kcasci:
         return _MCPDFT(pbc_mcscf.CASCI, kmc_or_kmf, ot, ncas, nelecas,
                        ncore=ncore, frozen=frozen, **kwargs)
     if frozen is not None:
