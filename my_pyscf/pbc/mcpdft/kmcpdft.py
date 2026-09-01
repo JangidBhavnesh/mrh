@@ -2,18 +2,16 @@ import numpy as np
 
 from pyscf.lib import logger
 from pyscf.mcpdft import _dms
-from pyscf.pbc.lib import kpts_helper
 
 from mrh.my_pyscf.pbc.mcpdft.otfnalperiodic import (
+    _prepare_kpts_rdms,
     get_pbc_otfnal_kpts,
     otfnalperiodic_kpts,
 )
 from mrh.my_pyscf.pbc.mcscf.casci import get_h2eff_kpts
-from mrh.my_pyscf.pbc.mcpdft.mcpdft import (
-    _PeriodicMCPDFT,
-    energy_mcwfn,
-)
+from mrh.my_pyscf.pbc.mcpdft.mcpdft import _PeriodicMCPDFT
 from mrh.my_pyscf.pbc.mcpdft import _dms as pbc_dms
+
 '''
 Author: Bhavnesh Jangid
 k-MC-PDFT for periodic systems at the gamma point or k-points.
@@ -98,8 +96,8 @@ def make_one_casdm2 (mc, ci, state=0):
         _, casdm2 = fcisolver.make_rdm12 (ci, ncastot, nelecastot)
     return casdm2
 
-def energy_mcwfn_kcas(mc, casdm1s_kpts, cascm2_kpts, mo_coeff=None,
-                      ot=None, verbose=None):
+def _energy_mcwfn_from_kpts(mc, casdm1s_kpts, cascm2_kpts, mo_coeff=None,
+                            ot=None, verbose=None):
     """Compute the MC wavefunction energy from k-point active-space RDMs."""
     if ot is None:
         ot = mc.otfnal
@@ -169,25 +167,26 @@ def energy_mcwfn_kcas(mc, casdm1s_kpts, cascm2_kpts, mo_coeff=None,
     )
 
 
-def energy_mcwfn_kcas_from_rdms(
-        mc, mo_coeff=None, ci=None, ot=None, state=0, casdm1s=None,
-        casdm2=None, verbose=None, momentum_tol=1e-8):
-    """Convert dense kCAS RDMs and evaluate their MC wavefunction energy."""
+def energy_mcwfn(mc, mo_coeff=None, ci=None, ot=None, state=0,
+                 casdm1s=None, casdm2=None, verbose=None,
+                 rdm_representation=None, momentum_tol=1e-8):
+    """Evaluate the periodic MC wavefunction energy."""
     mo_coeff = mc.mo_coeff if mo_coeff is None else mo_coeff
     ci = mc.ci if ci is None else ci
     if casdm1s is None:
         casdm1s = mc.make_one_casdm1s(ci=ci, state=state)
     if casdm2 is None:
         casdm2 = mc.make_one_casdm2(ci=ci, state=state)
-    kconserv = getattr(mc, "kconserv", None)
-    if kconserv is None:
-        kconserv = kpts_helper.get_kconserv(mc.cell, mc.kpts)
-    rdms_kpts = pbc_dms.make_kcas_rdms_kpts(
-        casdm1s, casdm2, mc.nkpts, mc.ncas, kconserv,
-        momentum_tol=momentum_tol,
+
+    if rdm_representation is None:
+        rdm_representation = mc._mcwfn_rdm_representation
+    casdm1s_kpts, cascm2_kpts, _ = _prepare_kpts_rdms(
+        mc, casdm1s, casdm2, mo_coeff, mc.ncore,
+        rdm_representation, momentum_tol,
     )
-    return energy_mcwfn_kcas(
-        mc, *rdms_kpts, mo_coeff=mo_coeff, ot=ot, verbose=verbose,
+    return _energy_mcwfn_from_kpts(
+        mc, casdm1s_kpts, cascm2_kpts, mo_coeff=mo_coeff,
+        ot=ot, verbose=verbose,
     )
 
 
@@ -257,6 +256,7 @@ class _MCPDFTCPLX(_PeriodicMCPDFT):
     """MC-PDFT for conventional complex k-point CASCI/CASSCF."""
 
     momentum_resolved = False
+    _mcwfn_rdm_representation = "wannier"
     _get_pbc_otfnal = staticmethod(get_pbc_otfnal_kpts)
 
     def multi_state(self, method='Lin'):
@@ -285,10 +285,10 @@ class _kCASPDFT(_MCPDFTCPLX):
     """k-MC-PDFT specialization for one total-momentum kCAS sector."""
 
     momentum_resolved = True
+    _mcwfn_rdm_representation = "bloch"
 
     make_one_casdm1s = pbc_dms.make_one_casdm1s_kcas
     make_one_casdm2 = pbc_dms.make_one_casdm2_kcas
-    energy_mcwfn = energy_mcwfn_kcas_from_rdms
     energy_dft = energy_dft_kcas
 
 
