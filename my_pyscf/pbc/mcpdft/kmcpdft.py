@@ -222,9 +222,10 @@ def energy_dft_kcas(mc, mo_coeff=None, ci=None, ot=None, state=0,
         casdm2 = mc.make_one_casdm2(ci, state=state)
     if max_memory is None:
         max_memory = mc.max_memory
-    return ot.energy_ot_kcas(
+    return ot.energy_ot(
         casdm1s, casdm2, mo_coeff, mc.ncore,
         max_memory=max_memory, hermi=hermi,
+        rdm_representation="bloch",
         momentum_tol=momentum_tol,
     )
 
