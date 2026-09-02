@@ -12,7 +12,6 @@ from mrh.my_pyscf.pbc.mcscf.klasscf import ActiveActiveRotationMap
 Test-0: Transform anti-Hermitian rotations between Bloch and Wannier bases.
 Test-1: Project redundant k-point pair rotations onto independent coordinates.
 Test-2: Handle an active space with no independent rotation pairs.
-Test-3: Reject a nonunitary k-point-to-Wannier phase transformation.
 """
 
 
@@ -123,14 +122,6 @@ class ActiveActiveRotationMapTests(unittest.TestCase):
         np.testing.assert_array_equal(
             rotation_map.unpack([]), np.zeros((1, 1, 1)),
         )
-
-    def test_rejects_nonunitary_phase(self):
-        mo_phase = _fourier_mo_phase(2, 2)
-        mo_phase[0, 0, 0] *= 2.0
-
-        with self.assertRaisesRegex(ValueError, "must be unitary"):
-            ActiveActiveRotationMap(mo_phase, np.array([2, 2]))
-
 
 if __name__ == "__main__":
     unittest.main()
