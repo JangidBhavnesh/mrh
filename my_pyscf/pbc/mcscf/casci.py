@@ -575,7 +575,7 @@ class PBCCASBASE(mcscf.casci.CASBase):
             # Spin-separated density: J is spin-summed and K remains spin-resolved.
             return vj[None] - vk
         if dm_kpts.ndim == 3:
-            # Spin-summed density: use the restricted Hartree-Fock potential.
+            # Spin-summed density:
             return vj - 0.5 * vk
         raise ValueError(f"Unexpected density shape {dm_kpts.shape}")
     
