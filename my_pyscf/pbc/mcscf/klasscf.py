@@ -81,6 +81,10 @@ class ActiveActiveRotationMap:
             columns is :attr:`nvar`.
         singular_values : ndarray
             Singular values of pair_map in descending order.
+
+    Raises:
+        ValueError
+            If mo_phase does not define a unitary transformation.
     """
 
     def __init__(
@@ -107,6 +111,13 @@ class ActiveActiveRotationMap:
                 f"ncastot={self.ncastot}"
             )
             raise ValueError(msg)
+        stacked_phase = mo_phase.reshape(self.ncastot, self.ncastot)
+        if not np.allclose(
+                stacked_phase.conj().T @ stacked_phase,
+                np.eye(self.ncastot, dtype=mo_phase.dtype),
+                rtol=1e-10, atol=1e-10,
+        ):
+            raise ValueError("mo_phase must be unitary")
         if int(ncas_sub.sum()) != self.ncastot:
             msg = (
                 f"sum(ncas_sub)={int(ncas_sub.sum())}; expected "
