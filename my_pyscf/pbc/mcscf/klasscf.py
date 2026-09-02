@@ -23,11 +23,11 @@ def _check_shape(mat, shape, label="array"):
         shape : tuple of int
             Required shape.
         label : str, optional
-            Name used to identify ``mat`` in the error message.
+            Name used to identify mat in the error message.
 
     Raises:
         ValueError
-            If the shape of ``mat`` differs from ``shape``.
+            If the shape of mat differs from shape.
     """
     shape = tuple(shape)
     if np.shape(mat) != shape:
@@ -44,10 +44,10 @@ class ActiveActiveRotationMap:
     Wannier fragments. This class constructs the linear map between those two
     representations and compresses its image to an orthonormal basis.
 
-    For a selected Bloch pair ``(k, a, b)`` and Wannier pair ``(p, q)``,
-    ``pair_map`` contains
+    For a selected Bloch pair (k, a, b) and Wannier pair (p, q),
+    pair_map contains
 
-    ``mo_phase[k, a, p] * mo_phase[k, b, q].conj()``.
+    mo_phase[k, a, p] * mo_phase[k, b, q].conj().
 
     The singular vectors spanning the image of this map define the independent
     active-active coordinates used by the k-LASSCF unitary-group generator.
@@ -57,14 +57,14 @@ class ActiveActiveRotationMap:
     Args:
         mo_phase : ndarray of shape (nkpts, ncas, ncastot)
             Unitary transformation from the complete Wannier active space to
-            the active Bloch MOs at each k-point. ``ncastot`` must equal
-            ``nkpts * ncas``.
+            the active Bloch MOs at each k-point. ncastot must equal
+            nkpts * ncas.
         ncas_sub : array-like of int
             Numbers of active orbitals assigned to the LAS fragments. Their
-            sum must equal ``ncastot``; their order defines the Wannier
+            sum must equal ncastot; their order defines the Wannier
             fragment partition.
         block_pair_mask : ndarray of bool, optional
-            Mask of shape ``(nkpts, ncas, ncas)`` selecting the strictly
+            Mask of shape (nkpts, ncas, ncas) selecting the strictly
             lower-triangular Bloch active pairs available to the optimizer.
             By default, every strictly lower-triangular pair is selected.
         svd_tol : float, optional
@@ -77,10 +77,10 @@ class ActiveActiveRotationMap:
             Complex-linear map from inter-fragment Wannier lower-pair
             amplitudes to selected Bloch lower-pair amplitudes.
         basis : ndarray
-            Orthonormal basis for the image of ``pair_map``. Its number of
+            Orthonormal basis for the image of pair_map. Its number of
             columns is :attr:`nvar`.
         singular_values : ndarray
-            Singular values of ``pair_map`` in descending order.
+            Singular values of pair_map in descending order.
     """
 
     def __init__(
@@ -96,12 +96,8 @@ class ActiveActiveRotationMap:
         mo_phase = np.asarray(
             mo_phase, dtype=np.result_type(mo_phase.dtype, np.complex128),
         )
-        if np.any(ncas_sub < 0):
-            raise ValueError("ncas_sub entries must be nonnegative")
         if svd_tol is not None:
             svd_tol = float(svd_tol)
-            if not np.isfinite(svd_tol) or svd_tol < 0:
-                raise ValueError("svd_tol must be finite and nonnegative")
 
         self.nkpts, self.ncas, self.ncastot = mo_phase.shape
         if self.ncastot != self.nkpts * self.ncas:
@@ -117,21 +113,6 @@ class ActiveActiveRotationMap:
                 f"ncastot={self.ncastot}"
             )
             raise ValueError(msg)
-        if not np.all(np.isfinite(mo_phase)):
-            raise ValueError("mo_phase must contain only finite values")
-
-        phase_matrix = mo_phase.reshape(self.ncastot, self.ncastot)
-        identity = np.eye(self.ncastot, dtype=phase_matrix.dtype)
-        if not (
-                np.allclose(
-                    phase_matrix.conj().T @ phase_matrix, identity,
-                    atol=1e-8, rtol=1e-8,
-                ) and np.allclose(
-                    phase_matrix @ phase_matrix.conj().T, identity,
-                    atol=1e-8, rtol=1e-8,
-                )):
-            raise ValueError("stacked mo_phase must be unitary")
-
         self.mo_phase = mo_phase
         self.ncas_sub = ncas_sub
 
@@ -150,15 +131,6 @@ class ActiveActiveRotationMap:
             block_pair_mask, (self.nkpts, self.ncas, self.ncas),
             label="block_pair_mask",
         )
-        lower_triangle = np.broadcast_to(
-            np.tril(np.ones((self.ncas, self.ncas), dtype=bool), -1),
-            block_pair_mask.shape,
-        )
-        if np.any(block_pair_mask & ~lower_triangle):
-            raise ValueError(
-                "block_pair_mask may select only strictly lower-triangular "
-                "active pairs"
-            )
         self.block_pair_mask = np.array(block_pair_mask, copy=True)
         self.block_pair_idx = np.where(self.block_pair_mask)
 
@@ -181,6 +153,7 @@ class ActiveActiveRotationMap:
             self.singular_values = np.empty(0, dtype=float)
             self.svd_tol = 0.0 if svd_tol is None else float(svd_tol)
             self.basis = np.empty((nblock_pair, 0), dtype=basis_dtype)
+            # Return early if no valid pairs are found
             return
 
         left, singular_values, _ = np.linalg.svd(
@@ -255,11 +228,11 @@ class ActiveActiveRotationMap:
         Args:
             kappa_active : ndarray of shape (nkpts, ncas, ncas)
                 Active-space rotation matrix for each k-point. Only entries
-                selected by ``block_pair_mask`` are read.
+                selected by block_pair_mask are read.
 
         Returns:
             ndarray of shape (nvar,)
-                Coordinates in the orthonormal image of ``pair_map``.
+                Coordinates in the orthonormal image of pair_map.
         """
         kappa_active = np.asarray(kappa_active)
         _check_shape(
@@ -274,7 +247,7 @@ class ActiveActiveRotationMap:
 
         Args:
             coordinates : array-like of shape (nvar,)
-                Coordinates in the orthonormal image of ``pair_map``.
+                Coordinates in the orthonormal image of pair_map.
 
         Returns:
             ndarray of shape (nkpts, ncas, ncas)
@@ -314,13 +287,13 @@ class KLASSCF_UnitaryGroupGenerators:
             Periodic LAS object supplying the orbital-space dimensions,
             fragment solvers, electron counts, and optional frozen variables.
         mo_coeff : ndarray of shape (nkpts, nao, nmo), optional
-            Bloch-MO coefficients. Defaults to ``klas.mo_coeff``.
+            Bloch-MO coefficients. Defaults to klas.mo_coeff.
         ci : sequence, optional
-            Nested ``[fragment][root]`` determinant-basis CI vectors. Defaults
-            to ``klas.ci``.
+            Nested [fragment][root] determinant-basis CI vectors. Defaults
+            to klas.ci.
         mo_phase : ndarray of shape (nkpts, ncas, nkpts*ncas), optional
             Bloch-active to Wannier-active transformation. It defaults to
-            ``klas.mo_phase`` when available and is otherwise constructed from
+            klas.mo_phase when available and is otherwise constructed from
             the active MOs.
 
     Attributes:
@@ -533,7 +506,7 @@ class KLASSCF_UnitaryGroupGenerators:
 
         Args:
             ci : sequence
-                Nested ``[fragment][root]`` determinant-basis CI vectors.
+                Nested [fragment][root] determinant-basis CI vectors.
 
         Returns:
             ndarray of shape (nvar_ci,)
@@ -574,7 +547,7 @@ class KLASSCF_UnitaryGroupGenerators:
 
         Returns:
             list
-                Nested ``[fragment][root]`` determinant-basis CI responses.
+                Nested [fragment][root] determinant-basis CI responses.
         """
         x_ci = np.asarray(x_ci).reshape(-1)
         if x_ci.size != self.nvar_ci:
@@ -635,7 +608,7 @@ class KLASSCF_UnitaryGroupGenerators:
 def get_ugg(klas, mo_coeff=None, ci=None, mo_phase=None):
     """Construct the unitary-group generator used by k-LASSCF.
 
-    The construction is dispatched through ``klas._ugg`` so that periodic
+    The construction is dispatched through klas._ugg so that periodic
     LAS subclasses can replace the parameterization without overriding this
     convenience method.
 
@@ -643,14 +616,14 @@ def get_ugg(klas, mo_coeff=None, ci=None, mo_phase=None):
         klas : object
             Periodic LAS object for which the parameterization is built.
         mo_coeff : ndarray of shape (nkpts, nao, nmo), optional
-            Bloch-MO coefficients. Defaults to ``klas.mo_coeff`` in the
+            Bloch-MO coefficients. Defaults to klas.mo_coeff in the
             generator constructor.
         ci : sequence, optional
-            Nested ``[fragment][root]`` determinant-basis CI vectors. Defaults
-            to ``klas.ci`` in the generator constructor.
+            Nested [fragment][root] determinant-basis CI vectors. Defaults
+            to klas.ci in the generator constructor.
         mo_phase : ndarray of shape (nkpts, ncas, nkpts*ncas), optional
             Bloch-active to Wannier-active transformation. When omitted, the
-            generator obtains or constructs it from ``klas``.
+            generator obtains or constructs it from klas.
 
     Returns:
         KLASSCF_UnitaryGroupGenerators
@@ -670,7 +643,7 @@ def get_grad_ci(
     action and removes its component parallel to the reference CI vector. The
     resulting determinant-basis residual is
 
-    ``2 * (H c - <c|H c> c)``.
+    2 * (H c - <c|H c> c).
 
     Constructing the residual directly keeps the gradient layer independent
     of the k-LASSCF Hessian operator.
@@ -680,26 +653,26 @@ def get_grad_ci(
             Periodic LAS object supplying fragment solvers and active-space
             integral builders.
         mo_coeff : ndarray of shape (nkpts, nao, nmo), optional
-            Bloch-MO coefficients. Defaults to ``klas.mo_coeff``.
+            Bloch-MO coefficients. Defaults to klas.mo_coeff.
         ci : sequence, optional
-            Nested ``[fragment][root]`` determinant-basis CI vectors. Defaults
-            to ``klas.ci``.
+            Nested [fragment][root] determinant-basis CI vectors. Defaults
+            to klas.ci.
         ugg : KLASSCF_UnitaryGroupGenerators, optional
             Accepted for compatibility with the combined-gradient interface;
             it is not needed to form determinant-basis CI residuals.
         casdm1frs : sequence, optional
             Fragment- and root-resolved active-space one-particle density
-            matrices used to build ``h1eff`` when it is not supplied.
+            matrices used to build h1eff when it is not supplied.
         h1eff : sequence, optional
             Effective one-electron Hamiltonians for each fragment, with each
-            block shaped ``(nroots, 2, ncas_frag, ncas_frag)``.
+            block shaped (nroots, 2, ncas_frag, ncas_frag).
         h2eff : ndarray of shape (ncastot,)*4, optional
             Two-electron integrals in the complete Wannier active space.
 
     Returns:
         list
-            Nested ``[fragment][root]`` determinant-basis CI gradients with
-            the same individual shapes as ``ci``.
+            Nested [fragment][root] determinant-basis CI gradients with
+            the same individual shapes as ci.
 
     Raises:
         ValueError
@@ -770,7 +743,7 @@ def get_grad_orb(
 
     The one-body contribution is formed independently at each k-point. The
     active-space two-body cumulant is transformed from the Wannier basis to
-    momentum-conserving Bloch blocks and contracted with the ``paaa`` AO2MO
+    momentum-conserving Bloch blocks and contracted with the paaa AO2MO
     intermediates.
 
     Args:
@@ -778,23 +751,23 @@ def get_grad_orb(
             Periodic LAS object supplying density matrices, integrals, and
             k-point metadata.
         mo_coeff_kpts : ndarray of shape (nkpts, nao, nmo), optional
-            Bloch-MO coefficients. Defaults to ``klas.mo_coeff``.
+            Bloch-MO coefficients. Defaults to klas.mo_coeff.
         ci : sequence, optional
-            Nested ``[fragment][root]`` Wannier-basis CI vectors. Defaults to
-            ``klas.ci``.
+            Nested [fragment][root] Wannier-basis CI vectors. Defaults to
+            klas.ci.
         h2eff_sub : _ERIS or ndarray, optional
-            Object providing ``paaa(k1, k2, k3)`` or an explicit array with
-            shape ``(nkpts, nkpts, nkpts, nmo, ncas, ncas, ncas)``. It is
-            constructed with ``klas._klasscf_eris`` when omitted.
+            Object providing paaa(k1, k2, k3) or an explicit array with
+            shape (nkpts, nkpts, nkpts, nmo, ncas, ncas, ncas). It is
+            constructed with klas._klasscf_eris when omitted.
         veff_kpts : ndarray of shape (2, nkpts, nao, nao), optional
             Spin-resolved state-averaged effective potential in the AO basis.
         dm1s_kpts : ndarray of shape (2, nkpts, nao, nao), optional
             Spin-resolved state-averaged one-particle density matrix in the AO
             basis.
         hermi : {-1, 0, 1}, optional
-            Selects the returned part of the effective Fock matrix. ``-1``
-            returns ``F - F†``, the anti-Hermitian orbital gradient; ``0``
-            returns ``F``; and ``1`` returns ``(F + F†) / 2``.
+            Selects the returned part of the effective Fock matrix. -1
+            returns F - F†, the anti-Hermitian orbital gradient; 0
+            returns F; and 1 returns (F + F†) / 2.
 
     Returns:
         ndarray of shape (nkpts, nmo, nmo)
@@ -803,8 +776,8 @@ def get_grad_orb(
 
     Raises:
         ValueError
-            If an input has an incompatible shape or ``hermi`` is not one of
-            ``-1``, ``0``, and ``1``.
+            If an input has an incompatible shape or hermi is not one of
+            -1, 0, and 1.
     """
     cell = klas._scf.cell
     kpts = klas.kpts
@@ -907,21 +880,21 @@ def get_grad(
     """Return the packed k-LASSCF orbital and CI energy gradient.
 
     The orbital gradient is packed first, followed by the CI gradient, using
-    the ordering defined by ``ugg``.
+    the ordering defined by ugg.
 
     Args:
         klas : object
             Periodic LAS object providing the gradient methods.
         mo_coeff : ndarray of shape (nkpts, nao, nmo), optional
-            Bloch-MO coefficients. Defaults to ``klas.mo_coeff``.
+            Bloch-MO coefficients. Defaults to klas.mo_coeff.
         ci : sequence, optional
-            Nested ``[fragment][root]`` determinant-basis CI vectors. Defaults
-            to ``klas.ci``.
+            Nested [fragment][root] determinant-basis CI vectors. Defaults
+            to klas.ci.
         ugg : KLASSCF_UnitaryGroupGenerators, optional
             Parameterization used to pack the result. It is constructed from
-            ``mo_coeff`` and ``ci`` when omitted.
+            mo_coeff and ci when omitted.
         h2eff_sub : _ERIS or ndarray, optional
-            ``paaa`` intermediates forwarded to :func:`get_grad_orb`.
+            paaa intermediates forwarded to :func:`get_grad_orb`.
         veff_kpts : ndarray, optional
             Spin-resolved effective potential forwarded to
             :func:`get_grad_orb`.
