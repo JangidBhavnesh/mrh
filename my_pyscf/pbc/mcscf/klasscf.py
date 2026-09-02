@@ -281,7 +281,7 @@ class KLASSCF_UnitaryGroupGenerators:
     rotations obtained from :class:`ActiveActiveRotationMap`. CI variables
     come last, ordered by fragment and root and represented in the complex CSF
     basis.
-
+    
     Args:
         klas : object
             Periodic LAS object supplying the orbital-space dimensions,
