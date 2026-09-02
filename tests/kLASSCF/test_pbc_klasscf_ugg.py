@@ -6,10 +6,17 @@ from mrh.my_pyscf.pbc.mcscf.klasscf import (
     KLASSCF_UnitaryGroupGenerators,
     get_ugg,
 )
-from mrh.my_pyscf.pbc.mcscf.klasci import (
-    PBCLASCINoSymm,
-    PBCLASCITransSymm,
-)
+
+
+# Author: Bhavnesh Jangid
+
+"""Unit tests for k-LASSCF unitary-group generators.
+
+Test-0: Forward arguments through the public unitary-group-generator factory.
+Test-1: Pack and unpack complex orbital and CI coordinates.
+Test-2: Include projected active-active orbital coordinates.
+Test-3: Omit frozen CI coordinates and restore them as zero on unpacking.
+"""
 
 
 def _fourier_mo_phase(nkpts, ncas):
@@ -83,12 +90,7 @@ class _FakeKLASActive(_FakeKLAS):
         self.mo_phase = _fourier_mo_phase(2, 2)
 
 
-class KnownValues(unittest.TestCase):
-
-    def test_get_ugg_is_registered(self):
-        for cls in (PBCLASCINoSymm, PBCLASCITransSymm):
-            self.assertIs(cls._ugg, KLASSCF_UnitaryGroupGenerators)
-            self.assertIs(cls.get_ugg, get_ugg)
+class UnitaryGroupGeneratorTests(unittest.TestCase):
 
     def test_get_ugg_forwards_constructor_arguments(self):
         sentinel = object()

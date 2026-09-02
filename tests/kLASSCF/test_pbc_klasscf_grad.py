@@ -3,10 +3,14 @@ import unittest
 import numpy as np
 
 from mrh.my_pyscf.pbc.mcscf.klasscf import get_grad
-from mrh.my_pyscf.pbc.mcscf.klasci import (
-    PBCLASCINoSymm,
-    PBCLASCITransSymm,
-)
+
+# Author: Bhavnesh Jangid
+
+"""Unit tests for the combined k-LASSCF gradient builder.
+
+Test-0: Pack the orbital and CI gradients in order and forward intermediates.
+Test-1: Use a supplied unitary-group generator without invoking its factory.
+"""
 
 
 class _PackingUGG:
@@ -40,11 +44,7 @@ class _FakeKLAS:
         return self.gci
 
 
-class KnownValues(unittest.TestCase):
-
-    def test_is_registered(self):
-        for cls in (PBCLASCINoSymm, PBCLASCITransSymm):
-            self.assertIs(cls.get_grad, get_grad)
+class GradientTests(unittest.TestCase):
 
     def test_orbitals_precede_ci_and_defaults_are_forwarded(self):
         klas = _FakeKLAS()

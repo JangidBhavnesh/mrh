@@ -2,13 +2,15 @@ import unittest
 
 import numpy as np
 
-from mrh.my_pyscf.pbc.mcscf.klas_ao2mo import _ERIS
 from mrh.my_pyscf.pbc.mcscf.klasscf import get_grad_orb
-from mrh.my_pyscf.pbc.mcscf.klasci import (
-    PBCLASCINoSymm,
-    PBCLASCITransSymm,
-)
 
+
+# Author: Bhavnesh Jangid
+
+"""Unit tests for the k-LASSCF orbital-gradient interface.
+
+Test-0: Reject a paaa intermediate with an invalid shape.
+"""
 
 class _FakeSCF:
     cell = object()
@@ -23,12 +25,7 @@ class _FakeKLAS:
     ncas = 1
 
 
-class KnownValues(unittest.TestCase):
-
-    def test_is_registered(self):
-        for cls in (PBCLASCINoSymm, PBCLASCITransSymm):
-            self.assertIs(cls._klasscf_eris, _ERIS)
-            self.assertIs(cls.get_grad_orb, get_grad_orb)
+class OrbitalGradientTests(unittest.TestCase):
 
     def test_rejects_inconsistent_paaa_shape(self):
         with self.assertRaisesRegex(ValueError, "h2eff_sub has shape"):

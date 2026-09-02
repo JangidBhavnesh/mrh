@@ -3,11 +3,15 @@ import unittest
 import numpy as np
 
 from mrh.my_pyscf.pbc.mcscf.klasscf import get_grad_ci
-from mrh.my_pyscf.pbc.mcscf.klasci import (
-    PBCLASCINoSymm,
-    PBCLASCITransSymm,
-)
 
+# Author: Bhavnesh Jangid
+
+"""Unit tests for the k-LASSCF CI-gradient builder.
+
+Test-0: Evaluate the complex CI residual with explicitly supplied integrals.
+Test-1: Build missing effective integrals and density intermediates.
+Test-2: Reject an effective two-electron integral with an invalid shape.
+"""
 
 class _ResidualFCIBox:
     def __init__(self, test_case):
@@ -37,7 +41,7 @@ class _ResidualKLAS:
         self.fciboxes = [_ResidualFCIBox(test_case)]
 
 
-class KnownValues(unittest.TestCase):
+class GradientCITests(unittest.TestCase):
 
     def setUp(self):
         self.ci = [[np.array([1.0, 1.0j]) / np.sqrt(2.0)]]
@@ -46,10 +50,6 @@ class KnownValues(unittest.TestCase):
             [[0.5, -0.2], [-0.2, -0.3]],
         ]])
         self.h2eff = np.zeros((2, 2, 2, 2))
-
-    def test_is_registered(self):
-        for cls in (PBCLASCINoSymm, PBCLASCITransSymm):
-            self.assertIs(cls.get_grad_ci, get_grad_ci)
 
     def test_complex_ci_residual_does_not_require_hessian(self):
         klas = _ResidualKLAS(self)

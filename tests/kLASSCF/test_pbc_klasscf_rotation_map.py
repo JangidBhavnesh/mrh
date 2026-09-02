@@ -4,6 +4,17 @@ import numpy as np
 
 from mrh.my_pyscf.pbc.mcscf.klasscf import ActiveActiveRotationMap
 
+# Author: Bhavnesh Jangid
+
+
+"""Unit tests for active-active k-LASSCF orbital-rotation maps.
+
+Test-0: Transform anti-Hermitian rotations between Bloch and Wannier bases.
+Test-1: Project redundant k-point pair rotations onto independent coordinates.
+Test-2: Handle an active space with no independent rotation pairs.
+Test-3: Reject a nonunitary k-point-to-Wannier phase transformation.
+"""
+
 
 def _fourier_mo_phase(nkpts, ncas):
     """Return a band-preserving complex k-to-Wannier unitary."""
@@ -21,7 +32,7 @@ def _fourier_mo_phase(nkpts, ncas):
     return phase
 
 
-class KnownValues(unittest.TestCase):
+class ActiveActiveRotationMapTests(unittest.TestCase):
 
     def test_wannier_block_matrix_map(self):
         nkpts = 3
