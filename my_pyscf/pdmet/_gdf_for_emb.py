@@ -282,5 +282,10 @@ if __name__ == "__main__":
         delete_intermediate=True,
     )
     _show_h5_contents(compressed_file)
+    naux = incore.make_auxcell(supercell).nao_nr()
+    print(f"naux={naux}, mo_coeff.shape={ao2lo.shape}, AO 3C={naux * supercell.nao_nr()**2 * 8 / 1e9:.3f} GB")
+    print(f"embedding DF=({naux}, {ao2lo.shape[1]}, {ao2lo.shape[1]}), {naux * ao2lo.shape[1]**2 * 8 / 1e9:.3f} GB")
+    with h5py.File(compressed_file, "r") as h5file:
+        print(f"compressed DF={h5file['j3c/0/0'].shape}, {h5file['j3c/0/0'].size * 8 / 1e9:.3f} GB")
     os.remove(compressed_file)
     # embedding_mf.with_df._cderi = compressed_file
