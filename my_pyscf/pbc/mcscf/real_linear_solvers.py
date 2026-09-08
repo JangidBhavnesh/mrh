@@ -1,5 +1,7 @@
 #!/usr/bin/env python
 
+import inspect
+
 import numpy as np
 from scipy.sparse import linalg as sparse_linalg
 
@@ -13,6 +15,16 @@ independent real coordinates, so SciPy's complex-linear Krylov solvers cannot
 be applied directly.  These wrappers expose an n-element complex problem as a
 2n-element real problem and convert the solution back to complex storage.
 """
+
+
+def _tolerance_kwargs(solver, rtol, atol=None):
+    """Translate tolerances across the SciPy ``tol``/``rtol`` API change."""
+    parameters = inspect.signature(solver).parameters
+    relative_key = "rtol" if "rtol" in parameters else "tol"
+    kwargs = {relative_key: rtol}
+    if atol is not None and "atol" in parameters:
+        kwargs["atol"] = atol
+    return kwargs
 
 
 class SolveScipyCGForCplx:
@@ -195,15 +207,17 @@ class SolveScipyCGForCplx:
             gradient, x0,
         )
 
+        solver_kwargs = _tolerance_kwargs(
+            sparse_linalg.cg, self.rtol, self.atol,
+        )
         real_solution, self.info = sparse_linalg.cg(
             self.real_operator,
             rhs,
             x0=real_x0,
-            rtol=self.rtol,
-            atol=self.atol,
             maxiter=self.maxiter,
             M=self.real_preconditioner,
             callback=real_callback,
+            **solver_kwargs,
         )
         return self._finish_solve(real_solution, gradient)
 
@@ -217,13 +231,16 @@ class SolveScipyMINRESForCplx(SolveScipyCGForCplx):
             gradient, x0,
         )
 
+        solver_kwargs = _tolerance_kwargs(
+            sparse_linalg.minres, self.rtol,
+        )
         real_solution, self.info = sparse_linalg.minres(
             self.real_operator,
             rhs,
             x0=real_x0,
-            rtol=self.rtol,
             maxiter=self.maxiter,
             M=self.real_preconditioner,
             callback=real_callback,
+            **solver_kwargs,
         )
         return self._finish_solve(real_solution, gradient)
