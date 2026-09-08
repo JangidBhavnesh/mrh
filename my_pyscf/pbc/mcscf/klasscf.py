@@ -2853,40 +2853,39 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
                 "UGG and Hessian operator use different Wannier/block maps"
             )
 
-        h1_wannier = np.asarray(self.las.h1e_for_cas(
-            mo_coeff=self.mo_coeff, ncas=self.ncas, ncore=self.ncore,
-        )[0])
-        _check_shape(
-            h1_wannier, (self.ncastot, self.ncastot),
-            label="h1_wannier",
-        )
         coulomb = np.tensordot(
             self.casdm1s, self.eri_cas, axes=((1, 2), (2, 3)),
         )
         exchange = np.tensordot(
             self.casdm1s, self.eri_cas, axes=((1, 2), (2, 1)),
         )
-        h1s_wannier = h1_wannier[None] + coulomb + coulomb[::-1] - exchange
+        active_potential = coulomb + coulomb[::-1] - exchange
 
         active = slice(self.ncore, self.nocc)
         h1s_block_wannier = np.asarray([
             rotation_map.bloch_to_wannier(self.h1s[spin, :, active, active])
             for spin in range(2)
         ])
-        # Density-fitted periodic transformations can differ at the tens-of-
-        # microhartree level even when the two representations are consistent.
-        intermediate_tol = 1e-4
+        # Remove the active mean field from the block Hamiltonian.  The
+        # remaining closed-core one-electron term must be spin independent.
+        block_h1 = h1s_block_wannier - active_potential
+        intermediate_tol = 1e-10
         if not np.allclose(
-                h1s_wannier, h1s_block_wannier,
+                block_h1[0], block_h1[1],
                 atol=intermediate_tol, rtol=intermediate_tol):
-            error = np.max(np.abs(h1s_wannier - h1s_block_wannier))
+            error = np.max(np.abs(block_h1[0] - block_h1[1]))
             raise ValueError(
-                "Wannier and block active one-electron intermediates differ; "
-                f"maximum error is {error:.3e}"
+                "Wannier active one-electron intermediates are spin "
+                f"dependent; maximum error is {error:.3e}"
             )
+        h1_wannier = np.mean(block_h1, axis=0)
+        _check_shape(
+            h1_wannier, (self.ncastot, self.ncastot),
+            label="h1_wannier",
+        )
 
         fock1_wannier = sum(
-            h1s_wannier[spin] @ self.casdm1s[spin]
+            h1s_block_wannier[spin] @ self.casdm1s[spin]
             for spin in range(2)
         )
         fock1_wannier += np.tensordot(
