@@ -7,11 +7,13 @@ make_spectral_function. Frequencies and broadening widths are in Hartree;
 pole energies use supercell energy differences without a chemical-potential
 shift. Weights describe the supplied active-space roots and spin sectors.
 
-This implementation uses Python operators and broadening. The ``use_c``
-arguments are retained for source API compatibility; both values currently
-select Python. Plotting imports matplotlib only when requested.
+The optional native library accelerates operators on scalar cyclic momentum
+layouts and broadening on every layout. Missing libraries and unsupported
+operator layouts use Python; use_c=False selects Python explicitly. Plotting
+imports matplotlib only when requested.
 '''
 
+import ctypes
 from copy import deepcopy
 from dataclasses import dataclass
 
@@ -20,10 +22,82 @@ import numpy as np
 from pyscf.fci import cistring
 from pyscf.fci.addons import _unpack_nelec
 
+from mrh.lib.helper import load_library
 from mrh.my_pyscf.pbc.fci import kcistrings, kfci_contract_map
 
 
 # Author: Bhavnesh Jangid
+
+
+libpbcspectral = None
+_spectral_lib_initialized = False
+
+
+def _load_spectral_lib():
+    '''
+    Lazily load and configure both spectral kernels, or return None if absent.
+    '''
+    global libpbcspectral, _spectral_lib_initialized
+    if _spectral_lib_initialized:
+        return libpbcspectral
+
+    try:
+        libpbcspectral = load_library('libpbc_spectral_fn')
+    except OSError:
+        libpbcspectral = None
+        _spectral_lib_initialized = True
+        return None
+
+    libpbcspectral.FCIspectral_broaden.argtypes = [
+        ctypes.c_void_p,  # hole
+        ctypes.c_void_p,  # particle
+        ctypes.c_void_p,  # total
+        ctypes.c_void_p,  # kind
+        ctypes.c_void_p,  # k_index
+        ctypes.c_void_p,  # orbital
+        ctypes.c_void_p,  # spin
+        ctypes.c_void_p,  # omega0
+        ctypes.c_void_p,  # weight
+        ctypes.c_void_p,  # omega_grid
+        ctypes.c_int,     # npoles
+        ctypes.c_int,     # nomega
+        ctypes.c_int,     # nkpts
+        ctypes.c_int,     # norb_axis
+        ctypes.c_int,     # spin_axis
+        ctypes.c_int,     # orbital_resolved
+        ctypes.c_int,     # spin_resolved
+        ctypes.c_double,  # eta
+        ctypes.c_int,     # broadening
+    ]
+    libpbcspectral.FCIspectral_broaden.restype = None
+    libpbcspectral.FCIspectral_apply_k_op.argtypes = [
+        ctypes.c_void_p,  # out
+        ctypes.c_void_p,  # fcivec
+        ctypes.c_void_p,  # blocks
+        ctypes.c_int,     # nblocks
+        ctypes.c_int,     # nkpts
+        ctypes.c_void_p,  # stra_ids
+        ctypes.c_void_p,  # stra_offsets
+        ctypes.c_void_p,  # strb_ids
+        ctypes.c_void_p,  # strb_offsets
+        ctypes.c_void_p,  # target_str2loc_a
+        ctypes.c_int,     # target_nstra
+        ctypes.c_void_p,  # target_str2loc_b
+        ctypes.c_int,     # target_nstrb
+        ctypes.c_void_p,  # target_block_offset
+        ctypes.c_void_p,  # target_block_na
+        ctypes.c_void_p,  # target_block_nb
+        ctypes.c_void_p,  # op_index
+        ctypes.c_int,     # nlink
+        ctypes.c_int,     # orb
+        ctypes.c_int,     # k_op
+        ctypes.c_int,     # spin
+        ctypes.c_int,     # cre
+        ctypes.c_int,     # beta_phase
+    ]
+    libpbcspectral.FCIspectral_apply_k_op.restype = None
+    _spectral_lib_initialized = True
+    return libpbcspectral
 
 
 @dataclass
@@ -296,9 +370,7 @@ def apply_k_op_py(fcivec, norb, nelec, nkpts, target_k, k, p, spin,
             kmom=kmom, kconserv=kconserv, cell=cell, kpts=kpts,
             kmesh=kmesh, kmf=kmf, kmc=kmc)
 
-    fcivec = np.asarray(fcivec)
-    assert fcivec.size == context.source.sector_size, (
-        fcivec.size, context.source.sector_size)
+    fcivec = _operator_vector(fcivec, context)
     out = np.zeros(context.target.sector_size, dtype=fcivec.dtype)
 
     if context.spin == 0:
@@ -327,21 +399,127 @@ def _operator_info(context):
     }
 
 
+def _target_block_tables(layout, nkpts):
+    '''
+    Build target block lookup tables for the C operator helper.
+    '''
+    table_size = int(nkpts) * int(nkpts)
+    offset = np.full(table_size, -1, dtype=np.int32)
+    na = np.zeros(table_size, dtype=np.int32)
+    nb = np.zeros(table_size, dtype=np.int32)
+    for blk in layout.blocks:
+        ka, kb, nstra, nstrb, off, _ = map(int, blk)
+        key = ka * int(nkpts) + kb
+        offset[key] = off
+        na[key] = nstra
+        nb[key] = nstrb
+    return offset, na, nb
+
+
+def _operator_vector(fcivec, context):
+    '''Validate the packed vector before either backend can access its data.'''
+    fcivec = np.asarray(fcivec)
+    if fcivec.size != context.source.sector_size:
+        raise ValueError('CI vector size does not match the source sector: '
+                         f'{fcivec.size} != {context.source.sector_size}')
+    return fcivec.reshape(-1)
+
+
+def _apply_k_op_c(fcivec, context):
+    '''
+    Apply one k-resolved operator through the native C helper.
+    '''
+    fcivec = _operator_vector(fcivec, context)
+    if not context.kmom.scalar:
+        return None
+    # Avoid changing precision or integer semantics outside the native ABI.
+    if fcivec.dtype not in (np.dtype('float64'), np.dtype('complex128')):
+        return None
+
+    lib = _load_spectral_lib()
+    if lib is None:
+        return None
+
+    real_input = not np.iscomplexobj(fcivec)
+    fcivec = np.ascontiguousarray(fcivec, dtype=np.complex128)
+    out = np.zeros(context.target.sector_size, dtype=np.complex128)
+    blocks = np.ascontiguousarray(context.source.blocks, dtype=np.int32)
+    op_index = np.ascontiguousarray(context.op_index, dtype=np.int32)
+    stra_ids, stra_offsets = kfci_contract_map._flatten_sector_ids(
+        context.source.stra_id, len(context.source.stra_id))
+    strb_ids, strb_offsets = kfci_contract_map._flatten_sector_ids(
+        context.source.strb_id, len(context.source.strb_id))
+    str2loc_a = np.ascontiguousarray(context.target.str2loc_a,
+                                     dtype=np.int32)
+    str2loc_b = np.ascontiguousarray(context.target.str2loc_b,
+                                     dtype=np.int32)
+    block_offset, block_na, block_nb = _target_block_tables(
+        context.target, len(context.target.stra_id))
+    beta_phase = -1 if (context.source_nelec[0] % 2) else 1
+
+    lib.FCIspectral_apply_k_op(
+        out.ctypes.data_as(ctypes.c_void_p),
+        fcivec.ctypes.data_as(ctypes.c_void_p),
+        blocks.ctypes.data_as(ctypes.c_void_p),
+        ctypes.c_int(blocks.shape[0]),
+        ctypes.c_int(len(context.source.stra_id)),
+        stra_ids.ctypes.data_as(ctypes.c_void_p),
+        stra_offsets.ctypes.data_as(ctypes.c_void_p),
+        strb_ids.ctypes.data_as(ctypes.c_void_p),
+        strb_offsets.ctypes.data_as(ctypes.c_void_p),
+        str2loc_a.ctypes.data_as(ctypes.c_void_p),
+        ctypes.c_int(str2loc_a.shape[1]),
+        str2loc_b.ctypes.data_as(ctypes.c_void_p),
+        ctypes.c_int(str2loc_b.shape[1]),
+        block_offset.ctypes.data_as(ctypes.c_void_p),
+        block_na.ctypes.data_as(ctypes.c_void_p),
+        block_nb.ctypes.data_as(ctypes.c_void_p),
+        op_index.ctypes.data_as(ctypes.c_void_p),
+        ctypes.c_int(op_index.shape[1]),
+        ctypes.c_int(context.orb),
+        ctypes.c_int(context.k),
+        ctypes.c_int(context.spin),
+        ctypes.c_int(1 if context.cre else 0),
+        ctypes.c_int(beta_phase),
+    )
+    return out.real.copy() if real_input else out
+
+
 def apply_k_op(fcivec, norb, nelec, nkpts, target_k, k, p, spin,
                cre=False, context=None, return_info=False,
                source_link_index=None, target_link_index=None,
                nelec_spin=None, use_c=True, kmom=None, kconserv=None,
                cell=None, kpts=None, kmesh=None, kmf=None, kmc=None):
     '''
-    Apply a single k-resolved operator using Python (``use_c`` is reserved).
+    Apply an operator using C when available for this layout and dtype.
+
+    Non-scalar momentum tables, dtypes other than float64/complex128, and a
+    missing native library use Python. use_c=False always selects Python.
     '''
-    return apply_k_op_py(
-        fcivec, norb, nelec, nkpts, target_k, k, p, spin,
-        cre=cre, context=context, return_info=return_info,
-        source_link_index=source_link_index,
-        target_link_index=target_link_index, nelec_spin=nelec_spin,
-        kmom=kmom, kconserv=kconserv, cell=cell, kpts=kpts,
-        kmesh=kmesh, kmf=kmf, kmc=kmc)
+    if context is None:
+        context = make_k_op_context(
+            norb, nelec, nkpts, target_k, k, p, spin, cre=cre,
+            source_link_index=source_link_index,
+            target_link_index=target_link_index, nelec_spin=nelec_spin,
+            kmom=kmom, kconserv=kconserv, cell=cell, kpts=kpts,
+            kmesh=kmesh, kmf=kmf, kmc=kmc)
+
+    if use_c:
+        out = _apply_k_op_c(fcivec, context)
+    else:
+        out = None
+    if out is None:
+        return apply_k_op_py(
+            fcivec, norb, nelec, nkpts, target_k, k, p, spin,
+            cre=cre, context=context, return_info=return_info,
+            source_link_index=source_link_index,
+            target_link_index=target_link_index, nelec_spin=nelec_spin,
+            kmom=kmom, kconserv=kconserv, cell=cell, kpts=kpts,
+            kmesh=kmesh, kmf=kmf, kmc=kmc)
+
+    if return_info:
+        return out, _operator_info(context)
+    return out
 
 
 def _iter_roots(e_tot, ci):
@@ -849,6 +1027,28 @@ def _infer_pole_axes(poles, nkpts=None, norb=None):
     return int(nkpts), int(norb)
 
 
+def _validate_broadening_inputs(poles, omega_grid, eta, broadening, nkpts, norb):
+    '''Keep Python and C input errors consistent before indexing output arrays.'''
+    if not np.isfinite(eta) or eta <= 0:
+        raise ValueError('eta must be finite and positive')
+    _broadening_code(broadening)
+    if omega_grid.ndim != 1 or not np.all(np.isfinite(omega_grid)):
+        raise ValueError('omega_grid must be a finite one-dimensional array')
+    imax = np.iinfo(np.int32).max
+    if any(size < 0 or size > imax
+           for size in (nkpts, norb, len(poles), omega_grid.size)):
+        raise ValueError('spectral dimensions must fit nonnegative int32 values')
+    for row in poles:
+        if row['kind'] not in ('hole', 'particle'):
+            raise ValueError(f"unknown pole kind {row['kind']}")
+        for name, stop in (('k', nkpts), ('orbital', norb), ('spin', 2)):
+            value = row[name]
+            if int(value) != value or not 0 <= int(value) < stop:
+                raise ValueError(f'pole {name}={value} is outside [0, {stop})')
+        if not np.isfinite(row['omega']) or not np.isfinite(row['weight']):
+            raise ValueError('pole frequency and weight must be finite')
+
+
 def make_spectral_function_py(poles, omega_grid=None, eta=0.05,
                               broadening='lorentzian', npts=801,
                               padding=None, omega_min=None, omega_max=None,
@@ -870,7 +1070,9 @@ def make_spectral_function_py(poles, omega_grid=None, eta=0.05,
     else:
         omega_grid = np.asarray(omega_grid)
 
+    omega_grid = np.asarray(omega_grid, dtype=np.float64)
     nkpts, norb = _infer_pole_axes(poles, nkpts=nkpts, norb=norb)
+    _validate_broadening_inputs(poles, omega_grid, float(eta), broadening, nkpts, norb)
     norb_axis = norb if orbital_resolved else 1
     spin_axis = 2 if spin_resolved else 1
     shape = (nkpts, norb_axis, spin_axis, omega_grid.size)
@@ -882,8 +1084,6 @@ def make_spectral_function_py(poles, omega_grid=None, eta=0.05,
 
     for row in poles:
         kind = row['kind']
-        if kind not in ('hole', 'particle'):
-            continue
         k = int(row['k'])
         orb = int(row['orbital']) if orbital_resolved else 0
         spin = int(row['spin']) if spin_resolved else 0
@@ -908,19 +1108,125 @@ def make_spectral_function_py(poles, omega_grid=None, eta=0.05,
     }
 
 
+def _broadening_code(broadening):
+    '''
+    Convert the broadening label to the C helper convention.
+    '''
+    key = broadening.lower()
+    if key in ('lorentzian', 'lorentz'):
+        return 0
+    if key in ('gaussian', 'gauss'):
+        return 1
+    raise ValueError(f"unknown broadening {broadening}")
+
+
+def _pole_arrays_for_broadening(poles):
+    '''
+    Pack the pole table into contiguous arrays for the C broadening helper.
+    '''
+    kind_map = {'hole': 0, 'particle': 1}
+    npoles = len(poles)
+    kind = np.empty(npoles, dtype=np.int32)
+    k_index = np.empty(npoles, dtype=np.int32)
+    orbital = np.empty(npoles, dtype=np.int32)
+    spin = np.empty(npoles, dtype=np.int32)
+    omega0 = np.empty(npoles, dtype=np.float64)
+    weight = np.empty(npoles, dtype=np.float64)
+
+    for ipole, row in enumerate(poles):
+        row_kind = row['kind']
+        if row_kind not in kind_map:
+            raise ValueError(f"unknown pole kind {row_kind}")
+        kind[ipole] = kind_map[row_kind]
+        k_index[ipole] = int(row['k'])
+        orbital[ipole] = int(row['orbital'])
+        spin[ipole] = int(row['spin'])
+        omega0[ipole] = float(np.real_if_close(row['omega']).real)
+        weight[ipole] = float(np.real_if_close(row['weight']).real)
+
+    return kind, k_index, orbital, spin, omega0, weight
+
+
 def make_spectral_function(poles, omega_grid=None, eta=0.05,
                            broadening='lorentzian', npts=801,
                            padding=None, omega_min=None, omega_max=None,
                            nkpts=None, norb=None, spin_resolved=False,
                            orbital_resolved=False, use_c=True):
     '''
-    Broaden pole weights using Python. ``use_c`` is reserved for acceleration.
+    Broaden pole weights into A(k, omega), using the C helper when available.
     '''
-    return make_spectral_function_py(
-        poles, omega_grid=omega_grid, eta=eta, broadening=broadening,
-        npts=npts, padding=padding, omega_min=omega_min,
-        omega_max=omega_max, nkpts=nkpts, norb=norb,
-        spin_resolved=spin_resolved, orbital_resolved=orbital_resolved)
+    poles = list(poles)
+    if not use_c:
+        return make_spectral_function_py(
+            poles, omega_grid=omega_grid, eta=eta, broadening=broadening,
+            npts=npts, padding=padding, omega_min=omega_min,
+            omega_max=omega_max, nkpts=nkpts, norb=norb,
+            spin_resolved=spin_resolved, orbital_resolved=orbital_resolved)
+
+    lib = _load_spectral_lib()
+    if lib is None:
+        return make_spectral_function_py(
+            poles, omega_grid=omega_grid, eta=eta, broadening=broadening,
+            npts=npts, padding=padding, omega_min=omega_min,
+            omega_max=omega_max, nkpts=nkpts, norb=norb,
+            spin_resolved=spin_resolved, orbital_resolved=orbital_resolved)
+
+    broadening_id = _broadening_code(broadening)
+    if omega_grid is None:
+        omega_grid = make_omega_grid(
+            poles, npts=npts, eta=eta, padding=padding,
+            omega_min=omega_min, omega_max=omega_max)
+    else:
+        omega_grid = np.asarray(omega_grid)
+
+    omega_grid = np.asarray(omega_grid, dtype=np.float64)
+    nkpts, norb = _infer_pole_axes(poles, nkpts=nkpts, norb=norb)
+    _validate_broadening_inputs(poles, omega_grid, float(eta), broadening, nkpts, norb)
+    norb_axis = norb if orbital_resolved else 1
+    spin_axis = 2 if spin_resolved else 1
+    shape = (nkpts, norb_axis, spin_axis, omega_grid.size)
+    spectra = {
+        'hole': np.zeros(shape),
+        'particle': np.zeros(shape),
+        'total': np.zeros(shape),
+    }
+
+    kind, k_index, orbital, spin, omega0, weight = \
+        _pole_arrays_for_broadening(poles)
+    omega_grid = np.ascontiguousarray(omega_grid)
+    lib.FCIspectral_broaden(
+        spectra['hole'].ctypes.data_as(ctypes.c_void_p),
+        spectra['particle'].ctypes.data_as(ctypes.c_void_p),
+        spectra['total'].ctypes.data_as(ctypes.c_void_p),
+        kind.ctypes.data_as(ctypes.c_void_p),
+        k_index.ctypes.data_as(ctypes.c_void_p),
+        orbital.ctypes.data_as(ctypes.c_void_p),
+        spin.ctypes.data_as(ctypes.c_void_p),
+        omega0.ctypes.data_as(ctypes.c_void_p),
+        weight.ctypes.data_as(ctypes.c_void_p),
+        omega_grid.ctypes.data_as(ctypes.c_void_p),
+        ctypes.c_int(kind.size),
+        ctypes.c_int(omega_grid.size),
+        ctypes.c_int(nkpts),
+        ctypes.c_int(norb_axis),
+        ctypes.c_int(spin_axis),
+        ctypes.c_int(1 if orbital_resolved else 0),
+        ctypes.c_int(1 if spin_resolved else 0),
+        ctypes.c_double(float(eta)),
+        ctypes.c_int(broadening_id),
+    )
+
+    return {
+        'omega': omega_grid,
+        'eta': float(eta),
+        'broadening': broadening,
+        'spectra': spectra,
+        'k_axis': list(range(nkpts)),
+        'orbital_axis': list(range(norb)) if orbital_resolved else ['sum'],
+        'spin_axis': [0, 1] if spin_resolved else ['sum'],
+        'orbital_resolved': bool(orbital_resolved),
+        'spin_resolved': bool(spin_resolved),
+    }
 
 
 def label_pole_momenta(poles, kpts):
