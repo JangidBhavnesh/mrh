@@ -85,3 +85,12 @@ set_target_properties (clib_mrh_pbc_kfci_hdiag PROPERTIES
       CLEAN_DIRECT_OUTPUT 1
       LIBRARY_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}
       OUTPUT_NAME "pbc_kfci_hdiag")
+
+# Build creation/annihilation and pole-broadening kernels for kCASCI spectra.
+add_library (clib_mrh_pbc_spectral_fn SHARED "pbc_spectral_fn.c")
+target_link_libraries(clib_mrh_pbc_spectral_fn ${LAPACK_LIBRARIES})
+set_target_properties (clib_mrh_pbc_spectral_fn PROPERTIES
+      LINKER_LANGUAGE C
+      CLEAN_DIRECT_OUTPUT 1
+      LIBRARY_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}
+      OUTPUT_NAME "pbc_spectral_fn")
