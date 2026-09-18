@@ -470,11 +470,21 @@ def _prepare_kcasci_job(kmc, kmom, nroots, solver_setup, kind, mo_coeff):
                 invalid('kmesh disagrees with kpts ordering')
 
 
+def _normalize_spin_sector_mode(mode):
+    key = mode.lower()
+    if key in ('representative', 'default', 'spin_free'):
+        return 'representative'
+    if key in ('spin_resolved', 'separate', 'all'):
+        return 'spin_resolved'
+    raise ValueError(f'unknown spin_sector_mode {mode}')
+
+
 def _charged_spin_list(nelecastot, norb, kind, charged_spin,
                        spin_sector_mode='representative'):
     '''
     Return charged spin sectors for the charged KCASCI jobs.
     '''
+    mode = _normalize_spin_sector_mode(spin_sector_mode)
     if isinstance(charged_spin, str) and charged_spin == 'default':
         return [None]
     if charged_spin is not None:
@@ -482,11 +492,8 @@ def _charged_spin_list(nelecastot, norb, kind, charged_spin,
             return list(charged_spin)
         return [charged_spin]
 
-    key = spin_sector_mode.lower()
-    if key in ('representative', 'default', 'spin_free'):
+    if mode == 'representative':
         return [None]
-    if key not in ('spin_resolved', 'separate', 'all'):
-        raise ValueError(f"unknown spin_sector_mode {spin_sector_mode}")
 
     neleca, nelecb = map(int, nelecastot)
     spin0 = neleca - nelecb
@@ -531,12 +538,18 @@ def compute_kcasci_spectral_roots(kmf, ncas, nelecas, ncore=None,
     spin channels. Convergence flags aggregate the roots within each job or
     charged momentum sector.
 
+    Explicit charged_spin_hole/charged_spin_particle values override the mode
+    for that charge. Use spectral_weight_sum_rules to inspect the actual
+    supplied sectors and missing weight. spin_resolved includes all allowed
+    spin channels by default but a finite root count can still omit weight.
+
     solver_setup(kmc, kind) may configure solver tolerances and algorithms.
     It must preserve the common orbitals, active/core space, and momentum and
     electron sectors; canonicalization and natural orbitals must stay disabled.
     '''
     from mrh.my_pyscf.pbc import mcscf
 
+    spin_sector_mode = _normalize_spin_sector_mode(spin_sector_mode)
     if mo_coeff is None:
         mo_coeff = kmf.mo_coeff
     mo_coeff = np.array(mo_coeff, copy=True)
@@ -631,6 +644,32 @@ def _select_neutral_root(rows, neutral_root=0, target_k=None):
     return roots[0]
 
 
+def _spectral_context(spectral_roots, neutral_root, neutral_target_k, kmom):
+    '''Resolve the same neutral state and momentum tables for poles and sums.'''
+    rows = _root_table(spectral_roots)
+    stored = None
+    if isinstance(spectral_roots, KCASCISpectralRoots):
+        if neutral_target_k is None:
+            neutral_target_k = spectral_roots.target_k
+        stored = spectral_roots.kmom
+        if stored is None and spectral_roots.kconserv is not None:
+            stored = kcistrings.make_kpoint_momentum(
+                spectral_roots.nkpts, kconserv=spectral_roots.kconserv,
+                cell=getattr(spectral_roots.neutral, 'cell', None),
+                kpts=spectral_roots.kpts, kmesh=spectral_roots.kmesh)
+    neutral = _select_neutral_root(rows, neutral_root, target_k=neutral_target_k)
+    nkpts = int(neutral['nkpts'])
+    if kmom is None:
+        kmom = stored if stored is not None else kcistrings.make_kpoint_momentum(nkpts)
+    if not isinstance(kmom, kcistrings.KPointMomentum) or kmom.nkpts != nkpts:
+        raise ValueError('kmom must be a KPointMomentum with matching nkpts')
+    if stored is not None:
+        for name in ('zero', 'kconserv', 'kadd', 'ksub', 'kneg'):
+            if not np.array_equal(getattr(kmom, name), getattr(stored, name)):
+                raise ValueError('kmom conflicts with stored spectral momentum metadata')
+    return rows, neutral, kmom
+
+
 def _charged_root_index(rows):
     '''
     Index charged roots by type, target momentum, and electron number.
@@ -693,7 +732,7 @@ def _append_poles(poles, op_vec, op_info, charged_rows, neutral, kind,
 def make_spectral_poles(spectral_roots, neutral_root=0, neutral_target_k=None,
                         k_indices=None, orbital_indices=None, spins=(0, 1),
                         include_hole=True, include_particle=True,
-                        min_weight=0.0, strict=False):
+                        min_weight=0.0, strict=False, *, kmom=None):
     '''
     Build k-resolved hole/particle pole table from neutral and charged roots.
 
@@ -703,29 +742,21 @@ def make_spectral_poles(spectral_roots, neutral_root=0, neutral_target_k=None,
     Frequencies are supercell energy differences in Hartree, without shifting
     by a chemical potential. Only supplied charged roots contribute weight.
 
-    Pass KCASCISpectralRoots to retain multidimensional momentum metadata.
-    A plain list of root dictionaries assumes scalar cyclic momentum labels.
-    '''
-    rows = _root_table(spectral_roots)
-    if isinstance(spectral_roots, KCASCISpectralRoots):
-        nkpts = spectral_roots.nkpts
-        ncas = spectral_roots.ncas
-        kmom = spectral_roots.kmom
-        neutral_target_k = (spectral_roots.target_k if neutral_target_k is None
-                            else neutral_target_k)
-    else:
-        neutral0 = _select_neutral_root(rows, neutral_root,
-                                       target_k=neutral_target_k)
-        nkpts = neutral0['nkpts']
-        ncas = neutral0['ncastot'] // neutral0['nkpts']
-        kmom = kcistrings.make_kpoint_momentum(nkpts)
+    Pass KCASCISpectralRoots to retain multidimensional momentum metadata, or
+    pass kmom=kcistrings.make_kpoint_momentum(nkpts, cell=cell, kpts=kpts) with
+    a plain root iterable. Without kmom, plain roots use scalar cyclic labels
+    for backward compatibility; that convention is unsuitable for general
+    multidimensional meshes. An explicit kmom must agree with stored metadata.
 
-    neutral = _select_neutral_root(rows, neutral_root,
-                                  target_k=neutral_target_k)
+    strict=True rejects missing sectors for nonzero operator vectors. It does
+    not guarantee that all roots or all spectral weight have been included.
+    '''
+    rows, neutral, kmom = _spectral_context(
+        spectral_roots, neutral_root, neutral_target_k, kmom)
     charged_index = _charged_root_index(rows)
-    nkpts = int(nkpts)
-    ncas = int(ncas)
-    norb = nkpts * ncas
+    nkpts = int(neutral['nkpts'])
+    norb = int(neutral['ncastot'])
+    ncas = norb // nkpts
     nelec = tuple(map(int, neutral['nelecastot']))
     target_k = int(neutral['target_k'])
 
@@ -744,7 +775,7 @@ def make_spectral_poles(spectral_roots, neutral_root=0, neutral_target_k=None,
                     key = ('hole', int(info['target_k']),
                            tuple(map(int, info['nelec'])))
                     charged_rows = charged_index.get(key, ())
-                    if strict and not charged_rows:
+                    if strict and not charged_rows and np.any(op_vec):
                         raise ValueError(f"missing hole sector {key[1:]}")
                     _append_poles(poles, op_vec, info, charged_rows, neutral,
                                   'hole', k, p, spin, min_weight)
@@ -756,7 +787,7 @@ def make_spectral_poles(spectral_roots, neutral_root=0, neutral_target_k=None,
                     key = ('particle', int(info['target_k']),
                            tuple(map(int, info['nelec'])))
                     charged_rows = charged_index.get(key, ())
-                    if strict and not charged_rows:
+                    if strict and not charged_rows and np.any(op_vec):
                         raise ValueError(f"missing particle sector {key[1:]}")
                     _append_poles(poles, op_vec, info, charged_rows, neutral,
                                   'particle', k, p, spin, min_weight)
@@ -981,46 +1012,44 @@ def project_poles_to_band_basis(poles, coeff, band_indices=None,
 def spectral_weight_sum_rules(spectral_roots, poles=None, neutral_root=0,
                               neutral_target_k=None, k_indices=None,
                               orbital_indices=None, spins=(0, 1),
-                              available_only=False):
+                              available_only=False, *, kmom=None):
     '''
     Compare accumulated pole weights with exact operator norms.
 
-    Missing weight reports the contribution absent from the charged roots that
-    were supplied to make_spectral_poles.  If available_only is True, spin
-    channels with no supplied poles are not counted as missing weight.
-    As in make_spectral_poles, plain root lists assume scalar cyclic momentum
-    labels; KCASCISpectralRoots retains the actual momentum tables.
+    For a normalized neutral state and complete charged bases, removal weight
+    equals occupation, addition weight equals one minus occupation, and their
+    sum is one per active spin orbital. Missing weight includes absent spin
+    sectors, omitted charged roots, and filtering of supplied poles. Use active
+    orbital poles here, before any band projection.
+
+    hole/particle_sector_available and hole/particle_nroots describe the roots
+    supplied for each channel, independently of pole filtering. available_only
+    masks legacy norm/weight/missing fields for channels with no charged roots;
+    it no longer infers availability from nonzero or retained poles. The
+    full_total_norm/weight/missing fields always include both channels, even
+    with available_only=True, so omitted sectors remain visible.
+
+    A zero operator norm is a forbidden transition, not lost spectral weight.
+    Full totals sum to the neutral CI norm (one for a normalized state). The
+    kmom argument has the same meaning and default as in make_spectral_poles.
     '''
-    rows = _root_table(spectral_roots)
-    if isinstance(spectral_roots, KCASCISpectralRoots):
-        nkpts = spectral_roots.nkpts
-        ncas = spectral_roots.ncas
-        kmom = spectral_roots.kmom
-        neutral_target_k = (spectral_roots.target_k if neutral_target_k is None
-                            else neutral_target_k)
-    else:
-        neutral0 = _select_neutral_root(rows, neutral_root,
-                                       target_k=neutral_target_k)
-        nkpts = neutral0['nkpts']
-        ncas = neutral0['ncastot'] // neutral0['nkpts']
-        kmom = kcistrings.make_kpoint_momentum(nkpts)
-
-    neutral = _select_neutral_root(rows, neutral_root,
-                                  target_k=neutral_target_k)
-    if poles is None:
-        poles = make_spectral_poles(
-            spectral_roots, neutral_root=neutral_root,
-            neutral_target_k=neutral_target_k, k_indices=k_indices,
-            orbital_indices=orbital_indices, spins=spins, min_weight=0.0)
-
-    nkpts = int(nkpts)
-    ncas = int(ncas)
-    norb = nkpts * ncas
+    rows, neutral, kmom = _spectral_context(
+        spectral_roots, neutral_root, neutral_target_k, kmom)
+    charged_index = _charged_root_index(rows)
+    nkpts = int(neutral['nkpts'])
+    norb = int(neutral['ncastot'])
+    ncas = norb // nkpts
     nelec = tuple(map(int, neutral['nelecastot']))
     target_k = int(neutral['target_k'])
     k_list = _index_list(k_indices, nkpts, 'k')
     p_list = _index_list(orbital_indices, ncas, 'orbital')
     spin_list = [_as_spin_id(spin) for spin in spins]
+
+    if poles is None:
+        poles = make_spectral_poles(
+            rows, neutral_root=neutral_root, neutral_target_k=target_k,
+            k_indices=k_list, orbital_indices=p_list, spins=spin_list,
+            min_weight=0.0, kmom=kmom)
 
     pole_weight = {}
     for row in poles:
@@ -1035,20 +1064,32 @@ def spectral_weight_sum_rules(spectral_roots, poles=None, neutral_root=0,
             for spin in spin_list:
                 h_key = ('hole', k, p, spin)
                 p_key = ('particle', k, p, spin)
-                do_hole = not available_only or h_key in pole_weight
-                do_particle = not available_only or p_key in pole_weight
-
-                hole_norm = None if not do_hole else 0.0
-                particle_norm = None if not do_particle else 0.0
-                if do_hole and nelec[spin] > 0:
-                    vec = des_k(neutral['ci'], norb, nelec, nkpts,
-                                target_k, k, p, spin, kmom=kmom)
+                hole_norm = particle_norm = 0.0
+                h_nroots = p_nroots = 0
+                if nelec[spin] > 0:
+                    vec, info = des_k(neutral['ci'], norb, nelec, nkpts,
+                                     target_k, k, p, spin, kmom=kmom,
+                                     return_info=True)
                     hole_norm = float(np.real_if_close(np.vdot(vec, vec)).real)
-                if do_particle and nelec[spin] < norb:
-                    vec = cre_k(neutral['ci'], norb, nelec, nkpts,
-                                target_k, k, p, spin, kmom=kmom)
+                    h_nroots = len(charged_index.get(
+                        ('hole', info['target_k'], info['nelec']), ()))
+                if nelec[spin] < norb:
+                    vec, info = cre_k(neutral['ci'], norb, nelec, nkpts,
+                                     target_k, k, p, spin, kmom=kmom,
+                                     return_info=True)
                     particle_norm = float(
                         np.real_if_close(np.vdot(vec, vec)).real)
+                    p_nroots = len(charged_index.get(
+                        ('particle', info['target_k'], info['nelec']), ()))
+
+                full_norm = hole_norm + particle_norm
+                full_weight = pole_weight.get(h_key, 0.0) + pole_weight.get(p_key, 0.0)
+                do_hole = not available_only or h_nroots > 0
+                do_particle = not available_only or p_nroots > 0
+                if not do_hole:
+                    hole_norm = None
+                if not do_particle:
+                    particle_norm = None
 
                 h_wt = None if not do_hole else pole_weight.get(h_key, 0.0)
                 p_wt = (None if not do_particle
@@ -1064,6 +1105,10 @@ def spectral_weight_sum_rules(spectral_roots, poles=None, neutral_root=0,
                     'k': int(k),
                     'orbital': int(p),
                     'spin': int(spin),
+                    'hole_sector_available': h_nroots > 0,
+                    'particle_sector_available': p_nroots > 0,
+                    'hole_nroots': h_nroots,
+                    'particle_nroots': p_nroots,
                     'hole_norm': hole_norm,
                     'hole_weight': h_wt,
                     'hole_missing': h_miss,
@@ -1073,6 +1118,9 @@ def spectral_weight_sum_rules(spectral_roots, poles=None, neutral_root=0,
                     'total_norm': total_norm,
                     'total_weight': total_weight,
                     'total_missing': total_norm - total_weight,
+                    'full_total_norm': full_norm,
+                    'full_total_weight': full_weight,
+                    'full_total_missing': full_norm - full_weight,
                 })
     return checks
 

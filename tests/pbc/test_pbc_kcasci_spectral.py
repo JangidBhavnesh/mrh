@@ -1,6 +1,7 @@
 """Integration checks for the Python kCASCI spectral workflow."""
 
 import unittest
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest import mock
 
@@ -8,6 +9,7 @@ import numpy as np
 from pyscf.pbc import scf
 
 from mrh.my_pyscf.pbc.fci import spectral_fn_helper as sfh
+from mrh.my_pyscf.pbc.fci import krdm_helper
 from mrh.my_pyscf.pbc.mcscf import kcasci
 from mrh.tests.pbc.test_pbc_kcasci import _make_periodic_h2_cell
 
@@ -24,6 +26,85 @@ class SpectralWorkflowTests(unittest.TestCase):
         cls.kmf.kernel()
         if not cls.kmf.converged:
             raise RuntimeError('Spectral test KRHF did not converge')
+        cls.complete_roots = sfh.compute_kcasci_spectral_roots(
+            cls.kmf, 2, 2, ncore=0, target_k=1,
+            nroots_hole=12, nroots_particle=12, spin_sector_mode='spin_resolved')
+
+    def test_complete_weights_match_independent_neutral_rdm(self):
+        roots = self.complete_roots
+        self.assertTrue(all(row['converged'] for row in roots.roots))
+        dm1s = krdm_helper.make_rdm1s_ref(
+            roots.neutral.ci, roots.ncastot, roots.nelecastot, roots.nkpts,
+            target_k=roots.target_k, kmom=roots.kmom)
+        poles = sfh.make_spectral_poles(roots, strict=True)
+        checks = sfh.spectral_weight_sum_rules(roots, poles)
+        self.assertEqual(len(checks), 8)
+        for check in checks:
+            orbital = check['k'] * roots.ncas + check['orbital']
+            occupation = dm1s[check['spin']][orbital, orbital].real
+            for prefix, expected in (('hole', occupation),
+                                     ('particle', 1 - occupation)):
+                self.assertTrue(check[prefix + '_sector_available'])
+                self.assertEqual(check[prefix + '_nroots'], 12)
+                self.assertAlmostEqual(check[prefix + '_norm'], expected, places=10)
+                self.assertAlmostEqual(check[prefix + '_weight'], expected, places=10)
+                self.assertAlmostEqual(check[prefix + '_missing'], 0, places=10)
+            self.assertAlmostEqual(check['full_total_norm'], 1, places=10)
+            self.assertAlmostEqual(check['full_total_weight'], 1, places=10)
+            self.assertAlmostEqual(check['full_total_missing'], 0, places=10)
+
+    def test_truncated_roots_and_filtered_poles_report_missing_weight(self):
+        full = self.complete_roots
+        truncated = replace(full, roots=[row for row in full.roots if row['root'] == 0])
+        # All sectors exist, so strict is not a completeness guarantee.
+        poles = sfh.make_spectral_poles(truncated, strict=True)
+        checks = sfh.spectral_weight_sum_rules(truncated, poles, available_only=True)
+        self.assertGreater(sum(c['full_total_missing'] for c in checks), 0.1)
+        for check in checks:
+            self.assertEqual(check['hole_nroots'], 1)
+            self.assertEqual(check['particle_nroots'], 1)
+            self.assertGreaterEqual(check['full_total_missing'], -1e-10)
+
+        # Filtering must not turn an available sector into an unreported one.
+        filtered = sfh.make_spectral_poles(full, min_weight=2)
+        self.assertEqual(filtered, [])
+        checks = sfh.spectral_weight_sum_rules(full, filtered, available_only=True)
+        for check in checks:
+            self.assertTrue(check['hole_sector_available'])
+            self.assertTrue(check['particle_sector_available'])
+            self.assertEqual(check['hole_weight'], 0)
+            self.assertEqual(check['particle_weight'], 0)
+            self.assertAlmostEqual(check['total_missing'], 1, places=10)
+            self.assertAlmostEqual(check['full_total_missing'], 1, places=10)
+
+    def test_representative_sectors_remain_visible_in_full_totals(self):
+        roots = sfh.compute_kcasci_spectral_roots(
+            self.kmf, 2, 2, ncore=0, target_k=1,
+            nroots_hole=12, nroots_particle=12, spin_sector_mode='representative')
+        checks = sfh.spectral_weight_sum_rules(roots)
+        masked = sfh.spectral_weight_sum_rules(roots, available_only=True)
+        self.assertGreater(sum(c['full_total_missing'] for c in masked), 0.1)
+        for check, subset in zip(checks, masked):
+            # Default positive charged spin: beta removal and alpha addition.
+            self.assertEqual(check['hole_sector_available'], check['spin'] == 1)
+            self.assertEqual(check['particle_sector_available'], check['spin'] == 0)
+            absent = 'hole' if check['spin'] == 0 else 'particle'
+            self.assertEqual(check[absent + '_nroots'], 0)
+            self.assertEqual(check[absent + '_weight'], 0)
+            self.assertAlmostEqual(check[absent + '_missing'], check[absent + '_norm'])
+            self.assertIsNone(subset[absent + '_missing'])
+            self.assertAlmostEqual(subset['total_missing'], 0, places=10)
+            self.assertAlmostEqual(subset['full_total_missing'], check['total_missing'])
+        with self.assertRaisesRegex(ValueError, 'missing .* sector'):
+            sfh.make_spectral_poles(roots, strict=True)
+
+    def test_invalid_spin_mode_is_rejected_before_kernel(self):
+        with mock.patch.object(kcasci.PBCKCASCI, 'kernel') as kernel:
+            with self.assertRaisesRegex(ValueError, 'spin_sector_mode'):
+                sfh.compute_kcasci_spectral_roots(
+                    self.kmf, 2, 2, with_hole=False, with_particle=False,
+                    spin_sector_mode='typo')
+            kernel.assert_not_called()
 
     def test_root_workflow_single_multiple_and_davidson(self):
         orbitals = np.array(self.kmf.mo_coeff, copy=True)

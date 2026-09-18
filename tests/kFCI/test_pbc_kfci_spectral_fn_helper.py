@@ -3,6 +3,7 @@
 import os
 import tempfile
 import unittest
+from dataclasses import replace
 import numpy as np
 
 from pyscf.fci import cistring
@@ -116,6 +117,35 @@ def _one_alpha_roots():
         ],
         nkpts=nkpts, ncas=ncas, ncastot=norb, nelecastot=nelec,
         target_k=0, mo_coeff=None)
+
+
+def _complete_2d_roots(kmom, target_k=2):
+    '''A complex neutral state and complete charged determinant bases.'''
+    nkpts = kmom.nkpts
+    norb = nkpts
+    nelec = (1, 1)
+    layout = sfh.make_k_sector_layout(norb, nelec, nkpts, target_k, kmom=kmom)
+    rng = np.random.default_rng(41)
+    ci = rng.normal(size=layout.sector_size) + 1j * rng.normal(size=layout.sector_size)
+    ci /= np.linalg.norm(ci)
+    common = dict(ncastot=norb, nkpts=nkpts, converged=True)
+    rows = [dict(common, kind='neutral', charge=0, target_k=target_k, root=0,
+                 energy=-2., energy_supercell=-8., ci=ci, nelecastot=nelec)]
+    for kind, charge, sectors in (('hole', 1, ((0, 1), (1, 0))),
+                                  ('particle', -1, ((2, 1), (1, 2)))):
+        for electrons in sectors:
+            for momentum in range(nkpts):
+                layout = sfh.make_k_sector_layout(
+                    norb, electrons, nkpts, momentum, kmom=kmom)
+                for root, vec in enumerate(np.eye(layout.sector_size)):
+                    rows.append(dict(common, kind=kind, charge=charge,
+                                     target_k=momentum, root=root, ci=vec,
+                                     energy=-1., energy_supercell=-4.,
+                                     nelecastot=electrons))
+    return sfh.KCASCISpectralRoots(
+        neutral=None, hole=None, particle=None, roots=rows, nkpts=nkpts,
+        ncas=1, ncastot=norb, nelecastot=nelec, target_k=target_k,
+        mo_coeff=None, kmom=kmom, spin_sector_mode='spin_resolved')
 
 
 class KnownValues(unittest.TestCase):
@@ -232,6 +262,92 @@ class KnownValues(unittest.TestCase):
                                               kcistrings._ksub(kmom, target_k, k)))
                             self.assertEqual(test.shape, ref.shape)
                             self.assertTrue(np.allclose(test, ref))
+
+    def test_2d_poles_and_sums_accept_explicit_momentum_for_plain_roots(self):
+        kmom = self._make_2d_kmom()
+        roots = _complete_2d_roots(kmom)
+        poles = sfh.make_spectral_poles(roots, strict=True)
+        plain = sfh.make_spectral_poles(iter(roots.roots), kmom=kmom, strict=True)
+        self.assertEqual(len(poles), len(plain))
+        for ref, actual in zip(poles, plain):
+            self.assertEqual(ref, actual)
+            # Addition/subtraction are componentwise modulo two, not modulo four.
+            k = ref['k']
+            expected = 2 * ((roots.target_k // 2 + k // 2) % 2)
+            expected += (roots.target_k % 2 + k % 2) % 2
+            self.assertEqual(ref['target_k'], expected)
+        dm1s = krdm_helper.make_rdm1s_ref(
+            roots.roots[0]['ci'], 4, (1, 1), 4, target_k=2, kmom=kmom)
+        reference = sfh.spectral_weight_sum_rules(roots, poles)
+        # Omitted poles forces the internal pole builder to receive kmom too.
+        plain_checks = sfh.spectral_weight_sum_rules(iter(roots.roots), kmom=kmom)
+        for ref, actual in zip(reference, plain_checks):
+            self.assertEqual(ref, actual)
+            occupation = dm1s[ref['spin']][ref['k'], ref['k']].real
+            self.assertAlmostEqual(ref['hole_weight'], occupation, places=12)
+            self.assertAlmostEqual(ref['particle_weight'], 1 - occupation, places=12)
+            self.assertAlmostEqual(ref['full_total_norm'], 1, places=12)
+            self.assertAlmostEqual(ref['full_total_missing'], 0, places=12)
+
+    def test_momentum_metadata_validation_and_stored_table_fallback(self):
+        kmom = self._make_2d_kmom()
+        roots = _complete_2d_roots(kmom)
+        table_only = replace(roots, kmom=None, kconserv=kmom.kconserv)
+        self.assertEqual(sfh.make_spectral_poles(roots),
+                         sfh.make_spectral_poles(table_only))
+        for fn in (sfh.make_spectral_poles, sfh.spectral_weight_sum_rules):
+            with self.assertRaisesRegex(ValueError, 'matching nkpts'):
+                fn(roots.roots, kmom=kcistrings.make_kpoint_momentum(3))
+            with self.assertRaisesRegex(ValueError, 'conflicts'):
+                fn(roots, kmom=kcistrings.make_kpoint_momentum(4))
+
+    def test_plain_roots_preserve_nonzero_gamma_index(self):
+        cell = gto.Cell()
+        cell.a = np.eye(3) * 4
+        cell.atom = 'He 0 0 0'
+        cell.basis = 'sto-3g'
+        cell.verbose = 0
+        cell.build()
+        kpts = cell.make_kpts([2, 2, 1], wrap_around=True)[[3, 0, 1, 2]]
+        kmom = kcistrings.make_kpoint_momentum(4, cell=cell, kpts=kpts)
+        self.assertEqual(kmom.zero, 1)
+        roots = _complete_2d_roots(kmom, target_k=2)
+        poles = sfh.make_spectral_poles(roots.roots, kmom=kmom, strict=True)
+        for pole in sfh.label_pole_momenta(poles, kpts):
+            sign = -1 if pole['kind'] == 'hole' else 1
+            delta = cell.get_scaled_kpts(
+                kpts[roots.target_k] + sign * pole['operator_momentum']
+                - pole['charged_momentum'])
+            np.testing.assert_allclose(delta, np.rint(delta), atol=1e-12)
+        checks = sfh.spectral_weight_sum_rules(roots.roots, kmom=kmom)
+        for check in checks:
+            self.assertAlmostEqual(check['full_total_norm'], 1, places=12)
+            self.assertAlmostEqual(check['full_total_missing'], 0, places=12)
+
+    def test_strict_and_full_totals_allow_zero_norm_missing_sectors(self):
+        roots = _one_alpha_roots()
+        poles = sfh.make_spectral_poles(roots, spins=(0,), strict=True)
+        checks = sfh.spectral_weight_sum_rules(roots, poles, spins=(0,))
+        for row in checks:
+            self.assertAlmostEqual(row['full_total_norm'], 1)
+            self.assertAlmostEqual(row['full_total_missing'], 0)
+        self.assertFalse(checks[1]['hole_sector_available'])
+        self.assertEqual(checks[1]['hole_norm'], 0)
+
+    def test_spin_sector_choices_respect_empty_and_full_spin(self):
+        # (N_alpha, N_beta)=(2,0) in two orbitals: only alpha removal and beta addition.
+        self.assertEqual(sfh._charged_spin_list(
+            (2, 0), 2, 'hole', None, 'spin_resolved'), [1])
+        self.assertEqual(sfh._charged_spin_list(
+            (2, 0), 2, 'particle', None, 'spin_resolved'), [1])
+        self.assertEqual(sfh._charged_spin_list(
+            (0, 0), 2, 'hole', None, 'spin_resolved'), [])
+        self.assertEqual(sfh._charged_spin_list(
+            (2, 2), 2, 'particle', None, 'spin_resolved'), [])
+        self.assertEqual(sfh._charged_spin_list(
+            (1, 1), 2, 'hole', -1, 'representative'), [-1])
+        self.assertEqual(sfh._charged_spin_list(
+            (1, 1), 2, 'hole', [1], 'spin_resolved'), [1])
 
     def test_make_spectral_poles_from_charged_roots(self):
         roots = _one_alpha_roots()

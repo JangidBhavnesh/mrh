@@ -258,13 +258,13 @@ def gen_linkstr_index_k(orb_list, nocc, orb_k, nkpts, strs=None,
 
     return link_index
 
-def _count_det_per_k(link_index):
+def _count_det_per_k(link_index, zero=0):
     '''
     Count the number of determinants in each momentum sector K0 using the link index.
-    Assumes that link_index is sorted by K0 (which is true for the output of gen_linkstr_index_k).
+    zero is the momentum-identity label used for linkless vacuum strings.
     '''
     if isinstance(link_index, tuple):
-        return tuple(_count_det_per_k(x) for x in link_index)
+        return tuple(_count_det_per_k(x, zero=zero) for x in link_index)
 
     assert link_index.ndim == 3
     assert link_index.shape[2] >= 5
@@ -274,9 +274,9 @@ def _count_det_per_k(link_index):
 
     # Zero-link case, e.g. nelec = 0 for one spin sector.
     # There is still one determinant/string: the vacuum string.
-    # Its momentum sector is K0 = 0.
+    # Its momentum is the identity, whose label need not be index zero.
     if nlink == 0:
-        return {0: int(nstr)}
+        return {int(zero): int(nstr)}
 
     K0_values = np.asarray(link_index[:, 0, 4], dtype=np.int32)
     unique_K0, counts = np.unique(K0_values, return_counts=True)
@@ -312,7 +312,7 @@ def gen_k_sector_linkstr_info(link_indexa, link_indexb, nkpts, kindx,
     kmom = _as_kmom(nkpts, kmom=kmom, kconserv=kconserv)
     kindx = int(kindx) % nkpts
 
-    count_a, count_b = _count_det_per_k((link_indexa, link_indexb))
+    count_a, count_b = _count_det_per_k((link_indexa, link_indexb), zero=kmom.zero)
 
     blocks = []
     offset = 0
