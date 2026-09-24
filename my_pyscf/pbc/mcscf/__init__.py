@@ -56,7 +56,6 @@ def KCASCI(kmf, ncas, nelecas, ncore=None, target_k=None, charge=None,
         target_k=target_k, charged_spin=charged_spin,
     )
 
-
 def CASSCF(kmf, ncas, nelecas, ncore=None):
     kmf = _sanity_check_for_kmf(kmf)
     kmc = mc1step.CASSCF(kmf, ncas, nelecas, ncore)
