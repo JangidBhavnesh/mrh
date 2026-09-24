@@ -3,9 +3,11 @@ import copy
 from numbers import Integral
 
 from pyscf import mcscf
-from pyscf.pbc import scf, dft
+from pyscf.lib import logger
+from pyscf.pbc import scf
 
 from mrh.my_pyscf.pbc import mcscf as pbc_mcscf
+from mrh.my_pyscf.pbc.mcscf import _sanity_check_for_kmf
 from mrh.my_pyscf.pbc.mcpdft.mcpdft import get_mcpdft_child_class as get_pbc_mcpdft_child_class_gamma
 from mrh.my_pyscf.pbc.mcpdft.kmcpdft import (
     get_charged_kcas_mcpdft_child_class,
@@ -14,24 +16,26 @@ from mrh.my_pyscf.pbc.mcpdft.kmcpdft import (
 )
 
 # Author: Bhavnesh Jangid
-# Implementing MC-PDFT at gamma point and k-MC-PDFT. For initialization, I am using different function,.
-# (as sanity checks will be different.) However, I will try to import as much code from molecular PDFT 
-# and same code structure.
 
-def _sanity_check_for_kmf(kmf0):
-    """Validate that the input is a periodic Hartree-Fock object."""
-    assert isinstance(kmf0, scf.hf.SCF),  \
-        "PBC MC-PDFT only works with periodic SCF objects"
+# Implementing MC-PDFT at gamma point and k-MC-PDFT while reusing the
+# periodic MCSCF input validation and as much molecular PDFT code as possible.
 
-    if isinstance(kmf0, dft.krks.KRKS) or isinstance(kmf0, dft.kuks.KUKS) \
-        or isinstance(kmf0, dft.rks.RKS) or isinstance(kmf0, dft.uks.UKS):
-        raise NotImplementedError("PBC MC-PDFT only works with periodic HF objects.")
-        # In this case, probably one need to regenerate the 3C integrals.
+"""
+Periodic MC-PDFT Structure.
 
-    if isinstance(kmf0, scf.kuhf.KUHF):
-        kmf0 = scf.addons.convert_to_rhf(kmf0)
-    
-    return kmf0
+Driver hierarchy::
+
+    PySCF _PDFT
+    └── _PeriodicMCPDFT
+        ├── _MCPDFT
+        │    └── Gamma-point CASCI/CASSCF
+        └── _MCPDFTCPLX
+            ├── based on cplx CASCI/CASSCF
+            └── _kCASPDFT
+                ├── neutral momentum-resolved kCASCI
+                └── _kChargedCASPDFT
+                    └── charged sectors and band energies
+"""
 
 def _MCPDFT (mc_class, kmc_or_kmf, ot, ncas, nelecas, ncore=None, frozen=None,
             get_mcpdft_child_class=get_mcpdft_child_class,
@@ -90,105 +94,102 @@ def kCASSCFPDFT(kmc_or_kmf, ot, ncas, nelecas, ncore=None, frozen=None, **kwargs
                 **kwargs)
 
 def kCASCIPDFT(kmc_or_kmf, ot, ncas, nelecas, ncore=None, frozen=None,
-               momentum_resolved=False, target_k=None, charge=None,
-               charged_spin=None, **kwargs):
-    """Construct conventional or total-momentum-resolved k-CASCI-PDFT.
+               target_k=None, charge=None, charged_spin=None, **kwargs):
+    """Construct conventional or momentum-resolved k-CASCI-PDFT.
 
-    Set ``momentum_resolved=True`` to use ``PBCKCASCI`` and select its total
-    momentum sector with ``target_k``.  Set ``charge`` to ``+1`` or ``-1``
-    for electron removal or addition.  Omitting ``target_k`` for a charged
-    calculation evaluates every stored momentum sector.  The default retains
-    the established Wannier-basis periodic CASCI-PDFT implementation.
+    Existing kCASCI objects select the momentum-resolved route automatically.
+    For a mean-field input, ``target_k`` selects a neutral momentum sector and
+    a nonzero ``charge`` selects charged momentum sectors.  With neither,
+    conventional periodic CASCI is used.  Options that differ from an existing
+    kCASCI object reset its calculation after issuing a warning.
     """
-    if not isinstance(momentum_resolved, bool):
-        raise ValueError("momentum_resolved must be True or False")
+    from mrh.my_pyscf.pbc.mcscf.kcasci import PBCKCASCI
 
-    if not momentum_resolved:
-        if target_k is not None:
-            raise ValueError(
-                "target_k requires momentum_resolved=True",
-            )
-        if charge not in (None, 0) or charged_spin is not None:
-            raise ValueError(
-                "charge and charged_spin require momentum_resolved=True",
-            )
-        return _MCPDFT(
-            pbc_mcscf.CASCI, kmc_or_kmf, ot, ncas, nelecas,
-            ncore=ncore, frozen=frozen, **kwargs,
-        )
-
-    if target_k is not None and not isinstance(target_k, Integral):
-        raise ValueError("target_k must be an integer or None")
-    if charge is not None and not isinstance(charge, Integral):
-        raise ValueError("charge must be an integer or None")
-    if charge is not None:
-        charge = int(charge)
-        if charge not in (-1, 0, 1):
-            raise ValueError("charge must be -1, 0, +1, or None")
-    if charged_spin is not None and not isinstance(charged_spin, Integral):
-        raise ValueError("charged_spin must be an integer or None")
-    if charged_spin is not None:
-        charged_spin = int(charged_spin)
-    if charge == 0 and charged_spin is not None:
-        raise ValueError("charged_spin requires charge +1 or -1")
-
+    is_kcasci = isinstance(kmc_or_kmf, PBCKCASCI)
+    use_kcasci = (is_kcasci or target_k is not None
+                  or charge not in (None, 0) or charged_spin is not None)
+    if not use_kcasci:
+        return _MCPDFT(pbc_mcscf.CASCI, kmc_or_kmf, ot, ncas, nelecas,
+                       ncore=ncore, frozen=frozen, **kwargs)
     if frozen is not None:
         raise ValueError("Frozen orbitals are not supported in k-MC-PDFT")
 
-    from mrh.my_pyscf.pbc.mcscf.kcasci import PBCKCASCI
-
-    # A second-order SCF wrapper has an ``_scf`` attribute too, so test the
-    # public SCF type before treating the input as an existing PBCKCASCI.
-    kmf = getattr(kmc_or_kmf, "_scf", None)
-    if isinstance(kmc_or_kmf, scf.hf.SCF) or kmf is None:
-        if charged_spin is not None and charge not in (-1, 1):
+    if not is_kcasci:
+        if charged_spin is not None and charge in (None, 0):
             raise ValueError("charged_spin requires charge +1 or -1")
-        kmf = _sanity_check_for_kmf(kmc_or_kmf)
-        if charge in (-1, 1):
-            kmc = pbc_mcscf.KCASCI(
-                kmf, ncas, nelecas, ncore=ncore, charge=charge,
-                target_k=target_k, charged_spin=charged_spin,
-            )
-        else:
-            sector = 0 if target_k is None else target_k
-            kmc = pbc_mcscf.KCASCI(
-                kmf, ncas, nelecas, ncore=ncore, target_k=sector,
-            )
+        kcas_kwargs = {"ncore": ncore, "target_k": target_k}
+        if charge not in (None, 0):
+            kcas_kwargs.update(charge=charge, charged_spin=charged_spin)
+        kmc = pbc_mcscf.KCASCI(
+            kmc_or_kmf, ncas, nelecas, **kcas_kwargs,
+        )
     else:
-        if not isinstance(kmc_or_kmf, PBCKCASCI):
-            raise TypeError(
-                "momentum_resolved=True requires a mean-field object or "
-                "an existing PBCKCASCI object",
-            )
-        _sanity_check_for_kmf(kmf)
         kmc = kmc_or_kmf
-        existing_charge = int(getattr(kmc, "charge", 0))
-        if charge is not None and charge != existing_charge:
-            raise ValueError(
-                "charge conflicts with the existing PBCKCASCI object",
-            )
-        if charged_spin is not None:
-            existing_spin = getattr(kmc, "charged_spin", None)
-            if existing_spin != charged_spin:
-                raise ValueError(
-                    "charged_spin conflicts with the existing PBCKCASCI "
-                    "object",
-                )
+        existing_charge = getattr(kmc, "charge", 0)
+        existing_spin   = getattr(kmc, "charged_spin", None)
+        existing_target = getattr(kmc, "target_k", None)
+
+        reset_charge = existing_charge if charge is None else charge
+        reset_spin = existing_spin if charged_spin is None else charged_spin
+        if charge == 0 and charged_spin is None:
+            reset_spin = None
+        if reset_charge in (None, 0) and reset_spin is not None:
+            raise ValueError("charged_spin requires charge +1 or -1")
+        reset_target = existing_target
         if target_k is not None:
-            requested_sector = target_k % kmc.nkpts
-            existing_target = getattr(kmc, "target_k", None)
-            if (existing_target is not None
-                    and requested_sector != int(existing_target) % kmc.nkpts):
-                raise ValueError(
-                    "target_k conflicts with the existing PBCKCASCI CI sector",
+            reset_target = int(target_k) % kmc.nkpts
+
+        changes = []
+        for name, old, new in (
+            ("charge", existing_charge, reset_charge),
+            ("charged_spin", existing_spin, reset_spin),
+            ("target_k", existing_target, reset_target),
+        ):
+            if old != new:
+                changes.append(f"{name}: {old!r} -> {new!r}")
+
+        # If the existing kCASCI object has different options, reset it to a new one
+        # new kCAS object.
+        if changes:
+            logger.warn(kmc, "Resetting existing PBCKCASCI options (%s)",
+                        ", ".join(changes),)
+            old_kmc = kmc
+            kcas_kwargs = {
+                "ncore": getattr(old_kmc, "ncore", ncore),
+                "target_k": reset_target,
+            }
+            if reset_charge not in (None, 0):
+                kcas_kwargs.update(
+                    charge=reset_charge, charged_spin=reset_spin,
+                )
+            kmc = pbc_mcscf.KCASCI(
+                old_kmc._scf,
+                getattr(old_kmc, "ncas", ncas),
+                getattr(old_kmc, "nelecas", nelecas),
+                **kcas_kwargs,
+            )
+            for name in (
+                "verbose", "stdout", "max_memory", "chkfile", "kmesh",
+                "kpts", "mo_coeff", "canonicalization",
+            ):
+                if hasattr(old_kmc, name):
+                    value = getattr(old_kmc, name)
+                    if name in ("kmesh", "kpts", "mo_coeff"):
+                        value = copy.deepcopy(value)
+                    setattr(kmc, name, value)
+            if hasattr(old_kmc, "fcisolver"):
+                kmc.fcisolver = copy.copy(old_kmc.fcisolver)
+                kmc.fcisolver.target_k = (
+                    0 if reset_target is None else reset_target
                 )
 
-    if getattr(kmc, "charge", 0):
-        pdft = get_charged_kcas_mcpdft_child_class(kmc, ot, **kwargs)
-        if target_k is not None:
-            pdft.target_k = int(target_k) % pdft.nkpts
-        return pdft
-    return get_kcas_mcpdft_child_class(kmc, ot, **kwargs)
+    make_pdft = (get_charged_kcas_mcpdft_child_class
+                 if getattr(kmc, "charge", 0)
+                 else get_kcas_mcpdft_child_class)
+    pdft = make_pdft(kmc, ot, **kwargs)
+    if getattr(kmc, "charge", 0) and target_k is not None:
+        pdft.target_k = int(target_k) % pdft.nkpts
+    return pdft
 
 KCASSCF = kCASSCFPDFT
 KCASCI = kCASCIPDFT

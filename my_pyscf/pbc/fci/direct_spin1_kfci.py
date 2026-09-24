@@ -1,4 +1,36 @@
 #!/usr/bin/env python
+"""Full CI support for spin-free periodic Hamiltonians at fixed momentum.
+
+The determinant basis has fixed numbers of alpha and beta electrons, and
+therefore fixed particle number and :math:`M_S`. Determinants are grouped by
+the momenta of their alpha and beta strings. Only blocks whose combined
+momentum equals ``target_k`` are stored in the packed CI vector.
+
+The symmetry support is:
+
+=========================================  =========
+Symmetry                                   Supported
+=========================================  =========
+Lattice translation / crystal momentum    Yes
+Particle number and :math:`M_S`            Yes
+Total spin / singlet adaptation            No
+Point-group or additional space-group      No
+Time-reversal or Kramers                    No
+Hermitian Hamiltonian, real or complex     Yes
+Alpha/beta orbital degeneracy               Yes
+=========================================  =========
+
+``Alpha/beta orbital degeneracy`` means that alpha and beta electrons use the
+same spatial orbitals and integrals. Spin-dependent unrestricted Hamiltonians
+are not supported. States of different total spin can occur in the same
+:math:`M_S` sector; a spin penalty can target a desired spin, but it does not
+make the determinant basis spin-adapted. ``orbsym`` and ``wfnsym`` are not
+used.
+
+The one-electron integrals must be block diagonal in k-point, and the
+two-electron integrals must obey crystal-momentum conservation. No additional
+point-group, time-reversal, or Kramers reduction is applied.
+"""
 
 import ctypes
 import types
@@ -9,29 +41,23 @@ import scipy.linalg
 
 from pyscf import lib
 from pyscf.fci import cistring, direct_spin1
-from pyscf.fci.addons import _unpack_nelec
+from pyscf.fci.addons import (
+    SpinPenaltyFCISolver as _PySCFSpinPenaltyFCISolver,
+    _unpack_nelec,
+)
 
 from mrh.lib.helper import load_library
-from mrh.my_pyscf.pbc.fci import kfci_helper, kcistrings, krdm_helper
+from mrh.my_pyscf.pbc.fci import kfci_contract_map, kcistrings, krdm_helper
 from mrh.my_pyscf.pbc.fci.kcistrings import (
     gen_k_sector_linkstr_info,
-    gen_k_sector_maps,
 )
-from mrh.my_pyscf.pbc.fci.kfci_helper import (
+from mrh.my_pyscf.pbc.fci.kfci_contract_map import (
     KFCIContractMap,
     _unpack_contract_link_index as _unpack,
-    build_ab_pair_tables,
-    build_k_links_spin,
-    build_links_by_global_source_array,
-    build_same_spin_pair_tables,
     make_kfci_contract_map,
 )
 
 # Author: Bhavnesh Jangid
-
-"""
-Momentum-sector FCI contractions for periodic systems.
-"""
 
 logger = lib.logger
 HDIAG_IMAG_TOL = 1e-3
@@ -39,159 +65,254 @@ HERMI_THRESH = 1e-8
 libpbcfci_k = None
 libpbckfci_hdiag = None
 
+# Lookup table for the population count (number of set bits) of every
+# possible byte.  FCI occupation strings use one bit per spatial orbital, so
+# a population count is also a count of occupied orbitals.  Looking up all
+# bytes with NumPy avoids a Python loop over determinant strings.
 _UINT8_POPCOUNT = np.asarray(
     [bin(value).count("1") for value in range(256)], dtype=np.uint8)
 
 def _popcount_uint64(values):
-    """Count set bits in uint64 values without ``int.bit_count``."""
+    """Return the number of set bits in each ``uint64`` occupation string.
+
+    Each 64-bit value is viewed as eight bytes.  Those bytes index
+    ``_UINT8_POPCOUNT``, and summing the eight lookup results gives the
+    population count of the original value.  The byte order does not matter
+    because only the sum is retained.  The result has the same shape as
+    ``values`` and uses ``uint16`` as a safe accumulator type.
+
+    This vectorized lookup avoids calling ``int.bit_count`` separately for
+    every element and also supports Python versions on which that method is
+    unavailable.
+    """
+    # A contiguous uint64 array can be reinterpreted reliably as eight bytes
+    # per element without copying during ``view``.
     values = np.ascontiguousarray(values, dtype=np.uint64)
     byte_values = values.view(np.uint8).reshape(values.shape + (8,))
     return _UINT8_POPCOUNT[byte_values].sum(axis=-1, dtype=np.uint16)
 
 
 def _load_k_contract_lib():
-    """Load and configure the C library for k-FCI contraction."""
+    """Load and configure the C entry points for k-FCI contractions.
+
+    The library exports three kernels:
+
+    ``FCIcontract_1e_k``
+        Applies the one-electron Hamiltonian.  It receives the one-electron
+        integrals, packed input/output CI vectors, the six-column momentum
+        block table, alpha/beta link tables, string IDs and their momentum
+        offsets, global-to-block-local string maps, and the momentum label
+        representing zero transfer.  The kernel initializes the output.
+
+    ``FCIcontract_2e_k``
+        Applies the two-electron Hamiltonian from explicit structural maps.
+        The AB, AA, and BB arrays give source/destination addresses, fermionic
+        signs, and flattened ERI indices, grouped by source and destination
+        momentum blocks.  The kernel initializes the output and evaluates all
+        terms represented by those maps.  When ``explicit_ab`` is false, the
+        AB arrays are empty, so this call evaluates only the mapped AA and BB
+        terms before the streamed AB call below.
+
+    ``FCIcontract_2e_k_stream_ab``
+        Generates opposite-spin (alpha-beta) link pairs while contracting,
+        instead of storing the potentially very large explicit AB map.  Here
+        "stream" means on-the-fly traversal, not file or network I/O.  It is
+        also not restricted to contractions outside a momentum block: it
+        includes both within-block and between-block AB contributions.  An
+        alpha transfer ``dK`` is paired with the beta transfer ``-dK``, so a
+        source and destination may have different individual-spin momentum
+        blocks while remaining in the same total-momentum sector.  The kernel
+        accumulates into the output already containing the mapped AA/BB terms.
+
+    Every pointer below refers to a caller-owned, C-contiguous NumPy array.
+    ``ctypes`` records only the pointer/integer ABI; the Python call sites are
+    responsible for supplying the documented dtype, shape, and lifetime.
+
+    Returns
+    -------
+    ctypes.CDLL
+        Cached handle to ``libpbc_fci_contract_k``.
+    """
     global libpbcfci_k
     if libpbcfci_k is None:
         libpbcfci_k = load_library("libpbc_fci_contract_k")
+        # FCIcontract_1e_k arguments, in C-signature order.
         libpbcfci_k.FCIcontract_1e_k.argtypes = [
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_int,
-            ctypes.c_int,
-            ctypes.c_int,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_int,
-            ctypes.c_int,
-            ctypes.c_void_p,
-            ctypes.c_int,
-            ctypes.c_int,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_int,
+            ctypes.c_void_p,  # h1e: complex128[nkpts, ncas, ncas]
+            ctypes.c_void_p,  # ci0: input complex128[sector_size]
+            ctypes.c_void_p,  # ci1: output complex128[sector_size]
+            ctypes.c_int,     # nkpts: number of momentum points
+            ctypes.c_int,     # ncas: active orbitals per k-point
+            ctypes.c_int,     # nblocks: number of packed CI blocks
+            ctypes.c_void_p,  # blocks: int32[nblocks, 6]
+            ctypes.c_void_p,  # linka: int32[nstra, nlinka, 8]
+            ctypes.c_int,     # nstra: total number of alpha strings
+            ctypes.c_int,     # nlinka: alpha links per string
+            ctypes.c_void_p,  # linkb: int32[nstrb, nlinkb, 8]
+            ctypes.c_int,     # nstrb: total number of beta strings
+            ctypes.c_int,     # nlinkb: beta links per string
+            ctypes.c_void_p,  # stra_ids: alpha string IDs grouped by k
+            ctypes.c_void_p,  # stra_offsets: offsets into stra_ids
+            ctypes.c_void_p,  # strb_ids: beta string IDs grouped by k
+            ctypes.c_void_p,  # strb_offsets: offsets into strb_ids
+            ctypes.c_void_p,  # str2tot_a: alpha global-to-local map
+            ctypes.c_void_p,  # str2tot_b: beta global-to-local map
+            ctypes.c_int,     # dk_zero: label of zero momentum transfer
         ]
         libpbcfci_k.FCIcontract_1e_k.restype = None
+
+        # FCIcontract_2e_k arguments, in C-signature order.  Each ``*_addr``
+        # is local to its source/destination packed block; each ``*_eri_idx``
+        # indexes the flattened complex ERI array.
         libpbcfci_k.FCIcontract_2e_k.argtypes = [
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_int,
-            ctypes.c_int,
-            ctypes.c_int,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_int,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
+            ctypes.c_void_p,  # eri: flattened complex128 k-point ERIs
+            ctypes.c_void_p,  # ci0: input complex128[sector_size]
+            ctypes.c_void_p,  # ci1: output complex128[sector_size]
+            ctypes.c_int,     # nkpts: number of momentum points
+            ctypes.c_int,     # ncas: active orbitals per k-point
+            ctypes.c_int,     # nblocks: number of packed CI blocks
+            ctypes.c_void_p,  # blocks: int32[nblocks, 6]
+            ctypes.c_void_p,  # ab_group_tab: [dst_offset, begin, end]
+            ctypes.c_void_p,  # ab_group_offsets: groups by source block
+            ctypes.c_void_p,  # ab_src_addr: AB source determinant addresses
+            ctypes.c_void_p,  # ab_dst_addr: AB target determinant addresses
+            ctypes.c_void_p,  # ab_sign: AB products of fermionic signs
+            ctypes.c_void_p,  # ab_eri_idx_ab: ERI indices in AB ordering
+            ctypes.c_void_p,  # ab_eri_idx_ba: ERI indices in BA ordering
+            ctypes.c_int,     # nab_entries: number of explicit AB entries
+            ctypes.c_void_p,  # aa_group_tab: [dst, dst_na, begin, end]
+            ctypes.c_void_p,  # aa_group_offsets: groups by source block
+            ctypes.c_void_p,  # aa_src_addr: alpha source-row addresses
+            ctypes.c_void_p,  # aa_dst_addr: alpha target-row addresses
+            ctypes.c_void_p,  # aa_sign: alpha-alpha fermionic signs
+            ctypes.c_void_p,  # aa_eri_idx: alpha-alpha ERI indices
+            ctypes.c_void_p,  # bb_group_tab: [dst, dst_nb, begin, end]
+            ctypes.c_void_p,  # bb_group_offsets: groups by source block
+            ctypes.c_void_p,  # bb_src_addr: beta source-column addresses
+            ctypes.c_void_p,  # bb_dst_addr: beta target-column addresses
+            ctypes.c_void_p,  # bb_sign: beta-beta fermionic signs
+            ctypes.c_void_p,  # bb_eri_idx: beta-beta ERI indices
         ]
         libpbcfci_k.FCIcontract_2e_k.restype = None
+
+        # FCIcontract_2e_k_stream_ab arguments.  Unlike the mapped kernel, it
+        # needs raw link and string-layout tables to construct AB pairs on the
+        # fly.  It adds to ci1 rather than clearing it.
         libpbcfci_k.FCIcontract_2e_k_stream_ab.argtypes = [
-            ctypes.c_void_p,  # eri
-            ctypes.c_void_p,  # ci0
-            ctypes.c_void_p,  # ci1
-            ctypes.c_int,     # nkpts
-            ctypes.c_int,     # ncas
-            ctypes.c_int,     # nblocks
-            ctypes.c_void_p,  # blocks
-            ctypes.c_void_p,  # linka
-            ctypes.c_int,     # nstra
-            ctypes.c_int,     # nlinka
-            ctypes.c_void_p,  # linkb
-            ctypes.c_int,     # nstrb
-            ctypes.c_int,     # nlinkb
-            ctypes.c_void_p,  # stra_ids
-            ctypes.c_void_p,  # stra_offsets
-            ctypes.c_void_p,  # strb_ids
-            ctypes.c_void_p,  # strb_offsets
-            ctypes.c_void_p,  # str2tot_a
-            ctypes.c_void_p,  # str2tot_b
-            ctypes.c_void_p,  # kneg
+            ctypes.c_void_p,  # eri: flattened complex128 k-point ERIs
+            ctypes.c_void_p,  # ci0: input complex128[sector_size]
+            ctypes.c_void_p,  # ci1: accumulated complex128 output
+            ctypes.c_int,     # nkpts: number of momentum points
+            ctypes.c_int,     # ncas: active orbitals per k-point
+            ctypes.c_int,     # nblocks: number of packed CI blocks
+            ctypes.c_void_p,  # blocks: int32[nblocks, 6]
+            ctypes.c_void_p,  # linka: int32[nstra, nlinka, 8]
+            ctypes.c_int,     # nstra: total number of alpha strings
+            ctypes.c_int,     # nlinka: alpha links per string
+            ctypes.c_void_p,  # linkb: int32[nstrb, nlinkb, 8]
+            ctypes.c_int,     # nstrb: total number of beta strings
+            ctypes.c_int,     # nlinkb: beta links per string
+            ctypes.c_void_p,  # stra_ids: alpha string IDs grouped by k
+            ctypes.c_void_p,  # stra_offsets: offsets into stra_ids
+            ctypes.c_void_p,  # strb_ids: beta string IDs grouped by k
+            ctypes.c_void_p,  # strb_offsets: offsets into strb_ids
+            ctypes.c_void_p,  # str2tot_a: alpha global-to-local map
+            ctypes.c_void_p,  # str2tot_b: beta global-to-local map
+            ctypes.c_void_p,  # kneg[dK]: additive inverse of dK
         ]
         libpbcfci_k.FCIcontract_2e_k_stream_ab.restype = None
     return libpbcfci_k
 
 
 def _load_k_hdiag_lib():
-    """Load and configure the C library for the k-FCI diagonal."""
+    """Load and configure the C entry points for the k-FCI diagonal.
+
+    ``FCIhdiag_k`` initializes ``hdiag`` and adds its one-electron, mapped AB,
+    mapped AA, and mapped BB contributions.  In addition to the integral,
+    block, link, and string-layout arrays, it receives the same explicit
+    two-electron structural maps used by ``FCIcontract_2e_k``.  Only map
+    entries whose source and destination are the same determinant contribute
+    to the diagonal.
+
+    ``FCIhdiag_k_stream_ab`` is called afterward when the contract map omits
+    explicit AB entries.  It reconstructs and accumulates every diagonal AB
+    contribution directly from the alpha/beta links.  Unlike the full
+    streamed contraction, this routine is not an out-of-block contraction:
+    a Hamiltonian diagonal element has identical source and destination
+    determinants, so it never couples distinct determinants or blocks.  Its
+    "streaming" label only means that no explicit AB structural map is stored.
+
+    All pointer arguments are caller-owned, C-contiguous NumPy arrays.  The
+    comments beside the ``argtypes`` entries document their required order and
+    meaning; ``ctypes`` itself cannot validate the pointed-to dtype or shape.
+
+    Returns
+    -------
+    ctypes.CDLL
+        Cached handle to ``libpbc_kfci_hdiag``.
+    """
     global libpbckfci_hdiag
     if libpbckfci_hdiag is None:
         libpbckfci_hdiag = load_library("libpbc_kfci_hdiag")
+        # FCIhdiag_k arguments, in C-signature order.
         libpbckfci_hdiag.FCIhdiag_k.argtypes = [
-            ctypes.c_void_p,  # hdiag
-            ctypes.c_void_p,  # h1e
-            ctypes.c_void_p,  # eri
-            ctypes.c_int,     # nkpts
-            ctypes.c_int,     # ncas
-            ctypes.c_int,     # nblocks
-            ctypes.c_void_p,  # blocks
-            ctypes.c_void_p,  # linka
-            ctypes.c_int,     # nlinka
-            ctypes.c_void_p,  # linkb
-            ctypes.c_int,     # nlinkb
-            ctypes.c_void_p,  # stra_ids
-            ctypes.c_void_p,  # stra_offsets
-            ctypes.c_void_p,  # strb_ids
-            ctypes.c_void_p,  # strb_offsets
-            ctypes.c_int,     # dk_zero
-            ctypes.c_void_p,  # ab_group_tab
-            ctypes.c_void_p,  # ab_group_offsets
-            ctypes.c_void_p,  # ab_src_addr
-            ctypes.c_void_p,  # ab_dst_addr
-            ctypes.c_void_p,  # ab_sign
-            ctypes.c_void_p,  # ab_eri_idx_ab
-            ctypes.c_void_p,  # ab_eri_idx_ba
-            ctypes.c_void_p,  # aa_group_tab
-            ctypes.c_void_p,  # aa_group_offsets
-            ctypes.c_void_p,  # aa_src_addr
-            ctypes.c_void_p,  # aa_dst_addr
-            ctypes.c_void_p,  # aa_sign
-            ctypes.c_void_p,  # aa_eri_idx
-            ctypes.c_void_p,  # bb_group_tab
-            ctypes.c_void_p,  # bb_group_offsets
-            ctypes.c_void_p,  # bb_src_addr
-            ctypes.c_void_p,  # bb_dst_addr
-            ctypes.c_void_p,  # bb_sign
-            ctypes.c_void_p,  # bb_eri_idx
+            ctypes.c_void_p,  # hdiag: output complex128[sector_size]
+            ctypes.c_void_p,  # h1e: complex128[nkpts, ncas, ncas]
+            ctypes.c_void_p,  # eri: flattened complex128 k-point ERIs
+            ctypes.c_int,     # nkpts: number of momentum points
+            ctypes.c_int,     # ncas: active orbitals per k-point
+            ctypes.c_int,     # nblocks: number of packed CI blocks
+            ctypes.c_void_p,  # blocks: int32[nblocks, 6]
+            ctypes.c_void_p,  # linka: int32 alpha link table
+            ctypes.c_int,     # nlinka: alpha links per string
+            ctypes.c_void_p,  # linkb: int32 beta link table
+            ctypes.c_int,     # nlinkb: beta links per string
+            ctypes.c_void_p,  # stra_ids: alpha string IDs grouped by k
+            ctypes.c_void_p,  # stra_offsets: offsets into stra_ids
+            ctypes.c_void_p,  # strb_ids: beta string IDs grouped by k
+            ctypes.c_void_p,  # strb_offsets: offsets into strb_ids
+            ctypes.c_int,     # dk_zero: label of zero momentum transfer
+            ctypes.c_void_p,  # ab_group_tab: [dst_offset, begin, end]
+            ctypes.c_void_p,  # ab_group_offsets: groups by source block
+            ctypes.c_void_p,  # ab_src_addr: AB source determinant addresses
+            ctypes.c_void_p,  # ab_dst_addr: AB target determinant addresses
+            ctypes.c_void_p,  # ab_sign: AB products of fermionic signs
+            ctypes.c_void_p,  # ab_eri_idx_ab: ERI indices in AB ordering
+            ctypes.c_void_p,  # ab_eri_idx_ba: ERI indices in BA ordering
+            ctypes.c_void_p,  # aa_group_tab: [dst, dst_na, begin, end]
+            ctypes.c_void_p,  # aa_group_offsets: groups by source block
+            ctypes.c_void_p,  # aa_src_addr: alpha source-row addresses
+            ctypes.c_void_p,  # aa_dst_addr: alpha target-row addresses
+            ctypes.c_void_p,  # aa_sign: alpha-alpha fermionic signs
+            ctypes.c_void_p,  # aa_eri_idx: alpha-alpha ERI indices
+            ctypes.c_void_p,  # bb_group_tab: [dst, dst_nb, begin, end]
+            ctypes.c_void_p,  # bb_group_offsets: groups by source block
+            ctypes.c_void_p,  # bb_src_addr: beta source-column addresses
+            ctypes.c_void_p,  # bb_dst_addr: beta target-column addresses
+            ctypes.c_void_p,  # bb_sign: beta-beta fermionic signs
+            ctypes.c_void_p,  # bb_eri_idx: beta-beta ERI indices
         ]
         libpbckfci_hdiag.FCIhdiag_k.restype = None
+
+        # FCIhdiag_k_stream_ab arguments.  It needs only raw link/layout data
+        # because it constructs the diagonal AB contribution on the fly and
+        # accumulates it into the hdiag initialized by FCIhdiag_k.
         libpbckfci_hdiag.FCIhdiag_k_stream_ab.argtypes = [
-            ctypes.c_void_p,  # hdiag
-            ctypes.c_void_p,  # eri
-            ctypes.c_int,     # nkpts
-            ctypes.c_int,     # ncas
-            ctypes.c_int,     # nblocks
-            ctypes.c_void_p,  # blocks
-            ctypes.c_void_p,  # linka
-            ctypes.c_int,     # nlinka
-            ctypes.c_void_p,  # linkb
-            ctypes.c_int,     # nlinkb
-            ctypes.c_void_p,  # stra_ids
-            ctypes.c_void_p,  # stra_offsets
-            ctypes.c_void_p,  # strb_ids
-            ctypes.c_void_p,  # strb_offsets
-            ctypes.c_int,     # dk_zero
+            ctypes.c_void_p,  # hdiag: accumulated complex128 diagonal
+            ctypes.c_void_p,  # eri: flattened complex128 k-point ERIs
+            ctypes.c_int,     # nkpts: number of momentum points
+            ctypes.c_int,     # ncas: active orbitals per k-point
+            ctypes.c_int,     # nblocks: number of packed CI blocks
+            ctypes.c_void_p,  # blocks: int32[nblocks, 6]
+            ctypes.c_void_p,  # linka: int32 alpha link table
+            ctypes.c_int,     # nlinka: alpha links per string
+            ctypes.c_void_p,  # linkb: int32 beta link table
+            ctypes.c_int,     # nlinkb: beta links per string
+            ctypes.c_void_p,  # stra_ids: alpha string IDs grouped by k
+            ctypes.c_void_p,  # stra_offsets: offsets into stra_ids
+            ctypes.c_void_p,  # strb_ids: beta string IDs grouped by k
+            ctypes.c_void_p,  # strb_offsets: offsets into strb_ids
+            ctypes.c_int,     # dk_zero: label of zero momentum transfer
         ]
         libpbckfci_hdiag.FCIhdiag_k_stream_ab.restype = None
     return libpbckfci_hdiag
@@ -282,69 +403,94 @@ def _as_contract_map(norb, nelec, nkpts, target_k, link_index=None,
     return contract_map
 
 
-def contract_1e_k_py(h1e, fcivec, norb, nelec, nkpts, kindx,
-                     link_index=None, kmom=None):
+def sector_size(norb, nelec, nkpts, target_k=0, link_index=None,
+                kmom=None):
     '''
-    Contract one-electron Hamiltonian with a k-FCI vector in a fixed
-    total momentum sector.
+    Number of determinants in a fixed total momentum sector.
     args:
-        h1e : ndarray, shape (nkpts, norb_k, norb_k)
-            One-electron integrals in k-space, where norb_k = norb // nkpts.
-        fcivec : ndarray, shape (sector_size,)
-            k-FCI vector in the target total momentum sector.
         norb : int
-            Total number of orbitals.
+            Total number of active orbitals across all k-points.
         nelec : tuple of 2 ints
             Number of alpha and beta electrons.
         nkpts : int
-            Number of k-points / momentum sectors.
-        kindx : int
-            Target total momentum sector. (0<=kindx < nkpts)
+            Number of k-points.
+        target_k : int, optional
+            Total momentum sector.
         link_index : tuple of 2 ndarrays or None
-            Look up tables/link index for alpha and beta strings.
-            If None, it will be generated on the fly.
-            Note: these are k-aware link indices, and the link columns are:
-            [cre, des, target_address, parity, k0, k_cre, k_des, dK].
-            and overall shape is (nstr, nlink, 8) for each spin sector.
+            k-aware link indices. If None, they are generated on the fly.
         kmom : KPointMomentum or None
             Precomputed momentum-arithmetic tables. If None, they are built
             from ``nkpts``.
 
     returns:
-        sigma_ci : ndarray, shape (sector_size,)
-            Result of the Hamiltonian-vector product in the target momentum
-            sector.
+        ndet_k : int
+            Number of determinants in the target momentum sector.
     '''
-
     link_indexa, link_indexb = _unpack(norb, nelec, link_index, nkpts,
                                        kmom=kmom)
-    dtype = np.result_type(h1e, fcivec)
+    blocks = gen_k_sector_linkstr_info(link_indexa, link_indexb, nkpts,
+                                       target_k, kmom=kmom)
+    if blocks.size == 0:
+        return 0
+    return int(blocks[:, 5].sum())
+
+def _get_ci_sectors(fcivec, blocks, nkpts):
+    '''
+    Extract blocked CI vectors using k-sector information.
+    '''
+    ci_blocks = [[None for _ in range(nkpts)]
+                 for _ in range(nkpts)]
+    for blk in blocks:
+        ka, kb, nstra, nstrb, offset, size = map(int, blk)
+        ci_blocks[ka][kb] = fcivec[offset:offset + size].reshape(nstra, nstrb)
+    return ci_blocks
+
+
+def contract_1e_k_py(h1e, fcivec, norb, nelec, nkpts, kindx,
+                     link_index=None, contract_map=None, log_obj=None,
+                     kmom=None):
+    """Python reference implementation of :func:`contract_1e_k`.
+
+    This routine has the same call signature and output convention as
+    ``contract_1e_k``.  See that function for the argument and return-value
+    documentation.
+    """
+    nkpts = int(nkpts)
+    ncas = int(norb) // nkpts
+    assert ncas * nkpts == int(norb)
+
+    log = logger.new_logger(
+        log_obj, getattr(log_obj, "verbose", logger.QUIET))
+    t0 = (logger.process_clock(), logger.perf_counter())
+    contract_map = _as_contract_map(
+        norb, nelec, nkpts, kindx, link_index=link_index,
+        contract_map=contract_map, log_obj=log_obj, kmom=kmom)
+    assert fcivec.size == contract_map.sector_size
+    t0 = log.timer_debug1("k-FCI contract_1e_py map setup", *t0)
+
+    link_indexa, link_indexb = contract_map.link_index
+    dtype = np.complex128
 
     # Sanity checks
     assert link_indexa.ndim == link_indexb.ndim == 3
     assert link_indexa.shape[2] == link_indexb.shape[2] == 8
     assert h1e.ndim == 3
-    ncas = norb // nkpts
     assert h1e.shape == (nkpts, ncas, ncas)
 
-    kindx = int(kindx) % nkpts
-
-    # Generate the k-sector blocks and the corresponding alpha/beta string
-    # lists and global-to-local (specific k-sector) maps.
-    # rows are [ka, kb, na, nb, offset, size]
-    blocks = gen_k_sector_linkstr_info(link_indexa, link_indexb, nkpts,
-                                       kindx, kmom=kmom)
-    sector_size = int(blocks[:, 5].sum())
-
-    assert fcivec.size == sector_size
-
-    straid_k, strbid_k, tota_2k, totb_2k = gen_k_sector_maps(
-        link_indexa, link_indexb, nkpts, kmom=kmom)
+    blocks = contract_map.blocks
+    stra_ids = contract_map.stra_ids
+    stra_offsets = contract_map.stra_offsets
+    strb_ids = contract_map.strb_ids
+    strb_offsets = contract_map.strb_offsets
+    tota_2k = contract_map.str2tot_a
+    totb_2k = contract_map.str2tot_b
+    dk_zero = int(contract_map.kmom.zero)
 
     # Making sure fcivec is in the right dtype and C-contiguous.
     h1e = np.asarray(h1e, dtype=dtype, order="C")
     fcivec = np.asarray(fcivec, dtype=dtype, order="C")
     sigma_ci = np.zeros(fcivec.shape, dtype=dtype, order="C")
+    t0 = log.timer_debug1("k-FCI contract_1e_py array setup", *t0)
 
     # link columns: [cre, des, target_address, parity, k0, k_cre, k_des, dK]
     CRE = 0
@@ -356,11 +502,13 @@ def contract_1e_k_py(h1e, fcivec, norb, nelec, nkpts, kindx,
     DK = 7
 
     for ka, kb, na, nb, offset, size in blocks:
+        ka, kb, na, nb, offset, size = map(
+            int, (ka, kb, na, nb, offset, size))
         Cblk = fcivec[offset:offset + size].reshape(na, nb)
         Sblk = sigma_ci[offset:offset + size].reshape(na, nb)
 
-        alpha_ids = straid_k[ka]
-        beta_ids = strbid_k[kb]
+        alpha_ids = stra_ids[stra_offsets[ka]:stra_offsets[ka + 1]]
+        beta_ids = strb_ids[strb_offsets[kb]:strb_offsets[kb + 1]]
 
         # h1e contraction for the alpha strings.
         for ia0_local, astr0 in enumerate(alpha_ids):
@@ -377,8 +525,8 @@ def contract_1e_k_py(h1e, fcivec, norb, nelec, nkpts, kindx,
 
                 # h1e[k, p, q] is k-diagonal, so only k_cre == k_des
                 # contributes.
-                # which means only dk=0 contributes.
-                if (k_cre != k_des) or (dK != 0):
+                # which means only the zero-transfer dK label contributes.
+                if (k_cre != k_des) or (dK != dk_zero):
                     continue
 
                 # Note that p and q are in the global orbital indexing,
@@ -405,8 +553,8 @@ def contract_1e_k_py(h1e, fcivec, norb, nelec, nkpts, kindx,
                 dK = int(link[DK]) % nkpts
                 # h1e[k, p, q] is k-diagonal, so only k_cre == k_des
                 # contributes.
-                # which means only dk=0 contributes.
-                if (k_cre != k_des) or (dK != 0):
+                # which means only the zero-transfer dK label contributes.
+                if (k_cre != k_des) or (dK != dk_zero):
                     continue
 
                 hpq = h1e[k_cre, p % ncas, q % ncas]
@@ -418,6 +566,7 @@ def contract_1e_k_py(h1e, fcivec, norb, nelec, nkpts, kindx,
 
                 Sblk[:, ib1_local] += sign * hpq * Cblk[:, ib0_local]
 
+    log.timer_debug1("k-FCI contract_1e_py Python kernel", *t0)
     return sigma_ci
 
 
@@ -505,132 +654,83 @@ def contract_1e_k(h1e, fcivec, norb, nelec, nkpts, kindx,
     return sigma_ci
 
 
-def sector_size(norb, nelec, nkpts, target_k=0, link_index=None,
-                kmom=None):
-    '''
-    Number of determinants in a fixed total momentum sector.
-    args:
-        norb : int
-            Total number of active orbitals across all k-points.
-        nelec : tuple of 2 ints
-            Number of alpha and beta electrons.
-        nkpts : int
-            Number of k-points.
-        target_k : int, optional
-            Total momentum sector.
-        link_index : tuple of 2 ndarrays or None
-            k-aware link indices. If None, they are generated on the fly.
-        kmom : KPointMomentum or None
-            Precomputed momentum-arithmetic tables. If None, they are built
-            from ``nkpts``.
-
-    returns:
-        ndet_k : int
-            Number of determinants in the target momentum sector.
-    '''
-    link_indexa, link_indexb = _unpack(norb, nelec, link_index, nkpts,
-                                       kmom=kmom)
-    blocks = gen_k_sector_linkstr_info(link_indexa, link_indexb, nkpts,
-                                       target_k, kmom=kmom)
-    if blocks.size == 0:
-        return 0
-    return int(blocks[:, 5].sum())
-
-
-def _get_ci_sectors(fcivec, blocks, nkpts):
-    '''
-    Extract blocked CI vectors using k-sector information.
-    '''
-    ci_blocks = [[None for _ in range(nkpts)]
-                 for _ in range(nkpts)]
-    for blk in blocks:
-        ka, kb, nstra, nstrb, offset, size = map(int, blk)
-        ci_blocks[ka][kb] = fcivec[offset:offset + size].reshape(nstra, nstrb)
-    return ci_blocks
-
-
 def contract_2e_k_py(eri, fcivec, norb, nelec, nkpts, target_k,
-                     link_index=None, kmom=None):
-    '''
-    Contract the two-electron Hamiltonian with a fixed-sector k-FCI vector.
-    args:
-        eri : ndarray, shape (nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas)
-            Two-electron integrals in k-space, in chemist notation.
-        fcivec : ndarray, shape (sector_size,)
-            k-FCI vector in the target total momentum sector.
-        norb : int
-            Total number of orbitals.
-        nelec : tuple of 2 ints
-            Number of alpha and beta electrons.
-        nkpts : int
-            Number of k-points / momentum sectors.
-        target_k : int
-            Target total momentum sector for the output sigma vector.
-        link_indexa, link_indexb : tuple of 2 ndarrays
-            Look up tables/link index for alpha and beta strings.
-            These should be k-aware link indices, and the link columns are:
-            [cre, des, target_address, parity, k0, k_cre, k_des, dK].
-        kmom : KPointMomentum or None
-            Precomputed momentum-arithmetic tables. If None, they are built
-            from ``nkpts``.
+                     link_index=None, contract_map=None, log_obj=None,
+                     kmom=None):
+    """Python reference implementation of :func:`contract_2e_k`.
 
-    returns:
-        sigma_ci : ndarray, shape (sector_size,)
-            Result of the Hamiltonian-vector product in the target momentum
-            sector.
-    '''
-    nkpts = eri.shape[0]
-    dtype = np.result_type(eri.dtype, fcivec.dtype)
+    This routine has the same call signature and output convention as
+    ``contract_2e_k``.  See that function for the argument and return-value
+    documentation.
+    """
+    nkpts = int(nkpts)
+    ncas = int(norb) // nkpts
+    assert ncas * nkpts == int(norb)
 
-    link_indexa, link_indexb = _unpack(norb, nelec, link_index, nkpts,
-                                       kmom=kmom)
-    straid_k, strbid_k, str2tot_a, str2tot_b = gen_k_sector_maps(
-        link_indexa, link_indexb, nkpts, kmom=kmom)
+    log = logger.new_logger(
+        log_obj, getattr(log_obj, "verbose", logger.QUIET))
+    t0 = (logger.process_clock(), logger.perf_counter())
+    # The readable Python loops consume the pair-table representation.  Ask
+    # _as_contract_map to build it only when the supplied map does not already
+    # contain it.
+    contract_map = _as_contract_map(
+        norb, nelec, nkpts, target_k, link_index=link_index,
+        contract_map=contract_map, need_pair_tables=True, explicit_ab=True,
+        log_obj=log_obj, kmom=kmom)
+    assert fcivec.size == contract_map.sector_size
+    t0 = log.timer_debug1("k-FCI contract_2e_py map setup", *t0)
 
-    links_a = build_k_links_spin(link_indexa, norb, nkpts, straid_k,
-                                 str2tot_a, kmom=kmom)
-    links_b = build_k_links_spin(link_indexb, norb, nkpts, strbid_k,
-                                 str2tot_b, kmom=kmom)
+    eri = np.asarray(eri, dtype=np.complex128, order="C")
+    fcivec = np.asarray(fcivec, dtype=np.complex128, order="C")
+    sigma_ci = np.zeros(fcivec.shape, dtype=np.complex128, order="C")
+    assert eri.shape == (nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas)
+    t0 = log.timer_debug1("k-FCI contract_2e_py array setup", *t0)
 
-    links_a = build_links_by_global_source_array(links_a)
-    links_b = build_links_by_global_source_array(links_b)
+    # Re-expose the flattened pair tables as the nested views expected by the
+    # reference contraction helpers.  No pair entries are copied.
+    ab_pairs = [[None for _ in range(nkpts)] for _ in range(nkpts)]
+    for ka in range(nkpts):
+        for kb in range(nkpts):
+            key = ka * nkpts + kb
+            i0 = int(contract_map.ab_offsets[key])
+            i1 = int(contract_map.ab_offsets[key + 1])
+            ab_pairs[ka][kb] = contract_map.ab_tab[i0:i1]
+    aa_pairs = [
+        contract_map.aa_tab[
+            int(contract_map.aa_offsets[k]):
+            int(contract_map.aa_offsets[k + 1])]
+        for k in range(nkpts)
+    ]
+    bb_pairs = [
+        contract_map.bb_tab[
+            int(contract_map.bb_offsets[k]):
+            int(contract_map.bb_offsets[k + 1])]
+        for k in range(nkpts)
+    ]
 
-    ab_pairs = build_ab_pair_tables(links_a, links_b, nkpts, kmom=kmom)
-    aa_pairs = build_same_spin_pair_tables(links_a, nkpts, kmom=kmom)
-    bb_pairs = build_same_spin_pair_tables(links_b, nkpts, kmom=kmom)
-
-    sigma_ci = np.zeros(fcivec.shape, dtype=dtype, order="C")
-
-    blocks = gen_k_sector_linkstr_info(link_indexa, link_indexb, nkpts,
-                                       target_k, kmom=kmom)
-
-    # The k-sector blocks must span the full input vector.
-    sector_size = int(blocks[:, 5].sum())
-    assert fcivec.size == sector_size
+    blocks = contract_map.blocks
 
     # Rearrange the CI vectors into alpha/beta momentum blocks.
     ci0_blocks = _get_ci_sectors(fcivec, blocks, nkpts)
     ci1_blocks = _get_ci_sectors(sigma_ci, blocks, nkpts)
 
-    # Free up some memory.
-    blocks = None
-
-    kmom = kcistrings._as_kmom(nkpts, kmom=kmom)
+    kmom = contract_map.kmom
     for ka in range(nkpts):
-        kb = kcistrings._ksub(kmom, target_k, ka)
+        kb = kcistrings._ksub(kmom, contract_map.target_k, ka)
 
         if ci0_blocks[ka][kb] is None:
             continue
 
-        kfci_helper.contract_ab_pairs(
+        kfci_contract_map.contract_ab_pairs(
             eri, ci0_blocks[ka][kb], ci1_blocks, ab_pairs, ka, kb)
 
-        kfci_helper.contract_aa_pairs(eri, ci0_blocks, ci1_blocks,
-                                      aa_pairs, ka, kb)
+        kfci_contract_map.contract_aa_pairs(
+            eri, ci0_blocks, ci1_blocks, aa_pairs, ka, kb)
 
-        kfci_helper.contract_bb_pairs(eri, ci0_blocks, ci1_blocks,
-                                      bb_pairs, ka, kb)
+        kfci_contract_map.contract_bb_pairs(
+            eri, ci0_blocks, ci1_blocks, bb_pairs, ka, kb)
 
+    log.timer_debug1("k-FCI contract_2e_py Python kernel", *t0)
     return sigma_ci
 
 
@@ -641,7 +741,9 @@ def contract_2e_k(eri, fcivec, norb, nelec, nkpts, target_k,
     C implementation using structural k-sector contraction maps.
     The same-spin contractions are applied with zgemm and the alpha-beta terms
     are packed into sparse source/destination block groups.
-    OpenMP threads follow lib.num_threads().
+    For now I am using OpenMP threads follow lib.num_threads(), however in future
+    need to benchmark and come up with a better threading strategy.
+
     args:
         eri : ndarray, shape (nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas)
             Two-electron integrals in k-space, in chemist notation.
@@ -692,9 +794,18 @@ def contract_2e_k(eri, fcivec, norb, nelec, nkpts, target_k,
     assert eri.shape == (nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas)
 
     libpbcfci = _load_k_contract_lib()
-    kernel = libpbcfci.FCIcontract_2e_k
     with lib.with_omp_threads(lib.num_threads()):
-        kernel(
+        # This mapped C call first clears sigma_ci, then contracts every spin
+        # channel represented by the supplied structural maps:
+        #
+        # AB: one alpha and one beta excitation.  Each entry combines the AB
+        #     and BA integral orderings and updates individual determinant
+        #     addresses in the destination block.
+        # AA: two alpha excitations.  The beta string is a spectator, so the
+        #     mapped alpha-row transformation is applied with zgemm.
+        # BB: two beta excitations.  The alpha string is a spectator, so the
+        #     mapped beta-column transformation is applied with zgemm.
+        libpbcfci.FCIcontract_2e_k(
             eri.ctypes.data_as(ctypes.c_void_p),
             fcivec.ctypes.data_as(ctypes.c_void_p),
             sigma_ci.ctypes.data_as(ctypes.c_void_p),
@@ -702,6 +813,8 @@ def contract_2e_k(eri, fcivec, norb, nelec, nkpts, target_k,
             ctypes.c_int(ncas),
             ctypes.c_int(contract_map.blocks.shape[0]),
             contract_map.blocks.ctypes.data_as(ctypes.c_void_p),
+
+            # Opposite-spin alpha-beta contraction map.
             contract_map.ab_group_tab.ctypes.data_as(ctypes.c_void_p),
             contract_map.ab_group_offsets.ctypes.data_as(ctypes.c_void_p),
             contract_map.ab_src_addr.ctypes.data_as(ctypes.c_void_p),
@@ -710,12 +823,16 @@ def contract_2e_k(eri, fcivec, norb, nelec, nkpts, target_k,
             contract_map.ab_eri_idx_ab.ctypes.data_as(ctypes.c_void_p),
             contract_map.ab_eri_idx_ba.ctypes.data_as(ctypes.c_void_p),
             ctypes.c_int(contract_map.ab_src_addr.size),
+
+            # Same-spin alpha-alpha contraction map.
             contract_map.aa_group_tab.ctypes.data_as(ctypes.c_void_p),
             contract_map.aa_group_offsets.ctypes.data_as(ctypes.c_void_p),
             contract_map.aa_src_addr.ctypes.data_as(ctypes.c_void_p),
             contract_map.aa_dst_addr.ctypes.data_as(ctypes.c_void_p),
             contract_map.aa_sign.ctypes.data_as(ctypes.c_void_p),
             contract_map.aa_eri_idx.ctypes.data_as(ctypes.c_void_p),
+
+            # Same-spin beta-beta contraction map.
             contract_map.bb_group_tab.ctypes.data_as(ctypes.c_void_p),
             contract_map.bb_group_offsets.ctypes.data_as(ctypes.c_void_p),
             contract_map.bb_src_addr.ctypes.data_as(ctypes.c_void_p),
@@ -724,6 +841,12 @@ def contract_2e_k(eri, fcivec, norb, nelec, nkpts, target_k,
             contract_map.bb_eri_idx.ctypes.data_as(ctypes.c_void_p),
         )
         if not getattr(contract_map, "explicit_ab", True):
+            # This second C call contracts only the AB channel.  The mapped
+            # call above has already added AA and BB; because its AB arrays
+            # were empty, the streamed kernel now generates all AB pairs from
+            # the raw links and accumulates them into sigma_ci.  These terms
+            # may stay in one (ka, kb) block or connect two such blocks;
+            # opposite alpha/beta transfers preserve total momentum.
             link_indexa, link_indexb = contract_map.link_index
             libpbcfci.FCIcontract_2e_k_stream_ab(
                 eri.ctypes.data_as(ctypes.c_void_p),
@@ -818,6 +941,54 @@ def contract_ham_k(h1e, eri, fcivec, norb, nelec, nkpts, target_k=0,
 
 def _add_same_spin_hdiag_py(hdiag, eri_flat, blocks, group_tab, group_offsets,
                             src_addr, dst_addr, sign, eri_idx, nkpts, spin):
+    """Accumulate diagonal AA or BB terms from a structural contraction map.
+
+    A same-spin structural entry describes a transformation of either an
+    alpha-string row (``spin == "a"``) or a beta-string column
+    (``spin == "b"``).  A Hamiltonian-diagonal contribution must satisfy both
+    of the following conditions:
+
+    * its source and destination momentum blocks have the same packed offset;
+    * its source and destination same-spin addresses are equal.
+
+    Entries that do not meet both conditions are off-diagonal and are skipped.
+    For an AA entry, the beta string is unchanged, so the selected alpha-row
+    value is added across every beta string in the block.  For a BB entry, the
+    alpha string is unchanged and the beta-column value is added across every
+    alpha string.
+
+    Parameters
+    ----------
+    hdiag : ndarray, shape (sector_size,)
+        Packed Hamiltonian diagonal.  It is updated in place.
+    eri_flat : ndarray
+        C-order flattened two-electron integral array.  ``eri_idx`` contains
+        indices into this array.
+    blocks : ndarray, shape (nblocks, 6)
+        Packed CI block records ``[ka, kb, na, nb, offset, size]``.
+    group_tab : ndarray, shape (ngroups, 4)
+        Same-spin group records
+        ``[destination_offset, destination_spin_size, entry0, entry1]``.
+    group_offsets : ndarray, shape (nkpts * nkpts + 1,)
+        Ranges of ``group_tab`` belonging to each flattened source block key
+        ``ka * nkpts + kb``.
+    src_addr, dst_addr : ndarray, shape (nentries,)
+        Source and destination row indices for AA, or column indices for BB,
+        local to their packed momentum blocks.
+    sign : ndarray, shape (nentries,)
+        Product of the two fermionic excitation signs for each entry.
+    eri_idx : ndarray, shape (nentries,)
+        Flattened ERI index associated with each structural entry.
+    nkpts : int
+        Number of momentum points; used to flatten ``(ka, kb)`` block keys.
+    spin : {"a", "b"}
+        Selects the alpha-alpha or beta-beta contraction map.
+
+    Returns
+    -------
+    None
+        Contributions are accumulated directly into ``hdiag``.
+    """
     block_offsets = -np.ones(nkpts * nkpts, dtype=np.int64)
     block_na = np.zeros(nkpts * nkpts, dtype=np.int64)
     block_nb = np.zeros(nkpts * nkpts, dtype=np.int64)
@@ -859,14 +1030,15 @@ def _add_same_spin_hdiag_py(hdiag, eri_flat, blocks, group_tab, group_offsets,
 
 def make_hdiag_py(h1e, eri, norb, nelec, nkpts, target_k=0, link_index=None,
                   contract_map=None, log_obj=None, kmom=None):
-    '''
-    Diagonal of the k-FCI Hamiltonian in a fixed total momentum sector.
-    The diagonal is assembled from diagonal one-electron links and diagonal
-    entries in the precomputed two-electron contraction structures.
+    """Python reference implementation of :func:`make_hdiag`.
 
-    ``kmom`` may provide precomputed :class:`KPointMomentum` arithmetic
-    tables; they are constructed from ``nkpts`` when omitted.
-    '''
+    See ``make_hdiag`` for the argument and return-value documentation.  This
+    reference path requests an explicit AB structural map, then retains only
+    entries with identical source and destination determinants.  It evaluates
+    the one-electron, AB, AA, and BB diagonal contributions separately for
+    readability and testing.  Unlike the compiled path, its result dtype is
+    ``numpy.result_type(h1e, eri)`` rather than unconditionally ``complex128``.
+    """
     log = logger.new_logger(
         log_obj, getattr(log_obj, "verbose", logger.QUIET))
     t0 = (logger.process_clock(), logger.perf_counter())
@@ -986,14 +1158,61 @@ def make_hdiag_py(h1e, eri, norb, nelec, nkpts, target_k=0, link_index=None,
 
 def make_hdiag(h1e, eri, norb, nelec, nkpts, target_k=0, link_index=None,
                contract_map=None, log_obj=None, kmom=None):
-    '''
-    C implementation of the diagonal of the k-FCI Hamiltonian in a fixed total
-    momentum sector.  The result is returned as complex128 to match the C
-    kernels used for the k-FCI Hamiltonian contractions.
+    """Build the k-FCI Hamiltonian diagonal in one total-momentum sector.
 
-    ``kmom`` may provide precomputed :class:`KPointMomentum` arithmetic
-    tables; they are constructed from ``nkpts`` when omitted.
-    '''
+    The returned element at packed address ``I`` is ``<I|H|I>``.  Determinants
+    are ordered by the six-column ``contract_map.blocks`` table, with each
+    block holding alpha strings of momentum ``ka`` and beta strings of momentum
+    ``kb``.  The compiled kernel initializes the output and adds four kinds of
+    diagonal contribution:
+
+    * one-electron self-links for the alpha and beta strings;
+    * opposite-spin alpha-beta (AB) two-electron entries;
+    * same-spin alpha-alpha (AA) entries, broadcast over beta spectators;
+    * same-spin beta-beta (BB) entries, broadcast over alpha spectators.
+
+    When ``contract_map.explicit_ab`` is false, the first C kernel adds the
+    one-electron and mapped AA/BB terms.  A second kernel then generates the AB
+    diagonal directly from link tables and accumulates it into the result.
+    Streaming avoids storing the large explicit AB map; because only diagonal
+    elements are requested, it never transfers amplitude between determinants
+    or packed momentum blocks.
+
+    Parameters
+    ----------
+    h1e : ndarray, shape (nkpts, ncas, ncas)
+        One-electron integrals in k-space, where
+        ``ncas = norb // nkpts``.  The integral is diagonal in k-point.
+    eri : ndarray, shape (nkpts, nkpts, nkpts, ncas, ncas, ncas, ncas)
+        Two-electron integrals in the k-point storage convention used by
+        :func:`contract_2e_k`.
+    norb : int
+        Total number of active orbitals across all k-points.  It must be
+        divisible by ``nkpts``.
+    nelec : int or tuple of two ints
+        Total electron count or ``(N_alpha, N_beta)``.
+    nkpts : int
+        Number of k-points or momentum labels.
+    target_k : int, optional
+        Total-momentum sector whose packed determinant diagonal is built.
+    link_index : tuple of two ndarrays or KFCIContractMap or None, optional
+        Alpha and beta k-aware link tables.  A ``KFCIContractMap`` may also be
+        supplied here for compatibility; otherwise missing tables are built.
+    contract_map : KFCIContractMap or None, optional
+        Precomputed packed layout and two-electron structural maps.  Supplying
+        it avoids rebuilding those arrays.
+    log_obj : object or None, optional
+        Object used to configure PySCF timing and verbosity messages.
+    kmom : KPointMomentum or None, optional
+        Precomputed momentum arithmetic.  It is built from ``nkpts`` when no
+        contract map or explicit momentum object is supplied.
+
+    Returns
+    -------
+    hdiag : ndarray, shape (sector_size,), dtype complex128
+        Hamiltonian diagonal in the same packed block order as the sector CI
+        vectors consumed by :func:`contract_1e_k` and :func:`contract_2e_k`.
+    """
     log = logger.new_logger(
         log_obj, getattr(log_obj, "verbose", logger.QUIET))
     t0 = (logger.process_clock(), logger.perf_counter())
@@ -1056,6 +1275,10 @@ def make_hdiag(h1e, eri, norb, nelec, nkpts, target_k=0, link_index=None,
             contract_map.bb_eri_idx.ctypes.data_as(ctypes.c_void_p),
         )
         if not getattr(contract_map, "explicit_ab", True):
+            # FCIhdiag_k initialized hdiag and added 1e plus mapped AA/BB
+            # terms.  The streamed kernel adds the omitted AB diagonal terms
+            # without constructing an explicit AB map.  A diagonal operation
+            # never transfers amplitude between packed momentum blocks.
             libpbcfci.FCIhdiag_k_stream_ab(
                 hdiag.ctypes.data_as(ctypes.c_void_p),
                 eri.ctypes.data_as(ctypes.c_void_p),
@@ -1156,8 +1379,9 @@ def make_hamiltonian_k(h1e, eri, norb, nelec, nkpts, target_k=0,
     return hmat
 
 
-def energy(h1e, eri, fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
-           contract_map=None, log_obj=None, kmom=None, contract_fn=None):
+def energy(h1e, eri, fcivec, norb, nelec, nkpts, target_k=0,
+           link_index=None, contract_map=None, log_obj=None,
+           kmom=None, contract_fn=None):
     '''
     Compute the k-FCI electronic energy for a CI vector.
     The one-electron and two-electron Hamiltonian contractions are evaluated
@@ -1191,6 +1415,12 @@ def make_rdm1s(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
     """Build spin-separated one-particle RDMs for a k-FCI vector.
 
     ``kmom`` optionally supplies precomputed momentum-arithmetic tables.
+
+    Returns
+    -------
+    rdm1s : tuple of two ndarrays
+        ``(dm1a, dm1b)``.  Each spin-resolved one-particle RDM has shape
+        ``(norb, norb)`` and dtype ``complex128``.
     """
     return krdm_helper.make_rdm1s(
         fcivec, norb, nelec, nkpts, target_k=target_k,
@@ -1202,6 +1432,11 @@ def make_rdm1(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
     """Build the spin-summed one-particle RDM for a k-FCI vector.
 
     ``kmom`` optionally supplies precomputed momentum-arithmetic tables.
+
+    Returns
+    -------
+    dm1 : ndarray, shape (norb, norb), dtype complex128
+        Spin-summed one-particle RDM.
     """
     return krdm_helper.make_rdm1(
         fcivec, norb, nelec, nkpts, target_k=target_k,
@@ -1211,7 +1446,17 @@ def make_rdm1(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
 def make_rdm12s(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
                 reorder=True, spin=None, kmom=None, kconserv=None):
     """Build spin-separated one- and two-particle RDMs.
+
     ``kmom`` optionally supplies precomputed momentum-arithmetic tables.
+
+    Returns
+    -------
+    rdm1s : tuple of two ndarrays
+        ``(dm1a, dm1b)``.  Each array has shape ``(norb, norb)`` and dtype
+        ``complex128``.
+    rdm2s : tuple of three ndarrays
+        ``(dm2aa, dm2ab, dm2bb)``.  Each spin-resolved two-particle RDM has
+        shape ``(norb, norb, norb, norb)`` and dtype ``complex128``.
     """
     return krdm_helper.make_rdm12s(
         fcivec, norb, nelec, nkpts, target_k=target_k,
@@ -1221,7 +1466,15 @@ def make_rdm12s(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
 def make_rdm12(fcivec, norb, nelec, nkpts, target_k=0, link_index=None,
                reorder=True, spin=None, kmom=None, kconserv=None):
     """Build spin-summed one- and two-particle RDMs.
+
     ``kmom`` optionally supplies precomputed momentum-arithmetic tables.
+
+    Returns
+    -------
+    dm1 : ndarray, shape (norb, norb), dtype complex128
+        Spin-summed one-particle RDM.
+    dm2 : ndarray, shape (norb, norb, norb, norb), dtype complex128
+        Spin-summed two-particle RDM.
     """
     return krdm_helper.make_rdm12(
         fcivec, norb, nelec, nkpts, target_k=target_k,
@@ -1324,6 +1577,16 @@ def _spin_square_diag_k(norb, nelec, nkpts, target_k=0, link_index=None,
 
         hblk = hdiag[offset:offset + size].reshape(nstra, nstrb)
         for ia, astr in enumerate(astrs):
+            # An alpha and beta determinant are uint64 bit strings with one
+            # bit per spatial orbital.  Their bitwise intersection therefore
+            # has one set bit for every doubly occupied orbital.  For a Slater
+            # determinant, the diagonal spin-squared matrix element is
+            #
+            #   <D|S^2|D> = Sz^2 + (N_alpha + N_beta)/2 - N_common,
+            #
+            # where N_common is this intersection's population count.
+            # ``bstrs`` is an array, so the lookup computes all beta-string
+            # counts paired with the current alpha string at once.
             common = np.bitwise_and(astr, bstrs)
             hblk[ia] = diag0 - _popcount_uint64(common)
 
@@ -1486,27 +1749,13 @@ def kernel_ms1(fci, h1e, eri, norb, nelec, nkpts, target_k=0, ci0=None,
     return e + ecore, c
 
 
-class SpinPenaltyFCISolver:
-    """Mixin that adds a spin-penalty operator to a k-FCI solver."""
+class SpinPenaltyFCISolver(_PySCFSpinPenaltyFCISolver):
+    """PySCF spin-penalty mixin specialized for a k-FCI solver.
 
-    __name_mixin__ = "SpinPenalty"
-    _keys = {"ss_value", "ss_penalty", "base"}
-
-    def __init__(self, fcibase, shift, ss_value):
-        self.base = fcibase.copy()
-        self.__dict__.update(fcibase.__dict__)
-        self.ss_value = ss_value
-        self.ss_penalty = shift
-        self.davidson_only = self.base.davidson_only = True
-
-    def undo_fix_spin(self):
-        """Remove the spin-penalty mixin and restore the base solver view."""
-        obj = lib.view(self, lib.drop_class(self.__class__,
-                                            SpinPenaltyFCISolver))
-        del obj.base
-        del obj.ss_value
-        del obj.ss_penalty
-        return obj
+    Initialization, bookkeeping, and ``undo_fix_spin`` are inherited from
+    PySCF.  Only operations whose signatures or data layout differ for a
+    packed momentum sector are overridden here.
+    """
 
     def contract_2e(self, eri, fcivec, norb, nelec, nkpts=None,
                     target_k=None, link_index=None, contract_map=None):
@@ -1517,7 +1766,10 @@ class SpinPenaltyFCISolver:
             target_k = self.target_k
         kmom = self.get_kmom(nkpts) if hasattr(self, "get_kmom") else None
         nelec = _unpack_nelec(nelec, self.spin)
-        ci0 = super().contract_2e(
+        # PySCF's base_contract_2e deliberately skips its molecular
+        # SpinPenaltyFCISolver.contract_2e in the dynamic mixin MRO and calls
+        # the underlying k-FCI solver contraction.
+        ci0 = self.base_contract_2e(
             eri, fcivec, norb, nelec, nkpts=nkpts, target_k=target_k,
             link_index=link_index, contract_map=contract_map)
         if contract_map is not None:
@@ -1723,7 +1975,14 @@ class FCISolver(direct_spin1.FCISolver):
 
     def make_rdm1s(self, fcivec, norb, nelec, nkpts=None, target_k=None,
                    link_index=None):
-        """Build spin-separated one-particle RDMs."""
+        """Build spin-separated one-particle RDMs.
+
+        Returns
+        -------
+        rdm1s : tuple of two ndarrays
+            ``(dm1a, dm1b)``, each with shape ``(norb, norb)`` and dtype
+            ``complex128``.
+        """
         nkpts, target_k = self._resolve_sector(nkpts, target_k)
         t0 = (logger.process_clock(), logger.perf_counter())
         result = make_rdm1s(
@@ -1735,7 +1994,13 @@ class FCISolver(direct_spin1.FCISolver):
 
     def make_rdm1(self, fcivec, norb, nelec, nkpts=None, target_k=None,
                   link_index=None):
-        """Build the spin-summed one-particle RDM."""
+        """Build the spin-summed one-particle RDM.
+
+        Returns
+        -------
+        dm1 : ndarray, shape (norb, norb), dtype complex128
+            Spin-summed one-particle RDM.
+        """
         nkpts, target_k = self._resolve_sector(nkpts, target_k)
         t0 = (logger.process_clock(), logger.perf_counter())
         result = make_rdm1(
@@ -1747,7 +2012,17 @@ class FCISolver(direct_spin1.FCISolver):
 
     def make_rdm12s(self, fcivec, norb, nelec, nkpts=None, target_k=None,
                     link_index=None, reorder=True):
-        """Build spin-separated one- and two-particle RDMs."""
+        """Build spin-separated one- and two-particle RDMs.
+
+        Returns
+        -------
+        rdm1s : tuple of two ndarrays
+            ``(dm1a, dm1b)``, each with shape ``(norb, norb)`` and dtype
+            ``complex128``.
+        rdm2s : tuple of three ndarrays
+            ``(dm2aa, dm2ab, dm2bb)``, each with shape
+            ``(norb, norb, norb, norb)`` and dtype ``complex128``.
+        """
         nkpts, target_k = self._resolve_sector(nkpts, target_k)
         t0 = (logger.process_clock(), logger.perf_counter())
         result = make_rdm12s(
@@ -1759,7 +2034,15 @@ class FCISolver(direct_spin1.FCISolver):
 
     def make_rdm12(self, fcivec, norb, nelec, nkpts=None, target_k=None,
                    link_index=None, reorder=True):
-        """Build spin-summed one- and two-particle RDMs."""
+        """Build spin-summed one- and two-particle RDMs.
+
+        Returns
+        -------
+        dm1 : ndarray, shape (norb, norb), dtype complex128
+            Spin-summed one-particle RDM.
+        dm2 : ndarray, shape (norb, norb, norb, norb), dtype complex128
+            Spin-summed two-particle RDM.
+        """
         nkpts, target_k = self._resolve_sector(nkpts, target_k)
         t0 = (logger.process_clock(), logger.perf_counter())
         result = make_rdm12(

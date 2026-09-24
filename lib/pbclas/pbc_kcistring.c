@@ -37,7 +37,7 @@ The following arrays are allocated dynamically in this file:
   - block_offset, block_na, and block_nb: temporary block lookup tables,
     freed before the allocating function returns.
   - ab_counts, aa_counts, and bb_counts: returned to the caller by
-    count_contract_structures_k on success and freed by that caller; freed
+    count_contract_map_k on success and freed by that caller; freed
     locally on failure.
   - group_index and cursor arrays: temporary contraction-group workspace,
     freed before the allocating function returns.
@@ -402,7 +402,7 @@ static long long count_groups_k(long long *counts, int n)
 }
 
 /**
- * Count all alpha-beta and same-spin contraction structures.
+ * Count the groups and entries in the AB, AA, and BB contraction maps.
  * @param linka Alpha link table.
  * @param nstra Number of alpha strings.
  * @param nlinka Number of links per alpha string.
@@ -418,13 +418,13 @@ static long long count_groups_k(long long *counts, int n)
  * @param p_bb_counts Output BB counts; caller owns the allocated array.
  * @return 0 on success; 1 on allocation or block-table failure.
  */
-static int count_contract_structures_k(int *linka, int nstra, int nlinka,
-                                       int *linkb, int nstrb, int nlinkb,
-                                       int *blocks, int nblocks, int nkpts,
-                                       long long *dims,
-                                       long long **p_ab_counts,
-                                       long long **p_aa_counts,
-                                       long long **p_bb_counts)
+static int count_contract_map_k(int *linka, int nstra, int nlinka,
+                                int *linkb, int nstrb, int nlinkb,
+                                int *blocks, int nblocks, int nkpts,
+                                long long *dims,
+                                long long **p_ab_counts,
+                                long long **p_aa_counts,
+                                long long **p_bb_counts)
 {
     int table_size = nkpts * nkpts;
     /* Temporary arrays allocated here and released at done. */
@@ -776,10 +776,31 @@ static void fill_same_spin_struct_k(int *link_index, int nstr, int nlink,
     }
 }
 
-int FCIcount_contract_k_structures(int *linka, int nstra, int nlinka,
-                                   int *linkb, int nstrb, int nlinkb,
-                                   int *blocks, int nblocks, int nkpts,
-                                   long long *dims)
+/**
+ * Count the groups and entries needed for the AB, AA, and BB contraction maps.
+ *
+ * Python uses these counts to allocate the map arrays.  The matching fill
+ * function then stores each CI source address, destination address, sign, and
+ * ERI index in those arrays.
+ *
+ * @param linka Alpha link table, shape (nstra, nlinka, KLINK_FIELDS).
+ * @param nstra Total number of alpha strings.
+ * @param nlinka Number of alpha excitation links per source string.
+ * @param linkb Beta link table, shape (nstrb, nlinkb, KLINK_FIELDS).
+ * @param nstrb Total number of beta strings.
+ * @param nlinkb Number of beta excitation links per source string.
+ * @param blocks Packed CI block records, shape (nblocks, 6).
+ * @param nblocks Number of packed CI blocks.
+ * @param nkpts Number of momentum points.
+ * @param dims Output array of six int64 counts: [number of AB groups,
+ *        number of AB entries, number of AA groups, number of AA entries,
+ *        number of BB groups, number of BB entries].
+ * @return 0 on success; 1 on allocation or block-table failure.
+ */
+int FCIcount_contract_map_k(int *linka, int nstra, int nlinka,
+                            int *linkb, int nstrb, int nlinkb,
+                            int *blocks, int nblocks, int nkpts,
+                            long long *dims)
 {
     long long *ab_counts = NULL;
     long long *aa_counts = NULL;
@@ -790,22 +811,22 @@ int FCIcount_contract_k_structures(int *linka, int nstra, int nlinka,
         dims[i] = 0;
     }
 
-    status = count_contract_structures_k(
+    status = count_contract_map_k(
             linka, nstra, nlinka, linkb, nstrb, nlinkb,
             blocks, nblocks, nkpts, dims,
             &ab_counts, &aa_counts, &bb_counts);
 
-    /* Deallocate count arrays returned by count_contract_structures_k. */
+    /* Deallocate count arrays returned by count_contract_map_k. */
     free(ab_counts);
     free(aa_counts);
     free(bb_counts);
     return status;
 }
 
-int FCIcount_same_spin_contract_k_structures(int *link_index, int nstr,
-                                             int nlink, int *blocks,
-                                             int nblocks, int nkpts,
-                                             int spin, long long *dims)
+int FCIcount_same_spin_contract_map_k(int *link_index, int nstr,
+                                     int nlink, int *blocks,
+                                     int nblocks, int nkpts,
+                                     int spin, long long *dims)
 {
     int table_size = nkpts * nkpts;
     /* Temporary arrays allocated here and released at done. */
@@ -853,16 +874,16 @@ done:
     return status;
 }
 
-int FCIfill_same_spin_contract_k_structures(int *link_index, int nstr,
-                                            int nlink, int *str2tot,
-                                            int *blocks, int nblocks,
-                                            int nkpts, int ncas, int spin,
-                                            int *group_tab,
-                                            int *group_offsets,
-                                            int *src_addr,
-                                            int *dst_addr,
-                                            int *sign,
-                                            long long *eri_idx)
+int FCIfill_same_spin_contract_map_k(int *link_index, int nstr,
+                                    int nlink, int *str2tot,
+                                    int *blocks, int nblocks,
+                                    int nkpts, int ncas, int spin,
+                                    int *group_tab,
+                                    int *group_offsets,
+                                    int *src_addr,
+                                    int *dst_addr,
+                                    int *sign,
+                                    long long *eri_idx)
 {
     int table_size = nkpts * nkpts;
     long long dims[2];
@@ -932,30 +953,30 @@ done:
     return status;
 }
 
-int FCIfill_contract_k_structures(int *linka, int nstra, int nlinka,
-                                  int *linkb, int nstrb, int nlinkb,
-                                  int *str2tot_a, int *str2tot_b,
-                                  int *blocks, int nblocks,
-                                  int nkpts, int ncas,
-                                  int *ab_group_tab,
-                                  int *ab_group_offsets,
-                                  int *ab_src_addr,
-                                  int *ab_dst_addr,
-                                  int *ab_sign,
-                                  long long *ab_eri_idx_ab,
-                                  long long *ab_eri_idx_ba,
-                                  int *aa_group_tab,
-                                  int *aa_group_offsets,
-                                  int *aa_src_addr,
-                                  int *aa_dst_addr,
-                                  int *aa_sign,
-                                  long long *aa_eri_idx,
-                                  int *bb_group_tab,
-                                  int *bb_group_offsets,
-                                  int *bb_src_addr,
-                                  int *bb_dst_addr,
-                                  int *bb_sign,
-                                  long long *bb_eri_idx)
+int FCIfill_contract_map_k(int *linka, int nstra, int nlinka,
+                           int *linkb, int nstrb, int nlinkb,
+                           int *str2tot_a, int *str2tot_b,
+                           int *blocks, int nblocks,
+                           int nkpts, int ncas,
+                           int *ab_group_tab,
+                           int *ab_group_offsets,
+                           int *ab_src_addr,
+                           int *ab_dst_addr,
+                           int *ab_sign,
+                           long long *ab_eri_idx_ab,
+                           long long *ab_eri_idx_ba,
+                           int *aa_group_tab,
+                           int *aa_group_offsets,
+                           int *aa_src_addr,
+                           int *aa_dst_addr,
+                           int *aa_sign,
+                           long long *aa_eri_idx,
+                           int *bb_group_tab,
+                           int *bb_group_offsets,
+                           int *bb_src_addr,
+                           int *bb_dst_addr,
+                           int *bb_sign,
+                           long long *bb_eri_idx)
 {
     int table_size = nkpts * nkpts;
     long long dims[6];
@@ -981,7 +1002,7 @@ int FCIfill_contract_k_structures(int *linka, int nstra, int nlinka,
     order_b.offsets = NULL;
     order_b.indices = NULL;
 
-    if (count_contract_structures_k(
+    if (count_contract_map_k(
                 linka, nstra, nlinka, linkb, nstrb, nlinkb,
                 blocks, nblocks, nkpts, dims,
                 &ab_counts, &aa_counts, &bb_counts) != 0) {

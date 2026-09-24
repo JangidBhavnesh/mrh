@@ -13,7 +13,7 @@ Periodic full-CI solvers
 
 # TODO: For the kFCI the CSFSolver is not implemented yet.
 
-# Register all the modules exported by this folder.
+# Register all the modules for cleaner API.
 __all__ = [
     "DMRGCICPLX",
     "addons",
@@ -36,7 +36,7 @@ except ImportError:
                 "building the block2 module.")
 
 def solver(cell, singlet, symm=None):
-    """Construct the default periodic complex FCI solver."""
+    """Construct the default complex FCI solver."""
     if symm is not None and symm is not False:
         msg = "Point Group Symmetry is not implemented for FCI in PBC yet."
         raise NotImplementedError(msg)
@@ -53,7 +53,7 @@ def ksolver(cell=None, nkpts=None, target_k=0, symm=None, kpts=None,
         kconserv=kconserv)
 
 def csf_solver(cell, smult, symm=None):
-    """Construct a periodic complex CSF solver."""
+    """Construct a complex CSF solver."""
     if symm is not None and symm is not False:
         msg = "Point Group Symmetry is not implemented for CSF-FCI in PBC yet."
         raise NotImplementedError(msg)

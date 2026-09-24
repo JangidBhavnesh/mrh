@@ -86,9 +86,9 @@ def _interpret_fragment_orbitals(cell, frag_atoms, frags_by_AOs=False):
 _interpret_unit_cell_orbitals = _interpret_fragment_orbitals
 
 
-def _active_occupations(klas, mo_occ, nkpts, nmo, ncore, ncas):
-    kmf = klas._scf
-    if mo_occ is None: return [None] * nkpts
+def _active_occupations(mo_occ, nkpts, nmo, ncore, ncas):
+    if mo_occ is None:
+        return np.ones((nkpts, ncas), dtype=int)
     mo_occ = np.asarray(mo_occ)
     if mo_occ.shape == (nmo,):
         mo_occ = np.broadcast_to(mo_occ, (nkpts, nmo))
@@ -106,7 +106,7 @@ def localize_init_guess(klas, frag_atoms=None, mo_coeff=None, spin=None,
     '''
     Localize one active space per unit cell.Some args are not used in this function
     but are kept for API compatibility with molecular LAS localization. Those variables
-    are ``spin``, ``fock``, ``smults_f`` and ``nelec_f``.  They are not required
+    are ``spin``, ``smults_f`` and ``nelec_f``.  They are not required
     when there is one translationally repeated active space per unit cell.
 
     Now coming back to this function, it is the periodic, active-space-preserving 
@@ -129,10 +129,15 @@ def localize_init_guess(klas, frag_atoms=None, mo_coeff=None, spin=None,
             from klas._scf.mo_coeff are used.
         lo_coeff: np.ndarray or the list of np.arrays, Shape: (nkpts, nao, nmo)
                   orthonormal local orbitals.  meta-Lowdin AOs are used by default.
+        fock: np.ndarray or the list of np.arrays, Shape: (nkpts, nao, nao)
+            AO-basis Fock matrices used to canonicalize the localized active
+            orbitals within each set of identical occupations.  The mean-field
+            Fock matrices are used by default.
         mo_occ: np.array or the list of np.arrays, Shape: (nkpts, nmo)
-            optional occupation labels.  When supplied, only active
-            orbitals with the same occupation are mixed, as in the molecular
-            implementation. Basically trying to preserve the reference HF Det.
+            optional occupation labels.  Only active orbitals with the same
+            occupation are mixed, as in the molecular implementation.  When
+            omitted, every active orbital is assigned occupancy 1 so that the
+            full localized active space is ordered by increasing Fock energy.
         freeze_cas_spaces: bool, optional, (default: True)
             If True, the active space is preserved and only the gauge of the
             active orbitals is changed.  If False, the active space is allowed to
@@ -152,7 +157,7 @@ def localize_init_guess(klas, frag_atoms=None, mo_coeff=None, spin=None,
             threshold, an error is raised. 
     '''
     # making sure that the unused args are not used in this function
-    del spin, fock, smults_f, nelec_f
+    del spin, smults_f, nelec_f
 
     if not freeze_cas_spaces:
         msg = ("Periodic active-band localization always preserves the"
@@ -185,6 +190,14 @@ def localize_init_guess(klas, frag_atoms=None, mo_coeff=None, spin=None,
         msg = (f"mo_coeff AO dimension is {nao}; expected {cell.nao_nr()}")
         raise ValueError(msg)
 
+    if fock is None:
+        fock = kmf.get_fock()
+    fock = np.asarray(fock)
+    if fock.shape != (nkpts, nao, nao):
+        msg = (f"fock must have shape ({nkpts}, {nao}, {nao}); "
+               f"got {fock.shape}")
+        raise ValueError(msg)
+
     # Get the ovlp from the kmf object only, in case of the pseudo-potential
     # directly using the cell.pbc_intro might be dangerous.
     ovlp = np.asarray(kmf.get_ovlp(kpts=kpts))
@@ -211,12 +224,12 @@ def localize_init_guess(klas, frag_atoms=None, mo_coeff=None, spin=None,
                f"{frag_orbs.size} local orbitals")
         raise ValueError(msg)
 
-    # If we want to preserve the active space determinant.
-    # Collect the active-band occupations for each k-point.  If not provided,
-    # the default is to allow all active bands to mix.
-    active_occ = _active_occupations(klas, mo_occ, nkpts, nmo, ncore, ncas)
+    # Collect the active-band occupations for each k-point.  As in the
+    # molecular localizer, the default assigns occupancy 1 to every active
+    # orbital so that the complete fragment is subsequently canonicalized.
+    active_occ = _active_occupations(mo_occ, nkpts, nmo, ncore, ncas)
 
-    result_dtype = np.result_type(mo_coeff.dtype, lo_coeff.dtype)
+    result_dtype = np.result_type(mo_coeff.dtype, lo_coeff.dtype, fock.dtype)
     mo_out = np.array(mo_coeff, dtype=result_dtype, copy=True)
     umat = np.zeros((nkpts, nmo, nmo), dtype=mo_out.dtype)
     svals_out = []
@@ -224,33 +237,17 @@ def localize_init_guess(klas, frag_atoms=None, mo_coeff=None, spin=None,
     for k in range(nkpts):
         c_act = mo_coeff[k, :, ncore:nocc]
         ortho_lo = lo_coeff[k][:, frag_orbs]
-        if active_occ[k] is None:
-            # ortho_lo is the selected orthonormal local-orbital basis.  For
-            # one complete active space per unit cell, the polar factor aligns
-            # each active band with this basis and gives a reproducible k-point
-            # gauge that is invariant to the input active-band gauge.
-            overlap = c_act.conj().T @ ovlp[k] @ ortho_lo
-            u, svals, vh = np.linalg.svd(
-                overlap, full_matrices=False
-            )
-            if ortho_lo.shape[1] == ncas:
-                c_local = c_act @ u @ vh
-            else:
-                # With an overcomplete local-orbital space there is no one-to-one
-                # orbital labelling.  Retain its best ncas principal
-                # directions, consistent with the molecular SVD framework.
-                c_local = c_act @ u
-        else:
-            _, svals, c_local, localized_occ = klas._svd(
-                ortho_lo, c_act, s=ovlp[k], mo_occ=active_occ[k]
-            )
-            # _svd sorts all occupation sectors together by their singular
-            # values. Restore the conventional occupied-to-virtual ordering
-            # while applying the same permutation to the orbitals and their
-            # singular values.
-            occ_order = np.argsort(-localized_occ, kind='stable')
-            c_local = c_local[:, occ_order]
-            svals = svals[occ_order]
+        _, svals, c_local, localized_occ = klas._svd(
+            ortho_lo, c_act, s=ovlp[k], mo_occ=active_occ[k]
+        )
+        # _svd sorts all occupation sectors together by their singular
+        # values. Restore the conventional occupied-to-virtual ordering
+        # while applying the same permutation to the orbitals and their
+        # singular values.
+        occ_order = np.argsort(-localized_occ, kind='stable')
+        c_local = c_local[:, occ_order]
+        localized_occ = localized_occ[occ_order]
+        svals = svals[occ_order]
 
         if len(svals) < ncas:
             msg = "Note sufficient AOs were selected to localize the active space."
@@ -264,7 +261,20 @@ def localize_init_guess(klas, frag_atoms=None, mo_coeff=None, spin=None,
                    f"singular values = {svals}")
             raise ValueError(msg)
         
-        c_local = np.asarray(c_local[:, :ncas])
+        c_local = np.asarray(c_local[:, :ncas], dtype=result_dtype)
+        localized_occ = np.asarray(localized_occ[:ncas])
+
+        # Match molecular localize_init_guess: within every set of identical
+        # occupations, diagonalize the localized Fock block and order the
+        # resulting orbitals from lowest to highest energy.
+        fock_local = c_local.conj().T @ fock[k] @ c_local
+        for occupation in np.unique(localized_occ):
+            idx = np.flatnonzero(localized_occ == occupation)
+            fock_block = fock_local[np.ix_(idx, idx)]
+            energy, rotation = np.linalg.eigh(fock_block)
+            energy_order = np.argsort(energy)
+            c_local[:, idx] = c_local[:, idx] @ rotation[:, energy_order]
+
         mo_out[k, :, ncore:nocc] = c_local
 
         umat[k] = np.eye(nmo, dtype=mo_out.dtype)
