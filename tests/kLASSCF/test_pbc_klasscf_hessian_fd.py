@@ -4,6 +4,8 @@
 
 The tests cover CI, orbital, and coupled Hessian responses across periodic
 dimensions, along with the preconditioner and frozen-orbital path.
+Forward-difference convergence orders are checked separately in
+test_pbc_klasscf_fd_convergence_slow.py.
 """
 
 import unittest
@@ -263,9 +265,17 @@ class KnownValuesKLASSCFHessianFiniteDifference(unittest.TestCase):
                     h2eff=hop.eri_cas,
                 ))
                 finite = (gradient_plus - gradient_minus) / (2.0 * step)
-                relative_error = np.linalg.norm(analytic - finite) / max(
-                    np.linalg.norm(analytic), 1e-14,
+                analytic_norm = np.linalg.norm(analytic)
+                self.assertGreater(
+                    analytic_norm, 1e-14,
+                    msg=f"{name} CI Hessian response must be nonzero",
                 )
+                finite_norm = np.linalg.norm(finite)
+                self.assertGreater(
+                    finite_norm, 1e-14,
+                    msg=f"{name} numerical CI Hessian response must be nonzero",
+                )
+                relative_error = np.linalg.norm(analytic - finite) / finite_norm
                 self.assertLess(relative_error, 2e-7)
 
     def test_dimensional_orbital_hops_match_finite_difference(self):
@@ -302,13 +312,13 @@ class KnownValuesKLASSCFHessianFiniteDifference(unittest.TestCase):
 
                 step = 2.5e-3
                 gradient_plus = ugg.pack_orb(klas.get_grad_orb(
-                    mo_coeff_kpts=_rotate_mos(
+                    mo_coeff=_rotate_mos(
                         mo_coeff, kappa, step,
                     ),
                     ci=ci,
                 ))
                 gradient_minus = ugg.pack_orb(klas.get_grad_orb(
-                    mo_coeff_kpts=_rotate_mos(
+                    mo_coeff=_rotate_mos(
                         mo_coeff, kappa, -step,
                     ),
                     ci=ci,
@@ -317,9 +327,17 @@ class KnownValuesKLASSCFHessianFiniteDifference(unittest.TestCase):
                     (gradient_plus - gradient_minus) / (2.0 * step)
                     - ugg.pack_orb(connection)
                 )
-                relative_error = np.linalg.norm(analytic - finite) / max(
-                    np.linalg.norm(analytic), 1e-14,
+                analytic_norm = np.linalg.norm(analytic)
+                self.assertGreater(
+                    analytic_norm, 1e-14,
+                    msg=f"{name} orbital Hessian response must be nonzero",
                 )
+                finite_norm = np.linalg.norm(finite)
+                self.assertGreater(
+                    finite_norm, 1e-14,
+                    msg=f"{name} numerical orbital Hessian response must be nonzero",
+                )
+                relative_error = np.linalg.norm(analytic - finite) / finite_norm
                 self.assertLess(relative_error, 2e-5)
 
     def test_coupled_hessian_blocks_match_finite_differences(self):
@@ -358,12 +376,12 @@ class KnownValuesKLASSCFHessianFiniteDifference(unittest.TestCase):
         ci_minus = _displace_ci(self.ci, ci_direction, -step)
         orbital_gradient_plus = self.ugg.pack_orb(
             self.klas.get_grad_orb(
-                mo_coeff_kpts=self.mo_coeff, ci=ci_plus,
+                mo_coeff=self.mo_coeff, ci=ci_plus,
             )
         )
         orbital_gradient_minus = self.ugg.pack_orb(
             self.klas.get_grad_orb(
-                mo_coeff_kpts=self.mo_coeff, ci=ci_minus,
+                mo_coeff=self.mo_coeff, ci=ci_minus,
             )
         )
         finite_orbital_ci = (
@@ -378,6 +396,29 @@ class KnownValuesKLASSCFHessianFiniteDifference(unittest.TestCase):
         )
         self.assertLess(ci_orbital_error, 2e-7)
         self.assertLess(orbital_ci_error, 2e-7)
+
+    def test_zero_trial_vector_gives_a_zero_hessian_response(self):
+        """Return an exact zero response for a zero trial, guarded or not."""
+        zero = np.zeros(self.ugg.nvar_tot, dtype=np.complex128)
+
+        guarded = self.hop.matvec(zero)
+        self.assertEqual(guarded.shape, zero.shape)
+        np.testing.assert_array_equal(guarded, 0.0)
+
+        # _matvec skips the orbital and CI response blocks for a zero step,
+        # so the check above is satisfied by construction.  DEBUG1 verbosity
+        # disables that shortcut and evaluates both blocks, which is what
+        # actually tests that the assembled Hessian action is homogeneous.
+        original_verbose = self.klas.verbose
+        try:
+            self.klas.verbose = lib.logger.DEBUG1
+            unguarded = self.hop.matvec(zero)
+        finally:
+            self.klas.verbose = original_verbose
+
+        self.assertEqual(unguarded.shape, zero.shape)
+        self.assertTrue(np.all(np.isfinite(unguarded)))
+        np.testing.assert_array_equal(unguarded, 0.0)
 
     def test_preconditioner_uses_complete_finite_diagonal(self):
         """Apply the preconditioner using a complete finite Hessian diagonal."""

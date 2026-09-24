@@ -1,7 +1,14 @@
 import unittest
+from types import SimpleNamespace
+
 import numpy as np
 
-from mrh.my_pyscf.pbc.mcscf.klasscf import KLASSCF_HessianOperator
+from pyscf import lib
+
+from mrh.my_pyscf.pbc.mcscf.klasscf import (
+    KLASSCF_HessianOperator,
+    KLASSCF_UnitaryGroupGenerators,
+)
 
 # Author: Bhavnesh Jangid:
 
@@ -33,41 +40,17 @@ class _IdentityCSFTransformer:
         return np.array(civec, copy=True)
 
 
-def _set_csf_layout(operator):
-    operator.ci_transformers = [
-        [_IdentityCSFTransformer()] for _ in operator.ci
-    ]
-    operator.frozen_ci = set()
-    operator.nvar_ci = sum(
-        transformer.ncsf
-        for transformers in operator.ci_transformers
-        for transformer in transformers
-    )
+class _DispatchUGG(KLASSCF_UnitaryGroupGenerators):
+    """Use real CI packing with one orbital variable for dispatch tests."""
 
-
-class _DispatchUGG:
-    """One-orbital-variable UGG for combined Hessian dispatch tests."""
+    nvar_orb = 1
 
     def __init__(self, operator):
-        self.operator = operator
-        self.nvar_orb = 1
-        self.nvar_ci = operator.nvar_ci
-        self.nvar_tot = self.nvar_orb + self.nvar_ci
-
-    def unpack(self, x):
-        x = np.asarray(x).reshape(-1)
-        if x.size != self.nvar_tot:
-            raise ValueError(
-                f"combined vector has size {x.size}; expected {self.nvar_tot}"
-            )
-        kappa = self.unpack_orb(x[:self.nvar_orb])
-        ci = self.operator._unpack_ci_vector(x[self.nvar_orb:])
-        return kappa, ci
-
-    def pack(self, kappa, ci):
-        x_orb = self.pack_orb(kappa)
-        x_ci = self.operator._flatten_ci_vector(ci)
-        return np.concatenate((x_orb, x_ci))
+        self.ci = operator.ci
+        self.ci_transformers = [
+            [_IdentityCSFTransformer() for _ in ci_r] for ci_r in self.ci
+        ]
+        self.frozen_ci = []
 
     def unpack_orb(self, x_orb):
         x_orb = np.asarray(x_orb).reshape(-1)
@@ -140,7 +123,6 @@ class KnownValues(unittest.TestCase):
             [np.zeros((2, 1), dtype=np.complex128)],
             [np.zeros((2, 1), dtype=np.complex128)],
         ]
-        _set_csf_layout(operator)
         operator.ugg = _DispatchUGG(operator)
         operator.level_shift = 0.25
         _set_toy_matvec_pipeline(operator)
@@ -165,7 +147,6 @@ class KnownValues(unittest.TestCase):
             [np.zeros((2, 1), dtype=np.complex128)],
             [np.zeros((2, 1), dtype=np.complex128)],
         ]
-        _set_csf_layout(operator)
         operator.ugg = _DispatchUGG(operator)
         operator.level_shift = 0.0
         calls = []
@@ -193,6 +174,53 @@ class KnownValues(unittest.TestCase):
         np.testing.assert_allclose(calls[0][0, 1, 0], trial[0])
         np.testing.assert_allclose(result[0], trial[0])
         np.testing.assert_allclose(result[1:], trial[0])
+
+    def test_matvec_returns_zero_for_a_zero_trial_vector(self):
+        """Return zero for a zero trial with and without the fast-path guards."""
+        operator = KLASSCF_HessianOperator.__new__(KLASSCF_HessianOperator)
+        operator.ci = [
+            [np.zeros((2, 1), dtype=np.complex128)],
+            [np.zeros((2, 1), dtype=np.complex128)],
+        ]
+        operator.ugg = _DispatchUGG(operator)
+        operator.level_shift = 0.25
+        _set_toy_matvec_pipeline(operator)
+        calls = []
+
+        def orbital_response(kappa1):
+            calls.append("orbital-orbital")
+            return 2.0 * kappa1
+
+        operator._orbital_hessian_response = orbital_response
+
+        def ci_orbital_response(kappa1):
+            calls.append("ci-orbital")
+            return [
+                [kappa1[0, 1, 0] * np.ones_like(c0) for c0 in ci0_r]
+                for ci0_r in operator.ci
+            ]
+
+        operator._ci_orbital_hessian_response = ci_orbital_response
+        trial = np.zeros(operator.ugg.nvar_tot, dtype=np.complex128)
+
+        guarded = operator._matvec(trial)
+        self.assertEqual(guarded.shape, trial.shape)
+        self.assertTrue(np.issubdtype(guarded.dtype, np.complexfloating))
+        np.testing.assert_array_equal(guarded, 0.0)
+        self.assertEqual(
+            calls, [],
+            msg="a zero trial must skip both response blocks by default",
+        )
+
+        # The guards make A @ 0 == 0 hold by construction, so the assertion
+        # above says nothing about the response routines themselves.  Raising
+        # the verbosity drives the same zero trial through both blocks, which
+        # tests that the Hessian action is genuinely homogeneous.
+        operator.las = SimpleNamespace(verbose=lib.logger.DEBUG1)
+        unguarded = operator._matvec(trial)
+        self.assertEqual(calls, ["orbital-orbital", "ci-orbital"])
+        self.assertEqual(unguarded.shape, trial.shape)
+        np.testing.assert_array_equal(unguarded, 0.0)
 
 
 if __name__ == "__main__":
