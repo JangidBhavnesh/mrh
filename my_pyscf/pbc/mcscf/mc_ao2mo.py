@@ -193,7 +193,8 @@ def _do_ao2mo_disk(kcasscf, mo_kpts, nkpts, ncore, ncas, nmo, level=1):
         zij_12 = zij_12.reshape(-1, nmo*ncas)
         zkl_34 = zkl_34.reshape(-1, nmo*ncas)
         sign = grp2[f"{k1}_{k2}"][()]
-        lib.dot(zij_12.T, zkl_34, sign, papa, 1)
+        # lib.dot(zij_12.T, zkl_34, sign, papa, 1)
+        papa += sign * (zij_12.T @ zkl_34)
         erifile[f"papa/{k1}_{k2}_{k3}"] = 1/nkpts * papa.reshape(nmo, ncas, nmo, ncas)
 
     papa = zij_12 = zkl_34 = None
@@ -208,7 +209,8 @@ def _do_ao2mo_disk(kcasscf, mo_kpts, nkpts, ncore, ncas, nmo, level=1):
         zij_12 = zij_12.reshape(-1, nmo*nmo)
         zkl_34 = zkl_34.reshape(-1, ncas*ncas)
         sign = grp2[f"{k1}_{k2}"][()]
-        lib.dot(zij_12.T, zkl_34, sign, ppaa, 1)
+        # lib.dot(zij_12.T, zkl_34, sign, ppaa, 1)
+        ppaa += sign * (zij_12.T @ zkl_34)
         erifile[f"ppaa/{k1}_{k2}_{k3}"] = 1/nkpts * ppaa.reshape(nmo, nmo, ncas, ncas)
 
     ppaa = zij_12 = zkl_34 = None
@@ -223,7 +225,8 @@ def _do_ao2mo_disk(kcasscf, mo_kpts, nkpts, ncore, ncas, nmo, level=1):
         zij_12 = zij_12.reshape(-1, nmo*ncas)
         zkl_34 = zkl_34.reshape(-1, ncas*nmo)
         sign = grp2[f"{k1}_{k2}"][()]
-        lib.dot(zij_12.T, zkl_34, sign, paap, 1)
+        # lib.dot(zij_12.T, zkl_34, sign, paap, 1)
+        paap += sign * (zij_12.T @ zkl_34)
         erifile[f"paap/{k1}_{k2}_{k3}"] = 1/nkpts * paap.reshape(nmo, ncas, ncas, nmo)
     paap = zij_12 = zkl_34 = None
     t3 = log.timer('density fitting ao2mo paap', *t2)

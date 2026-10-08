@@ -113,7 +113,8 @@ def ao2mo_7d(mydf, mo_coeff_kpts, kpts=None, factor=1, out=None):
 
                 for iblk in range(nblk): 
                     zkl = kkgrp[f"z{iblk}"][()] 
-                    lib.dot( zij[iblk].T, zkl, signs[iblk] * factor, eri_mo, 1 )
+                    # lib.dot( zij[iblk].T, zkl, signs[iblk] * factor, eri_mo, 1 )
+                    eri_mo += (signs[iblk] * factor) * (zij[iblk].T @ zkl)
                 if dtype == np.double:
                     eri_mo = eri_mo.real
 

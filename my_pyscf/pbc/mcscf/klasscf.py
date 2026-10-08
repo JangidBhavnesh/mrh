@@ -3340,6 +3340,16 @@ def kernel(
     log.info("max_step_backtracks = %d", max_backtracks)
     log.info("")
     t0 = (lib.logger.process_clock(), lib.logger.perf_counter())
+    # Per-step wall-time bookkeeping for the timing summary at the end.
+    tlap = t0
+    step_times = {}
+
+    def lap(label):
+        nonlocal tlap
+        tnew = log.timer(f"k-LASSCF {label}", *tlap)
+        step_times[label] = step_times.get(label, 0.0) + tnew[1] - tlap[1]
+        tlap = tnew
+
     converged = False
     final_hop = None
     e_tot = e_states = e_cas = e_lexc = None
@@ -3349,6 +3359,7 @@ def kernel(
     total_microiterations = 0
 
     h2eff = klas.get_h2cas(mo_coeff)
+    lap("initial get_h2cas")
     if ci is None or any(
             roots is None or any(c is None for c in roots) for roots in ci):
         ci = klas.get_init_guess_ci(
@@ -3357,9 +3368,11 @@ def kernel(
     if ci is None or any(
             roots is None or any(c is None for c in roots) for roots in ci):
         raise RuntimeError("failed to populate the initial CI vectors")
+    lap("initial CI guess")
     (
         casdm1frs, casdm1s_sub, dm1s_kpts, veff_kpts,
     ) = _make_keyframe_densities(klas, mo_coeff, ci)
+    lap("keyframe densities")
 
     # The extra keyframe evaluates the gradient after the final allowed step.
     for imacro in range(max_macro + 1):
@@ -3373,12 +3386,15 @@ def kernel(
             klas, mo_coeff, ci, veff_kpts, h2eff, casdm1frs, log,
         )
         log.info("k-LASSCF subspace CI energies: %s", e_sub)
+        lap("CI cycle")
         (
             casdm1frs, casdm1s_sub, dm1s_kpts, veff_kpts,
         ) = _make_keyframe_densities(klas, mo_coeff, ci)
+        lap("keyframe densities")
         e_tot, e_states, e_cas, e_lexc = _fixed_ci_energies(
             klas, mo_coeff, ci, h2eff,
         )
+        lap("fixed-CI energies")
         # Simultaneously refreshing all local CI problems is not guaranteed
         # to decrease the product-state energy. Preserve the accepted trial
         # if that synchronous refresh goes uphill or becomes nonfinite.
@@ -3396,17 +3412,20 @@ def kernel(
         # transformation, so optimizer coordinates are rebuilt per keyframe.
         ugg = klas.get_ugg(mo_coeff=mo_coeff, ci=ci)
         metric = _optimizer_metric(klas, ugg)
+        lap("get_ugg + metric")
         final_hop = klas.get_hop(
             mo_coeff=mo_coeff, ci=ci, ugg=ugg,
             casdm1frs=casdm1frs, h2eff=h2eff,
             veff_kpts=veff_kpts, dm1s_kpts=dm1s_kpts,
         )
+        lap("get_hop (ERIs + Hessian setup)")
         gradient = np.asarray(final_hop.get_grad()).reshape(-1)
         if gradient.size != ugg.nvar_tot:
             raise ValueError(
                 f"gradient has size {gradient.size}; expected {ugg.nvar_tot}"
             )
 
+        lap("gradient")
         norm_gorb = float(np.linalg.norm(gradient[:ugg.nvar_orb]))
         norm_gci = float(np.linalg.norm(gradient[ugg.nvar_orb:]))
         macro_energy = float(np.real(e_tot))
@@ -3454,6 +3473,7 @@ def kernel(
                 "Applying a floating k-LASSCF level shift of %.6g",
                 floating_shift,
             )
+        lap("micro initial guess")
         micro_basis, micro_hessian_basis = [], []
 
         def apply_metric_hessian(vector):
@@ -3622,6 +3642,7 @@ def kernel(
             np.linalg.norm(residual[ugg.nvar_orb:]),
         )
 
+        lap("micro solve + step regularization")
         accepted = _backtrack_macro_step(
             klas, final_hop, step, weighted_gradient, h2eff, e_tot,
             step_trust_radius, max_backtracks, log,
@@ -3629,10 +3650,12 @@ def kernel(
         if accepted is None:
             log.warn("No decreasing k-LASSCF step found; retaining the keyframe")
             break
+        lap("backtracking (ERIs + CI energies)")
         mo_coeff, ci, h2eff, accepted_energies = accepted
         (
             casdm1frs, casdm1s_sub, dm1s_kpts, veff_kpts,
         ) = _make_keyframe_densities(klas, mo_coeff, ci)
+        lap("keyframe densities")
 
     if final_hop is None:
         raise RuntimeError("k-LASSCF failed to build a Hessian keyframe")
@@ -3648,6 +3671,9 @@ def kernel(
         "k-LASSCF E = %.15g ; |g_orb| = %.6g ; |g_ci| = %.6g",
         np.real(e_tot), norm_gorb, norm_gci,
     )
+    log.info("k-LASSCF timing summary (wall seconds):")
+    for label, wall in sorted(step_times.items(), key=lambda x: -x[1]):
+        log.info("    %-38s %10.2f", label, wall)
     log.timer("k-LASSCF kernel", *t0)
     return (
         converged, e_tot, e_states, mo_energy, mo_coeff, e_cas, e_lexc,
