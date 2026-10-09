@@ -1,4 +1,5 @@
 
+import sys
 import unittest
 from unittest.mock import patch
 
@@ -90,6 +91,7 @@ def _make_external_operator():
     operator.kpts = np.zeros((2, 3))
     operator.las = type("LAS", (), {
         "_scf": type("SCF", (), {"cell": object()})(),
+        "stdout": sys.stdout, "verbose": 0,
     })()
     operator.hcore = _random_hermitian(rng, (2, 3, 3))
     operator.h1s = _random_hermitian(rng, (2, 2, 3, 3))
@@ -384,6 +386,7 @@ class KnownValues(unittest.TestCase):
         operator.kpts = np.zeros((2, 3))
         operator.las = type("LAS", (), {
             "_scf": type("SCF", (), {"cell": object()})(),
+            "stdout": sys.stdout, "verbose": 0,
         })()
         operator.mo_phase = np.ones((2, 1, 2), dtype=np.complex128)
         operator.cascm2 = np.ones((2,) * 4, dtype=np.complex128)
@@ -429,6 +432,7 @@ class KnownValues(unittest.TestCase):
 
         class FakeLAS:
             _scf = type("SCF", (), {"cell": object()})()
+            stdout, verbose = sys.stdout, 0
 
             @staticmethod
             def get_veff(cell, dm_kpts=None, hermi=None, kpts=None):
@@ -600,6 +604,7 @@ class KnownValues(unittest.TestCase):
         operator.kpts = np.zeros((nkpts, 3))
         operator.las = type("LAS", (), {
             "_scf": type("SCF", (), {"cell": object()})(),
+            "stdout": sys.stdout, "verbose": 0,
         })()
         operator.eris = FakeERIs()
         operator.cascm2 = np.zeros((nkpts,) * 4, dtype=np.complex128)
@@ -681,6 +686,7 @@ class KnownValues(unittest.TestCase):
 
         class FakeLAS:
             _scf = type("SCF", (), {"cell": object()})()
+            stdout, verbose = sys.stdout, 0
 
             @staticmethod
             def get_veff(cell, dm_kpts=None, hermi=None, kpts=None):
