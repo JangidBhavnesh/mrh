@@ -151,9 +151,8 @@ def h1e_for_cas(mc, mo_coeff=None, ncas=None, ncore=None):
 """)
 def h2e_for_cas(mc, mo_coeff=None):
     """Build Wannier active ERIs with cached DF pairs and staged transforms."""
-    from mrh.my_pyscf.pbc.mcscf.mc_ao2mo_opt import build_cas_eris
-    from mrh.my_pyscf.pbc.util.casdm2_transformation import (
-        transform_eri_kpts_to_wannier,
+    from mrh.my_pyscf.pbc.mcscf.mc_ao2mo_opt import (
+        build_cas_eris, transform_eri_kpts_to_wannier,
     )
 
     if mo_coeff is None:
