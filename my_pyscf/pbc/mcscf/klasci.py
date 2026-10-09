@@ -150,6 +150,8 @@ def h1e_for_cas(mc, mo_coeff=None, ncas=None, ncore=None):
             ``(nkpts*ncas, nkpts*ncas, nkpts*ncas, nkpts*ncas)``.
 """)
 def h2e_for_cas(mc, mo_coeff=None):
+    log = lib.logger.new_logger(mc)
+    t1 = t0 = (lib.logger.process_clock(), lib.logger.perf_counter())
     kmf = mc._scf
     cell = kmf.cell
     ncore = mc.ncore
@@ -172,8 +174,10 @@ def h2e_for_cas(mc, mo_coeff=None):
     #eri_k = kmf.with_df.ao2mo_7d(mo_act_kpts, kpts=kpts)
     from mrh.my_pyscf.pbc.df.df_ao2mo import ao2mo_7d
     eri_k = ao2mo_7d(kmf.with_df, mo_act_kpts, kpts=kpts)
+    t1 = log.timer('get_h2cas k-space ao2mo_7d', *t1)
     # Get the mo phase for the active space orbitals
     mo_phase = get_wannier_orbs(kmf, kmesh, mo_act_kpts)[-1]
+    t1 = log.timer('get_h2cas Wannier orbitals', *t1)
     mo_ks = mo_phase[kconserv]
 
     # This einsum looks very scary but it is just the transformation of the eris from 
@@ -181,8 +185,10 @@ def h2e_for_cas(mc, mo_coeff=None):
     eris = np.einsum('auR,bvS,abcuvwt,cwT,abctU->RSTU',
                         mo_phase.conj(), mo_phase, eri_k, mo_phase.conj(), mo_ks, optimize=True)
     eris *= 1.0/nkpts
+    t1 = log.timer('get_h2cas k-space to real-space transformation', *t1)
     
     assert eris.shape == (nkpts*ncas, nkpts*ncas, nkpts*ncas, nkpts*ncas)
+    log.timer('get_h2cas', *t0)
     return eris
 
 def _convert_h1e_mo_k_to_wann(kmf, kmesh, h1e_mo_k):
