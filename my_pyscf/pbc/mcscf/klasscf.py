@@ -24,6 +24,7 @@ from mrh.my_pyscf.pbc.mcscf.productstate import (
 from mrh.my_pyscf.pbc.mcscf.real_linear_solvers import (
     SolveScipyMINRESForCplx,
 )
+from mrh.my_pyscf.pbc.util.casdm2_transformation import transform_casdm2_kpts
 from mrh.my_pyscf.pbc.util.wannier import get_wannier_orbs
 from mrh.my_pyscf.mcscf.lasscf_sync_o0 import (
     LASSCF_UnitaryGroupGenerators as MolecularLASSCF_UnitaryGroupGenerators,
@@ -819,6 +820,7 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
         self.casdm1rs = self.las.states_make_casdm1s(casdm1frs=casdm1frs,)
         self.casdm1s = np.einsum(
             "r,rsij->sij", self.weights, self.casdm1rs,
+            optimize=True,
         )
 
         if casdm2fr is None:
@@ -1017,6 +1019,17 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
             )
         return cache[key]
 
+    def _get_cascm2_kpts(self, kconserv):
+        """Reuse the fixed reference cumulant throughout one Hessian keyframe."""
+        cached = getattr(self, "_cascm2_kpts_cache", None)
+        if cached is None:
+            cached = transform_casdm2_kpts(
+                self.cascm2, self.mo_phase, kconserv,
+                kmesh=getattr(self, "kmesh", None),
+            )
+            self._cascm2_kpts_cache = cached
+        return cached
+
     def _init_orb_(self, mo_phase=None):
         """Build the reference generalized Fock matrix in block-MO form."""
 
@@ -1026,6 +1039,7 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
                 self.las._scf, self.kmesh, mo_act_kpts,
             )[-1]
         self.mo_phase = np.asarray(mo_phase)
+        self._cascm2_kpts_cache = None
 
         _check_shape(
             self.mo_phase, (self.nkpts, self.ncas, self.ncastot),
@@ -1049,11 +1063,14 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
             self.las._scf.cell, self.kpts,
         )
         active = slice(self.ncore, self.nocc)
+        cascm2_blocks = self._get_cascm2_kpts(kconserv)
         for k1, k2, k3 in kpts_helper.loop_kkk(self.nkpts):
             k4 = kconserv[k1, k2, k3]
-            cascm2_kpts = _get_casdm2_kpts(
-                self.cascm2, self.mo_phase, (k1, k2, k3, k4),
-            )
+            cascm2_kpts = cascm2_blocks[k1, k2, k3]
+            # Previous per-block transform, retained for reference:
+            # cascm2_kpts = _get_casdm2_kpts(
+            #     self.cascm2, self.mo_phase, (k1, k2, k3, k4),
+            # )
             paaa_kpts = self.eri_paaa(k1, k2, k3)
             _check_shape(
                 paaa_kpts,
@@ -2476,14 +2493,17 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
         kconserv = kpts_helper.get_kconserv(
             self.las._scf.cell, self.kpts,
         )
+        cascm2_blocks = self._get_cascm2_kpts(kconserv)
         loop_log = lib.logger.new_logger(self.las)
         loop_t0 = (lib.logger.process_clock(), lib.logger.perf_counter())
         ppaa_path, papa_path, paap_path = self._get_response_einsum_paths("cross")
         for k1, k2, k3 in kpts_helper.loop_kkk(self.nkpts):
             k4 = kconserv[k1, k2, k3]
-            cascm2_kpts = _get_casdm2_kpts(
-                self.cascm2, self.mo_phase, (k1, k2, k3, k4),
-            )
+            cascm2_kpts = cascm2_blocks[k1, k2, k3]
+            # Previous per-block transform, retained for reference:
+            # cascm2_kpts = _get_casdm2_kpts(
+            #     self.cascm2, self.mo_phase, (k1, k2, k3, k4),
+            # )
             ppaa = self.eris.ppaa(k1, k2, k3)
             papa = self.eris.papa(k1, k2, k3)
             paap = self.eris.paap(k1, k2, k3)
@@ -2702,13 +2722,16 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
             self.las._scf.cell, self.kpts,
         )
         active = slice(self.ncore, self.nocc)
+        cascm2_blocks = self._get_cascm2_kpts(kconserv)
         loop_log = lib.logger.new_logger(self.las)
         loop_t0 = (lib.logger.process_clock(), lib.logger.perf_counter())
         for k1, k2, k3 in kpts_helper.loop_kkk(self.nkpts):
             k4 = kconserv[k1, k2, k3]
-            cascm2_kpts = _get_casdm2_kpts(
-                self.cascm2, self.mo_phase, (k1, k2, k3, k4),
-            )
+            cascm2_kpts = cascm2_blocks[k1, k2, k3]
+            # Previous per-block transform, retained for reference:
+            # cascm2_kpts = _get_casdm2_kpts(
+            #     self.cascm2, self.mo_phase, (k1, k2, k3, k4),
+            # )
             ocm2[k1, k2, k3] = -np.einsum(
                 "abcd,dp->abcp",
                 cascm2_kpts, kappa[k4, active, :],
@@ -2910,14 +2933,17 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
             self.las._scf.cell, self.kpts,
         )
 
+        cascm2_blocks = self._get_cascm2_kpts(kconserv)
         loop_log = lib.logger.new_logger(self.las)
         loop_t0 = (lib.logger.process_clock(), lib.logger.perf_counter())
         ppaa_path, papa_path, paap_path = self._get_response_einsum_paths("cumulant")
         for k1, k2, k3 in kpts_helper.loop_kkk(self.nkpts):
             k4 = kconserv[k1, k2, k3]
-            cascm2_kpts = _get_casdm2_kpts(
-                self.cascm2, self.mo_phase, (k1, k2, k3, k4),
-            )
+            cascm2_kpts = cascm2_blocks[k1, k2, k3]
+            # Previous per-block transform, retained for reference:
+            # cascm2_kpts = _get_casdm2_kpts(
+            #     self.cascm2, self.mo_phase, (k1, k2, k3, k4),
+            # )
             ppaa = self.eris.ppaa(k1, k2, k3)
             papa = self.eris.papa(k1, k2, k3)
             paap = self.eris.paap(k1, k2, k3)
