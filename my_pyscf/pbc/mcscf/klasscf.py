@@ -2712,17 +2712,17 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
             "skpr,krq->skpq", self.dm1s, kappa, optimize=True,
         )
 
+        kconserv = kpts_helper.get_kconserv(
+            self.las._scf.cell, self.kpts,
+        )
+        active = slice(self.ncore, self.nocc)
+        cascm2_blocks = self._get_cascm2_kpts(kconserv)
         dtype = np.result_type(self.cascm2.dtype, kappa.dtype)
         ocm2 = np.empty(
             (self.nkpts, self.nkpts, self.nkpts)
             + (self.ncas, self.ncas, self.ncas, self.nmo),
             dtype=dtype,
         )
-        kconserv = kpts_helper.get_kconserv(
-            self.las._scf.cell, self.kpts,
-        )
-        active = slice(self.ncore, self.nocc)
-        cascm2_blocks = self._get_cascm2_kpts(kconserv)
         loop_log = lib.logger.new_logger(self.las)
         loop_t0 = (lib.logger.process_clock(), lib.logger.perf_counter())
         for k1, k2, k3 in kpts_helper.loop_kkk(self.nkpts):
