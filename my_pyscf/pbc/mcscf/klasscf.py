@@ -955,14 +955,15 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
     def _init_eri_(self, eris=None):
         """Attach lazy block-MO ERI accessors for orbital response.
 
-        The default periodic ERI object stores ppaa, papa, and
-        paap blocks on disk. eri_paaa remains an accessor rather than
+        The default periodic ERI object keeps the ppaa, papa, and paap
+        blocks in memory when they fit in max_memory, and otherwise stores
+        them on disk. eri_paaa remains an accessor rather than
         a materialized supercell tensor. Level one also constructs the compact
         core-orbital intermediates used by the analytic Hessian diagonal.
         """
         if eris is None:
             eris = _ERIS(
-                self.las, self.mo_coeff, method="disk", level=1,
+                self.las, self.mo_coeff, method="direct", level=1,
             )
         for name in ("ppaa", "papa", "paap", "paaa"):
             if not callable(getattr(eris, name, None)):
