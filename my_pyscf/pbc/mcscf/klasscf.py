@@ -3359,8 +3359,27 @@ def kernel(
     def lap(label):
         nonlocal tlap
         tnew = log.timer(f"k-LASSCF {label}", *tlap)
-        step_times[label] = step_times.get(label, 0.0) + tnew[1] - tlap[1]
+        cpu, wall = step_times.get(label, (0.0, 0.0))
+        step_times[label] = (cpu + tnew[0] - tlap[0], wall + tnew[1] - tlap[1])
         tlap = tnew
+
+    def report_total(label, cpu, wall):
+        # Replay an accumulated (cpu, wall) total through log.timer.
+        log.timer(label, lib.logger.process_clock() - cpu,
+                  lib.logger.perf_counter() - wall)
+
+    # Wall time of each macroiteration, and of the Hessian matvecs.
+    macro_times = []
+    macro_t0 = None
+    hess_stats = {"n": 0, "cpu": 0.0, "wall": 0.0}
+
+    def end_macro():
+        nonlocal macro_t0
+        if macro_t0 is not None:
+            tnow = log.timer(
+                f"k-LASSCF macro iter {len(macro_times)}", *macro_t0)
+            macro_times.append((tnow[0] - macro_t0[0], tnow[1] - macro_t0[1]))
+            macro_t0 = None
 
     converged = False
     final_hop = None
@@ -3388,6 +3407,10 @@ def kernel(
 
     # The extra keyframe evaluates the gradient after the final allowed step.
     for imacro in range(max_macro + 1):
+        end_macro()
+        macro_t0 = (lib.logger.process_clock(), lib.logger.perf_counter())
+        hess_n0 = hess_stats["n"]
+        hess_t0 = (hess_stats["cpu"], hess_stats["wall"])
         ci_before_refresh = [
             [np.array(c, copy=True) for c in roots] for roots in ci
         ]
@@ -3489,7 +3512,11 @@ def kernel(
         micro_basis, micro_hessian_basis = [], []
 
         def apply_metric_hessian(vector):
+            tmv = (lib.logger.process_clock(), lib.logger.perf_counter())
             result = metric * np.asarray(final_hop._matvec(vector))
+            hess_stats["n"] += 1
+            hess_stats["cpu"] += lib.logger.process_clock() - tmv[0]
+            hess_stats["wall"] += lib.logger.perf_counter() - tmv[1]
             return result + floating_shift * np.asarray(vector)
 
         def metric_hessian(vector):
@@ -3654,6 +3681,11 @@ def kernel(
             np.linalg.norm(residual[ugg.nvar_orb:]),
         )
 
+        report_total(
+            f"k-LASSCF macro iter {imacro} Hessian matvecs "
+            f"(n = {hess_stats['n'] - hess_n0})",
+            hess_stats["cpu"] - hess_t0[0], hess_stats["wall"] - hess_t0[1],
+        )
         lap("micro solve + step regularization")
         accepted = _backtrack_macro_step(
             klas, final_hop, step, weighted_gradient, h2eff, e_tot,
@@ -3669,6 +3701,7 @@ def kernel(
         ) = _make_keyframe_densities(klas, mo_coeff, ci)
         lap("keyframe densities")
 
+    end_macro()
     if final_hop is None:
         raise RuntimeError("k-LASSCF failed to build a Hessian keyframe")
 
@@ -3683,9 +3716,15 @@ def kernel(
         "k-LASSCF E = %.15g ; |g_orb| = %.6g ; |g_ci| = %.6g",
         np.real(e_tot), norm_gorb, norm_gci,
     )
-    log.info("k-LASSCF timing summary (wall seconds):")
-    for label, wall in sorted(step_times.items(), key=lambda x: -x[1]):
-        log.info("    %-38s %10.2f", label, wall)
+    for label, (cpu, wall) in sorted(
+            step_times.items(), key=lambda x: -x[1][1]):
+        report_total(f"k-LASSCF total {label}", cpu, wall)
+    report_total(
+        f"k-LASSCF total Hessian matvecs (n = {hess_stats['n']}, "
+        "included in micro solve)", hess_stats["cpu"], hess_stats["wall"],
+    )
+    for i, (cpu, wall) in enumerate(macro_times):
+        report_total(f"k-LASSCF total macro iter {i}", cpu, wall)
     log.timer("k-LASSCF kernel", *t0)
     return (
         converged, e_tot, e_states, mo_energy, mo_coeff, e_cas, e_lexc,
