@@ -8,7 +8,7 @@ import numpy as np
 from pyscf.pbc import gto
 from pyscf.pbc.lib import kpts_helper
 
-from mrh.my_pyscf.pbc.df.df_eris import build_eris, _PairCache, _channel, _transfer_groups
+from mrh.my_pyscf.pbc.df.df_eris import build_cas_eris, build_eris, _PairCache, _channel, _transfer_groups
 from mrh.my_pyscf.pbc.mcscf.mc_ao2mo import _ERIS
 
 
@@ -64,6 +64,23 @@ class KnownValues(unittest.TestCase):
                 right = self.z[k3, k4][:, indices[2], indices[3]]
                 expected = np.einsum('Lpq,Lrs,L->pqrs', left, right, self.df.signs) / 2
                 np.testing.assert_allclose(output[name][k1, k2, k3], expected, atol=1e-12, rtol=1e-12)
+
+    def test_active_eris_signed_ram_and_spill(self):
+        for memory in (10000, 0):
+            with self.subTest(max_memory=memory):
+                self.kcas.max_memory = memory
+                self.df.opens = 0
+                output = build_cas_eris(self.kcas, self.mo, self.kconserv)
+                self.assertEqual(self.df.opens, 4)
+                for k1, k2, k3 in np.ndindex((2,) * 3):
+                    k4 = self.kconserv[k1, k2, k3]
+                    expected = np.einsum(
+                        'Lpq,Lrs,L->pqrs', self.z[k1, k2],
+                        self.z[k3, k4], self.df.signs,
+                    ) / 2
+                    np.testing.assert_allclose(
+                        output[k1, k2, k3], expected, atol=1e-12, rtol=1e-12,
+                    )
 
     def test_signed_core_and_all_channels(self):
         for disk in (False, True):
