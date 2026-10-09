@@ -14,6 +14,15 @@ from mrh.my_pyscf.pbc.mcscf.klasscf import KLASSCF_HessianOperator
 """Tests for k-LASSCF orbital updates and orbital Hessian response terms."""
 
 
+def _batch_transform_fixture(transform):
+    """Wrap a per-block fake as a batched transform_casdm2_kpts stand-in."""
+    def batched(density, phase, kconserv, **kwargs):
+        values = [transform(density, phase, (*key, kconserv[key]))
+                  for key in np.ndindex(kconserv.shape)]
+        return np.asarray(values).reshape(kconserv.shape + values[0].shape)
+    return batched
+
+
 class _OrbitalUGG:
 
     pairs = ((1, 0), (2, 0), (2, 1))
@@ -208,6 +217,24 @@ def _external_diagonal_reference(operator, dm2_blocks):
 
 
 class KnownValues(unittest.TestCase):
+
+    def test_reference_cumulant_blocks_are_cached_until_reinitialized(self):
+        operator = KLASSCF_HessianOperator.__new__(KLASSCF_HessianOperator)
+        operator.cascm2 = np.zeros((2,) * 4)
+        operator.mo_phase = np.ones((2, 1, 2), dtype=complex)
+        operator.kmesh = (2, 1, 1)
+        kconserv = np.zeros((2, 2, 2), dtype=int)
+        blocks = np.ones((2, 2, 2, 1, 1, 1, 1))
+        with patch.object(
+                klasscf, "transform_casdm2_kpts",
+                return_value=blocks) as transform:
+            first = operator._get_cascm2_kpts(kconserv)
+            self.assertIs(first, operator._get_cascm2_kpts(kconserv))
+            self.assertEqual(transform.call_count, 1)
+            self.assertEqual(transform.call_args.kwargs["kmesh"], (2, 1, 1))
+            operator._cascm2_kpts_cache = None
+            operator._get_cascm2_kpts(kconserv)
+            self.assertEqual(transform.call_count, 2)
 
     def test_periodic_orbital_update_uses_half_generator_per_kpoint(self):
         """Apply half of each anti-Hermitian generator without changing the reference."""
@@ -411,7 +438,8 @@ class KnownValues(unittest.TestCase):
         with patch.object(
                 klasscf.kpts_helper, "get_kconserv",
                 return_value=kconserv), patch.object(
-                klasscf, "_get_casdm2_kpts", side_effect=transform):
+                klasscf, "transform_casdm2_kpts",
+                side_effect=_batch_transform_fixture(transform)):
             odm1s, ocm2 = operator._make_orbital_response_dm(kappa)
 
         np.testing.assert_allclose(
@@ -632,7 +660,8 @@ class KnownValues(unittest.TestCase):
         with patch.object(
                 klasscf.kpts_helper, "get_kconserv",
                 return_value=kconserv), patch.object(
-                klasscf, "_get_casdm2_kpts", side_effect=transform):
+                klasscf, "transform_casdm2_kpts",
+                side_effect=_batch_transform_fixture(transform)):
             response = operator._orbital_response_external_cumulant(
                 kappa, fock1_cumulant,
             )
@@ -749,7 +778,9 @@ class KnownValues(unittest.TestCase):
         with patch.object(
                 klasscf.kpts_helper, "get_kconserv",
                 return_value=np.zeros((1, 1, 1), dtype=int)), patch.object(
-                klasscf, "_get_casdm2_kpts", return_value=cumulant):
+                klasscf, "transform_casdm2_kpts",
+                side_effect=_batch_transform_fixture(
+                    lambda *args: cumulant)):
             response = operator._orbital_hessian_response(kappa)
 
         self.assertGreater(np.linalg.norm(response), 1e-10)
