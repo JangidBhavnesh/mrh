@@ -270,7 +270,6 @@ def build_cas_eris(mc, mo_cas_kpts, kconserv=None):
         cache.close()
 
 
-
 def transform_eri_kpts_to_wannier(eri_kpts, mo_phase, kconserv):
     """Sum conserving Bloch ERI blocks into a full Wannier tensor at once.
 

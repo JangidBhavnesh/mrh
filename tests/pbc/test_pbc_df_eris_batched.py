@@ -8,7 +8,7 @@ import numpy as np
 from pyscf.pbc import gto
 from pyscf.pbc.lib import kpts_helper
 
-from mrh.my_pyscf.pbc.df.df_eris import build_cas_eris, build_eris, _PairCache, _channel, _transfer_groups
+from mrh.my_pyscf.pbc.mcscf.mc_ao2mo_opt import build_cas_eris, build_eris, _PairCache, _channel, _transfer_groups
 from mrh.my_pyscf.pbc.mcscf.mc_ao2mo import _ERIS
 
 
