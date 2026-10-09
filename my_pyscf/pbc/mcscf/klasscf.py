@@ -25,6 +25,7 @@ from mrh.my_pyscf.pbc.mcscf.real_linear_solvers import (
     SolveScipyMINRESForCplx,
 )
 from mrh.my_pyscf.pbc.util.wannier import get_wannier_orbs
+from mrh.my_pyscf.pbc.util.casdm2 import transform_casdm2_kpts
 from mrh.my_pyscf.mcscf.lasscf_sync_o0 import (
     LASSCF_UnitaryGroupGenerators as MolecularLASSCF_UnitaryGroupGenerators,
 )
@@ -954,13 +955,15 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
         """Attach lazy block-MO ERI accessors for orbital response.
 
         The default periodic ERI object stores ppaa, papa, and
-        paap blocks on disk. eri_paaa remains an accessor rather than
+        paap blocks in memory when the memory estimate fits within the
+        configured limit, falling back to disk otherwise. eri_paaa remains
+        an accessor rather than
         a materialized supercell tensor. Level one also constructs the compact
         core-orbital intermediates used by the analytic Hessian diagonal.
         """
         if eris is None:
             eris = _ERIS(
-                self.las, self.mo_coeff, method="disk", level=1,
+                self.las, self.mo_coeff, method="direct", level=1,
             )
         for name in ("ppaa", "papa", "paap", "paaa"):
             if not callable(getattr(eris, name, None)):
@@ -1000,12 +1003,11 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
         kconserv = kpts_helper.get_kconserv(
             self.las._scf.cell, self.kpts,
         )
+        cascm2_kpts = transform_casdm2_kpts(
+            self.cascm2, self.mo_phase, kconserv, kmesh=self.kmesh,
+        )
         active = slice(self.ncore, self.nocc)
         for k1, k2, k3 in kpts_helper.loop_kkk(self.nkpts):
-            k4 = kconserv[k1, k2, k3]
-            cascm2_kpts = _get_casdm2_kpts(
-                self.cascm2, self.mo_phase, (k1, k2, k3, k4),
-            )
             paaa_kpts = self.eri_paaa(k1, k2, k3)
             _check_shape(
                 paaa_kpts,
@@ -1013,7 +1015,7 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
                 label="paaa_kpts",
             )
             self.fock1[k1][:, active] += np.tensordot(
-                paaa_kpts, cascm2_kpts,
+                paaa_kpts, cascm2_kpts[k1, k2, k3],
                 axes=((1, 2, 3), (1, 2, 3)),
             )
 
