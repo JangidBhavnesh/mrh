@@ -25,7 +25,9 @@ from mrh.my_pyscf.pbc.mcscf.real_linear_solvers import (
     SolveScipyMINRESForCplx,
 )
 from mrh.my_pyscf.pbc.util.wannier import get_wannier_orbs
-from mrh.my_pyscf.pbc.util.casdm2 import transform_casdm2_kpts
+from mrh.my_pyscf.pbc.util.casdm2 import (
+    transform_casdm2_kpts, transform_eri_kpts_to_wannier,
+)
 from mrh.my_pyscf.mcscf.lasscf_sync_o0 import (
     LASSCF_UnitaryGroupGenerators as MolecularLASSCF_UnitaryGroupGenerators,
 )
@@ -972,6 +974,17 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
         self.eris = eris
         self.eri_paaa = eris.paaa
 
+    def _get_cascm2_kpts(self, kconserv):
+        """Reuse the fixed reference cumulant throughout one Hessian keyframe."""
+        cached = getattr(self, "_cascm2_kpts_cache", None)
+        if cached is None:
+            cached = transform_casdm2_kpts(
+                self.cascm2, self.mo_phase, kconserv,
+                kmesh=getattr(self, "kmesh", None),
+            )
+            self._cascm2_kpts_cache = cached
+        return cached
+
     def _init_orb_(self, mo_phase=None):
         """Build the reference generalized Fock matrix in block-MO form."""
 
@@ -981,6 +994,7 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
                 self.las._scf, self.kmesh, mo_act_kpts,
             )[-1]
         self.mo_phase = np.asarray(mo_phase)
+        self._cascm2_kpts_cache = None
 
         _check_shape(
             self.mo_phase, (self.nkpts, self.ncas, self.ncastot),
@@ -1003,9 +1017,7 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
         kconserv = kpts_helper.get_kconserv(
             self.las._scf.cell, self.kpts,
         )
-        cascm2_kpts = transform_casdm2_kpts(
-            self.cascm2, self.mo_phase, kconserv, kmesh=self.kmesh,
-        )
+        cascm2_kpts = self._get_cascm2_kpts(kconserv)
         active = slice(self.ncore, self.nocc)
         for k1, k2, k3 in kpts_helper.loop_kkk(self.nkpts):
             paaa_kpts = self.eri_paaa(k1, k2, k3)
@@ -1362,11 +1374,16 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
         kconserv = kpts_helper.get_kconserv(
             self.las._scf.cell, self.kpts,
         )
+        tcm2_blocks = transform_casdm2_kpts(
+            tcm2, self.mo_phase, kconserv, kmesh=getattr(self, "kmesh", None),
+        )
+
+        # Timer around this loop
+        loop_log = lib.logger.new_logger(self.las)
+        loop_t0 = (lib.logger.process_clock(), lib.logger.perf_counter())
         for k1, k2, k3 in kpts_helper.loop_kkk(self.nkpts):
             k4 = kconserv[k1, k2, k3]
-            tcm2_kpts = _get_casdm2_kpts(
-                tcm2, self.mo_phase, (k1, k2, k3, k4),
-            )
+            tcm2_kpts = tcm2_blocks[k1, k2, k3]
             _check_shape(
                 tcm2_kpts, (self.ncas,) * 4,
                 label=f"transition_cumulant_kpts[{k1},{k2},{k3}]",
@@ -1381,6 +1398,7 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
                 paaa, tcm2_kpts,
                 axes=((1, 2, 3), (1, 2, 3)),
             )
+        loop_log.timer("k-LASSCF transition cumulant Fock loop", *loop_t0)
         return fock_response
 
     def get_h1eff_response(
@@ -1604,16 +1622,12 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
         kconserv = kpts_helper.get_kconserv(
             self.las._scf.cell, self.kpts,
         )
-        casdm2_kpts = {}
+        casdm2_kpts = transform_casdm2_kpts(
+            self.casdm2, self.mo_phase, kconserv, kmesh=self.kmesh,
+        )
 
         def get_casdm2(k1, k2, k3):
-            key = (k1, k2, k3)
-            if key not in casdm2_kpts:
-                k4 = kconserv[k1, k2, k3]
-                casdm2_kpts[key] = _get_casdm2_kpts(
-                    self.casdm2, self.mo_phase, (k1, k2, k3, k4),
-                )
-            return casdm2_kpts[key]
+            return casdm2_kpts[k1, k2, k3]
 
         jkcaa = np.zeros((nkpts, nocc, ncas), dtype=dtype)
         for k in range(nkpts):
@@ -2085,6 +2099,182 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
             kconserv = kpts_helper.get_kconserv(
                 self.las._scf.cell, self.kpts,
             )
+            eri_prime_blocks = np.empty(
+                (self.nkpts,)*3 + (self.ncas,)*4, dtype=dtype,
+            )
+            for k1, k2, k3 in kpts_helper.loop_kkk(self.nkpts):
+                k4 = kconserv[k1, k2, k3]
+                ppaa = self.eris.ppaa(k1, k2, k3)
+                papa = self.eris.papa(k1, k2, k3)
+                paap = self.eris.paap(k1, k2, k3)
+                _check_shape(
+                    ppaa,
+                    (self.nmo, self.nmo, self.ncas, self.ncas),
+                    label=f"ppaa[{k1},{k2},{k3}]",
+                )
+                _check_shape(
+                    papa,
+                    (self.nmo, self.ncas, self.nmo, self.ncas),
+                    label=f"papa[{k1},{k2},{k3}]",
+                )
+                _check_shape(
+                    paap,
+                    (self.nmo, self.ncas, self.ncas, self.nmo),
+                    label=f"paap[{k1},{k2},{k3}]",
+                )
+
+                eri_block_prime = np.einsum(
+                    "pa,pbcd->abcd",
+                    kappa_external[k1, :, active].conj(),
+                    ppaa[:, active], optimize=True,
+                )
+                eri_block_prime += np.einsum(
+                    "pb,apcd->abcd",
+                    kappa_external[k2, :, active],
+                    ppaa[active], optimize=True,
+                )
+                eri_block_prime += np.einsum(
+                    "pc,abpd->abcd",
+                    kappa_external[k3, :, active].conj(),
+                    papa[active], optimize=True,
+                )
+                eri_block_prime += np.einsum(
+                    "pd,abcp->abcd",
+                    kappa_external[k4, :, active],
+                    paap[active], optimize=True,
+                )
+                eri_prime_blocks[k1, k2, k3] = eri_block_prime
+
+            h2_prime += transform_eri_kpts_to_wannier(
+                eri_prime_blocks, self.mo_phase, kconserv,
+            )
+
+        kappa_active = kappa[:, active, active]
+        if np.any(kappa_active):
+            rotation_map = self.ugg.active_active_map
+            kappa_wannier = rotation_map.bloch_to_wannier(kappa_active)
+            h1_wannier = self._active_wannier_intermediates()[0]
+            h1_prime = (
+                kappa_wannier.conj().T @ h1_wannier
+                + h1_wannier @ kappa_wannier
+            )
+            eri = self.eri_cas
+            eri_prime = np.einsum(
+                "ap,aqrs->pqrs", kappa_wannier.conj(), eri,
+                optimize=True,
+            )
+            eri_prime += np.einsum(
+                "bq,pbrs->pqrs", kappa_wannier, eri,
+                optimize=True,
+            )
+            eri_prime += np.einsum(
+                "cr,pqcs->pqrs", kappa_wannier.conj(), eri,
+                optimize=True,
+            )
+            eri_prime += np.einsum(
+                "ds,pqrd->pqrs", kappa_wannier, eri,
+                optimize=True,
+            )
+            coulomb_prime = np.tensordot(
+                cellavgdm1s, eri_prime, axes=((1, 2), (2, 3)),
+            )
+            exchange_prime = np.tensordot(
+                cellavgdm1s, eri_prime, axes=((1, 2), (2, 1)),
+            )
+            h1s_prime += (
+                h1_prime[None] + coulomb_prime
+                + coulomb_prime[::-1] - exchange_prime
+            )
+            h2_prime += eri_prime
+
+        # Differentiate the same state- and fragment-resolved mean-field
+        # construction used by pbc.klasci.h1e_for_las.
+        h1rs_prime = np.empty(
+            (self.nroots, 2, self.ncastot, self.ncastot), dtype=dtype,
+        )
+        for iroot in range(self.nroots):
+            dm1s = self.casdm1rs[iroot] - cellavgdm1s
+            coulomb = np.tensordot(
+                dm1s, h2_prime, axes=((1, 2), (2, 3)),
+            )
+            exchange = np.tensordot(
+                dm1s, h2_prime, axes=((1, 2), (2, 1)),
+            )
+            h1rs_prime[iroot] = (
+                h1s_prime + coulomb + coulomb[::-1] - exchange
+            )
+
+        h1frs_prime = []
+        offsets = np.cumsum(np.concatenate(([0], self.ncas_sub))).astype(int)
+        for ifrag in range(len(self.ncas_sub)):
+            i, j = offsets[ifrag:ifrag + 2]
+            dm1s = np.asarray(self.casdm1frs[ifrag])
+            h2_fragment = h2_prime[i:j, i:j, i:j, i:j]
+            coulomb = np.tensordot(
+                dm1s, h2_fragment, axes=((2, 3), (2, 3)),
+            )
+            exchange = np.tensordot(
+                dm1s, h2_fragment, axes=((2, 3), (2, 1)),
+            )
+            h1frs_prime.append(
+                h1rs_prime[:, :, i:j, i:j]
+                - coulomb - coulomb[:, ::-1] + exchange
+            )
+
+        return h1frs_prime, h2_prime
+
+    def _orbital_hamiltonian_response_legacy(self, kappa):
+        """Differentiate the fragment CI Hamiltonians with the orbitals.
+
+        External rotations are evaluated with the momentum-resolved
+        block-MO intermediates and then transformed to the complete Wannier
+        active space.  Projected active-active rotations are evaluated
+        directly in that Wannier space, where the LAS fragment partition is
+        defined.  The returned one- and two-electron operators are the full
+        Hermitian first derivatives used by the CI gradient response.
+        """
+        kappa = np.asarray(kappa)
+        _check_shape(
+            kappa, (self.nkpts, self.nmo, self.nmo), label="kappa",
+        )
+        active = slice(self.ncore, self.nocc)
+        dtype = np.result_type(
+            kappa.dtype, self.h1s.dtype, self.eri_cas.dtype,
+            self.mo_phase.dtype, np.complex128,
+        )
+        h1s_prime = np.zeros(
+            (2, self.ncastot, self.ncastot), dtype=dtype,
+        )
+        h2_prime = np.zeros((self.ncastot,) * 4, dtype=dtype)
+        cellavgdm1s = _cell_average_dm1s(self.casdm1s, self.nkpts)
+
+        kappa_external = np.array(kappa, copy=True)
+        kappa_external[:, active, active] = 0.0
+        if np.any(kappa_external):
+            odm1s = -np.einsum(
+                "skpr,krq->skpq",
+                self.dm1s, kappa_external, optimize=True,
+            )
+            veff_prime = self._get_veff_response(odm1s)
+            h1s_block_prime = np.empty(
+                (2, self.nkpts, self.ncas, self.ncas), dtype=dtype,
+            )
+            for spin in range(2):
+                for k in range(self.nkpts):
+                    h1s_block_prime[spin, k] = (
+                        kappa_external[k].conj().T @ self.h1s[spin, k]
+                        + self.h1s[spin, k] @ kappa_external[k]
+                        + veff_prime[spin, k]
+                    )[active, active]
+            h1s_prime += np.einsum(
+                "kaP,skab,kbQ->sPQ",
+                self.mo_phase.conj(), h1s_block_prime, self.mo_phase,
+                optimize=True,
+            )
+
+            kconserv = kpts_helper.get_kconserv(
+                self.las._scf.cell, self.kpts,
+            )
             for k1, k2, k3 in kpts_helper.loop_kkk(self.nkpts):
                 k4 = kconserv[k1, k2, k3]
                 ppaa = self.eris.ppaa(k1, k2, k3)
@@ -2207,6 +2397,7 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
             )
 
         return h1frs_prime, h2_prime
+
 
     def _ci_orbital_hessian_response(self, kappa):
         """Apply the CI-output/orbital-input Hessian block.
@@ -2427,11 +2618,14 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
         kconserv = kpts_helper.get_kconserv(
             self.las._scf.cell, self.kpts,
         )
+
+        # Add a timer loop around this.
+        cascm2_blocks = self._get_cascm2_kpts(kconserv)
+        loop_log = lib.logger.new_logger(self.las)
+        loop_t0 = (lib.logger.process_clock(), lib.logger.perf_counter())
         for k1, k2, k3 in kpts_helper.loop_kkk(self.nkpts):
             k4 = kconserv[k1, k2, k3]
-            cascm2_kpts = _get_casdm2_kpts(
-                self.cascm2, self.mo_phase, (k1, k2, k3, k4),
-            )
+            cascm2_kpts = cascm2_blocks[k1, k2, k3]
             ppaa = self.eris.ppaa(k1, k2, k3)
             papa = self.eris.papa(k1, k2, k3)
             paap = self.eris.paap(k1, k2, k3)
@@ -2455,6 +2649,7 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
                 dual_active, paap.conj(), cascm2_kpts.conj(),
                 optimize=True,
             )
+        loop_log.timer("k-LASSCF active external cross loop", *loop_t0)
 
         response = adjoint - adjoint.conj().transpose(0, 2, 1)
         packed = np.asarray(self.ugg.pack_orb(response)).reshape(-1)
@@ -2534,7 +2729,64 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
         )
         return h1_wannier, fock1_wannier
 
-    def _orbital_hessian_response_active_active_wannier(
+    def _active_wannier_response_intermediates(self):
+        """Precontract the fixed densities with ERIs for repeated AA responses.
+
+        Combine the mean-field products and cumulant into the density tensor
+        entering the generalized Fock matrix. Contract the two unaffected ERI
+        indices once, leaving two N^2-by-N^2 response matrices. Subsequent
+        directions need matrix-vector products, without a four-index ERI
+        derivative. Both kappa and its conjugate are retained explicitly.
+        """
+        cached = getattr(self, "_active_wannier_response_cache", None)
+        if cached is not None:
+            return cached
+        eri = self.eri_cas
+        density = self.casdm1s.sum(axis=0)
+        effective = np.array(self.cascm2, dtype=np.result_type(
+            eri, self.cascm2, self.casdm1s), copy=True)
+        effective += np.einsum("tq,rs->tqrs", density, density)
+        effective -= np.einsum("xrq,xts->tqrs", self.casdm1s, self.casdm1s)
+        n = self.ncastot
+        base = np.tensordot(eri, effective, axes=((1, 2, 3), (1, 2, 3)))
+        # E[p,b,r,s] D[t,q,r,s] kappa[b,q].
+        direct = np.einsum("pbrs,tqrs->ptbq", eri, effective, optimize=True)
+        # E[p,q,r,d] D[t,q,r,s] kappa[d,s].
+        direct += np.einsum("pqrd,tqrs->ptds", eri, effective, optimize=True)
+        direct = np.ascontiguousarray(direct).reshape(n*n, n*n)
+        # E[p,q,c,s] D[t,q,r,s] kappa[c,r].conj().
+        conjugate = np.einsum("pqcs,tqrs->ptcr", eri, effective, optimize=True)
+        conjugate = np.ascontiguousarray(conjugate).reshape(n*n, n*n)
+        self._active_wannier_response_cache = (base, direct, conjugate)
+        return self._active_wannier_response_cache
+
+    def _orbital_hessian_response_active_active_wannier(self, kappa_wannier):
+        """Apply the exact Wannier AA response using cached density contractions."""
+        kappa = np.asarray(kappa_wannier)
+        _check_shape(kappa, (self.ncastot, self.ncastot), label="kappa_wannier")
+        # Respect PySCF's memory budget when the persistent response matrices
+        # and their construction workspace cannot fit. The original response
+        # remains available without this extra persistent cache.
+        max_memory = getattr(getattr(self, "las", None), "max_memory", None)
+        if getattr(self, "_active_wannier_response_cache", None) is None and max_memory is not None:
+            itemsize = np.dtype(np.result_type(self.eri_cas, self.cascm2, self.casdm1s)).itemsize
+            available = max(0.0, max_memory - lib.current_memory()[0]) * 1e6
+            if 6 * self.ncastot**4 * itemsize > available:
+                return self._orbital_hessian_response_active_active_wannier_legacy(kappa)
+        h1, fock1 = self._active_wannier_intermediates()
+        base, direct, conjugate = self._active_wannier_response_intermediates()
+        h1_prime = h1 @ kappa - kappa @ h1
+        fock_prime = h1_prime @ self.casdm1s.sum(axis=0).T
+        fock_prime += kappa.conj().T @ base
+        fock_prime += (direct @ kappa.reshape(-1)).reshape(kappa.shape)
+        fock_prime += (conjugate @ kappa.conj().reshape(-1)).reshape(kappa.shape)
+        gradient_prime = fock_prime - fock_prime.conj().T
+        connection = (fock1 @ kappa - kappa @ fock1) / 2.0
+        connection -= connection.conj().T
+        return gradient_prime - connection
+
+
+    def _orbital_hessian_response_active_active_wannier_legacy(
             self, kappa_wannier):
         """Apply the analytic active-active Hessian in Wannier form.
 
@@ -2649,16 +2901,31 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
             self.las._scf.cell, self.kpts,
         )
         active = slice(self.ncore, self.nocc)
-        for k1, k2, k3 in kpts_helper.loop_kkk(self.nkpts):
-            k4 = kconserv[k1, k2, k3]
-            cascm2_kpts = _get_casdm2_kpts(
-                self.cascm2, self.mo_phase, (k1, k2, k3, k4),
-            )
-            ocm2[k1, k2, k3] = -np.einsum(
-                "abcd,dp->abcp",
-                cascm2_kpts, kappa[k4, active, :],
-                optimize=True,
-            )
+        cascm2_blocks = self._get_cascm2_kpts(kconserv)
+
+        # Let's do this transformation in a one go then contract over ocm2 
+        # in loop, keep the previous code commented.
+        # Contract all conserving k-point blocks in one batched matmul.
+        # Flatten the three output active indices into the row index.
+        loop_log = lib.logger.new_logger(self.las)
+        loop_t0 = (lib.logger.process_clock(), lib.logger.perf_counter())
+        np.matmul(
+            cascm2_blocks.reshape(-1, self.ncas ** 3, self.ncas),
+            kappa[kconserv, active, :].reshape(-1, self.ncas, self.nmo),
+            out=ocm2.reshape(-1, self.ncas ** 3, self.nmo),
+        )
+        np.negative(ocm2, out=ocm2)
+        loop_log.timer("k-LASSCF orbital response cumulant contraction", *loop_t0)
+
+        # Previous per-block contraction, retained for reference:
+        # for k1, k2, k3 in kpts_helper.loop_kkk(self.nkpts):
+        #     k4 = kconserv[k1, k2, k3]
+        #     cascm2_kpts = cascm2_blocks[k1, k2, k3]
+        #     ocm2[k1, k2, k3] = -np.einsum(
+        #         "abcd,dp->abcp",
+        #         cascm2_kpts, kappa[k4, active, :],
+        #         optimize=True,
+        #     )
         return odm1s, ocm2
 
     def _get_veff_response(self, odm1s):
@@ -2854,11 +3121,14 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
             self.las._scf.cell, self.kpts,
         )
 
+        cascm2_blocks = self._get_cascm2_kpts(kconserv)
+
+        # Add a timer loop around this.
+        loop_log = lib.logger.new_logger(self.las)
+        loop_t0 = (lib.logger.process_clock(), lib.logger.perf_counter())
         for k1, k2, k3 in kpts_helper.loop_kkk(self.nkpts):
             k4 = kconserv[k1, k2, k3]
-            cascm2_kpts = _get_casdm2_kpts(
-                self.cascm2, self.mo_phase, (k1, k2, k3, k4),
-            )
+            cascm2_kpts = cascm2_blocks[k1, k2, k3]
             ppaa = self.eris.ppaa(k1, k2, k3)
             papa = self.eris.papa(k1, k2, k3)
             paap = self.eris.paap(k1, k2, k3)
@@ -2881,6 +3151,7 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
                 paap, kappa_external[k4, :, active], cascm2_kpts,
                 optimize=True,
             )
+        loop_log.timer("k-LASSCF external cumulant loop", *loop_t0)
         return response
 
     def _zero_ci_step(self, dtype):
