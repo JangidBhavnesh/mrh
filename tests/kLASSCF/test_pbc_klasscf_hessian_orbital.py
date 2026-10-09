@@ -1,5 +1,6 @@
 
 import unittest
+import sys
 from unittest.mock import patch
 
 import numpy as np
@@ -98,6 +99,7 @@ def _make_external_operator():
     operator.nocc = 2
     operator.kpts = np.zeros((2, 3))
     operator.las = type("LAS", (), {
+            "stdout": sys.stdout, "verbose": 0,
         "_scf": type("SCF", (), {"cell": object()})(),
     })()
     operator.hcore = _random_hermitian(rng, (2, 3, 3))
@@ -215,6 +217,25 @@ def _external_diagonal_reference(operator, dm2_blocks):
 
 
 class KnownValues(unittest.TestCase):
+
+    def test_response_contraction_paths_reused_by_shape(self):
+        operator = KLASSCF_HessianOperator.__new__(KLASSCF_HessianOperator)
+        operator.nmo, operator.ncas = 10, 2
+        with patch.object(np, "einsum_path", wraps=np.einsum_path) as planner:
+            first = operator._get_response_einsum_paths("cumulant")
+            self.assertEqual(planner.call_count, 3)
+            self.assertIs(first, operator._get_response_einsum_paths("cumulant"))
+            self.assertEqual(planner.call_count, 3)
+            cross = operator._get_response_einsum_paths("cross")
+            self.assertIs(cross, operator._get_response_einsum_paths("cross"))
+            self.assertEqual(planner.call_count, 6)
+            operator.nmo, operator.ncas = 40, 8
+            operator._get_response_einsum_paths("cumulant")
+            self.assertEqual(planner.call_count, 9)
+        self.assertEqual(len(operator._response_einsum_paths), 3)
+        with self.assertRaises(ValueError):
+            operator._get_response_einsum_paths("unknown")
+
 
     def test_periodic_orbital_update_uses_half_generator_per_kpoint(self):
         """Apply half of each anti-Hermitian generator without changing the reference."""
@@ -411,6 +432,7 @@ class KnownValues(unittest.TestCase):
         operator.nocc = 2
         operator.kpts = np.zeros((2, 3))
         operator.las = type("LAS", (), {
+            "stdout": sys.stdout, "verbose": 0,
             "_scf": type("SCF", (), {"cell": object()})(),
         })()
         operator.mo_phase = np.ones((2, 1, 2), dtype=np.complex128)
@@ -456,6 +478,7 @@ class KnownValues(unittest.TestCase):
         captured = {}
 
         class FakeLAS:
+            stdout, verbose = sys.stdout, 0
             _scf = type("SCF", (), {"cell": object()})()
 
             @staticmethod
@@ -627,6 +650,7 @@ class KnownValues(unittest.TestCase):
         operator.nocc = 2
         operator.kpts = np.zeros((nkpts, 3))
         operator.las = type("LAS", (), {
+            "stdout": sys.stdout, "verbose": 0,
             "_scf": type("SCF", (), {"cell": object()})(),
         })()
         operator.eris = FakeERIs()
@@ -708,6 +732,7 @@ class KnownValues(unittest.TestCase):
         cumulant = np.full((1,) * 4, 0.4, dtype=np.complex128)
 
         class FakeLAS:
+            stdout, verbose = sys.stdout, 0
             _scf = type("SCF", (), {"cell": object()})()
 
             @staticmethod

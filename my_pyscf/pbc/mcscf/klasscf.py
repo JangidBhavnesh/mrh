@@ -974,6 +974,47 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
         self.eris = eris
         self.eri_paaa = eris.paaa
 
+    def _get_response_einsum_paths(self, kind):
+        """Cache contraction instructions by loop type and orbital dimensions.
+
+        Shape-only operands are views of a single scalar. Path planning does
+        not evaluate them or allocate integral tensors. Cached paths are
+        independent of tensor values, so they remain valid within a keyframe.
+        """
+        cache = getattr(self, "_response_einsum_paths", None)
+        if cache is None:
+            cache = self._response_einsum_paths = {}
+        key = (kind, self.nmo, self.ncas)
+        if key not in cache:
+            m, a = self.nmo, self.ncas
+            integral_shapes = ((m, m, a, a), (m, a, m, a), (m, a, a, m))
+            cumulant_shape = (a,) * 4
+            if kind == "cumulant":
+                expressions = (
+                    "pxst,xr,qrst->pq", "sx,prxt,qrst->pq", "prsx,xt,qrst->pq",
+                )
+                shapes = (
+                    (integral_shapes[0], (m, a), cumulant_shape),
+                    ((a, m), integral_shapes[1], cumulant_shape),
+                    (integral_shapes[2], (m, a), cumulant_shape),
+                )
+            elif kind == "cross":
+                expressions = (
+                    "pq,pxst,qrst->xr", "pq,prxt,qrst->sx", "pq,prsx,qrst->xt",
+                )
+                shapes = tuple(((m, a), shape, cumulant_shape) for shape in integral_shapes)
+            else:
+                raise ValueError(f"Unknown response contraction kind: {kind}")
+            scalar = np.empty((), dtype=np.complex128)
+            cache[key] = tuple(
+                np.einsum_path(
+                    expression, *(np.broadcast_to(scalar, shape) for shape in operands),
+                    optimize=True,
+                )[0]
+                for expression, operands in zip(expressions, shapes)
+            )
+        return cache[key]
+
     def _get_cascm2_kpts(self, kconserv):
         """Reuse the fixed reference cumulant throughout one Hessian keyframe."""
         cached = getattr(self, "_cascm2_kpts_cache", None)
@@ -2623,6 +2664,7 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
         cascm2_blocks = self._get_cascm2_kpts(kconserv)
         loop_log = lib.logger.new_logger(self.las)
         loop_t0 = (lib.logger.process_clock(), lib.logger.perf_counter())
+        ppaa_path, papa_path, paap_path = self._get_response_einsum_paths("cross")
         for k1, k2, k3 in kpts_helper.loop_kkk(self.nkpts):
             k4 = kconserv[k1, k2, k3]
             cascm2_kpts = cascm2_blocks[k1, k2, k3]
@@ -2635,19 +2677,19 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
             adjoint[k2][:, active] += np.einsum(
                 "pq,pxst,qrst->xr",
                 dual_active, ppaa.conj(), cascm2_kpts.conj(),
-                optimize=True,
+                optimize=ppaa_path,  # Previously optimize=True (searched every block).
             )
             # Adjoint of -kappa[k3,s,x] papa[p,r,x,t] L[q,r,s,t].
             adjoint[k3][active, :] -= np.einsum(
                 "pq,prxt,qrst->sx",
                 dual_active, papa.conj(), cascm2_kpts.conj(),
-                optimize=True,
+                optimize=papa_path,  # Previously optimize=True (searched every block).
             )
             # Adjoint of paap[p,r,s,x] kappa[k4,x,t] L[q,r,s,t].
             adjoint[k4][:, active] += np.einsum(
                 "pq,prsx,qrst->xt",
                 dual_active, paap.conj(), cascm2_kpts.conj(),
-                optimize=True,
+                optimize=paap_path,  # Previously optimize=True (searched every block).
             )
         loop_log.timer("k-LASSCF active external cross loop", *loop_t0)
 
@@ -3126,6 +3168,7 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
         # Add a timer loop around this.
         loop_log = lib.logger.new_logger(self.las)
         loop_t0 = (lib.logger.process_clock(), lib.logger.perf_counter())
+        ppaa_path, papa_path, paap_path = self._get_response_einsum_paths("cumulant")
         for k1, k2, k3 in kpts_helper.loop_kkk(self.nkpts):
             k4 = kconserv[k1, k2, k3]
             cascm2_kpts = cascm2_blocks[k1, k2, k3]
@@ -3136,20 +3179,20 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
             response[k1][:, active] += np.einsum(
                 "pxst,xr,qrst->pq",
                 ppaa, kappa_external[k2, :, active], cascm2_kpts,
-                optimize=True,
+                optimize=ppaa_path,  # Previously optimize=True (searched every block).
             )
             # Bra index 3 of papa: d(U*)/dt = kappa*; using
             # kappa*_{x,s} = -kappa_{s,x} gives the explicit minus sign.
             response[k1][:, active] -= np.einsum(
                 "sx,prxt,qrst->pq",
                 kappa_external[k3, active, :], papa, cascm2_kpts,
-                optimize=True,
+                optimize=papa_path,  # Previously optimize=True (searched every block).
             )
             # Ket index 4 of paap: dU/dt = kappa.
             response[k1][:, active] += np.einsum(
                 "prsx,xt,qrst->pq",
                 paap, kappa_external[k4, :, active], cascm2_kpts,
-                optimize=True,
+                optimize=paap_path,  # Previously optimize=True (searched every block).
             )
         loop_log.timer("k-LASSCF external cumulant loop", *loop_t0)
         return response
