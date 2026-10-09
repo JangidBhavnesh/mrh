@@ -16,6 +16,11 @@ KnownValues
     test_init_orb_matches_original_contractions: the generalized Fock built in
         KLASSCF_HessianOperator._init_orb_ matches the original block loop.
 
+ERIBackTransformTests
+    test_back_transform_matches_original_block_sum: the batched Bloch-to-Wannier
+        ERI transform matches the original block-by-block einsum sum for
+        Fourier and general phases.
+
 CumulantCacheTests
     test_reference_cumulant_cache_reused: the reference cumulant is
         transformed once and the cached blocks are reused.
@@ -30,7 +35,9 @@ from pyscf.fci import cistring, direct_spin1
 
 from mrh.my_pyscf.pbc.mcscf import klasscf
 from mrh.my_pyscf.pbc.mcscf.mc1step import _get_casdm2_kpts
-from mrh.my_pyscf.pbc.util.casdm2_transformation import transform_casdm2_kpts
+from mrh.my_pyscf.pbc.util.casdm2_transformation import (
+    transform_casdm2_kpts, transform_eri_kpts_to_wannier,
+)
 
 
 def phase_and_momenta(mesh, ncas, sign=1):
@@ -140,6 +147,30 @@ class KnownValues(unittest.TestCase):
                     operator._init_orb_(mo_phase=current_phase)
                 np.testing.assert_allclose(operator.fock1, expected, atol=1e-9, rtol=1e-11)
 
+
+
+class ERIBackTransformTests(unittest.TestCase):
+    def test_back_transform_matches_original_block_sum(self):
+        rng = np.random.default_rng(923)
+        for mesh in ((1, 1, 1), (2, 1, 1), (2, 2, 1)):
+            for phase_kind in ('positive_fourier', 'negative_fourier', 'general'):
+                with self.subTest(mesh=mesh, phase=phase_kind):
+                    phase, momenta = phase_and_momenta(mesh, 2, sign=-1 if phase_kind == 'negative_fourier' else 1)
+                    if phase_kind == 'general':
+                        phase = rng.normal(size=phase.shape) + 1j*rng.normal(size=phase.shape)
+                    nkpts, ncas, nactive = phase.shape
+                    shape = (nkpts,)*3 + (ncas,)*4
+                    blocks = rng.normal(size=shape) + 1j*rng.normal(size=shape)
+                    reference = np.zeros((nactive,)*4, dtype=complex)
+                    for k1, k2, k3 in np.ndindex((nkpts,)*3):
+                        k4 = momenta[k1, k2, k3]
+                        reference += np.einsum(
+                            'aP,bQ,abcd,cR,dS->PQRS',
+                            phase[k1].conj(), phase[k2], blocks[k1,k2,k3],
+                            phase[k3].conj(), phase[k4], optimize=True,
+                        )
+                    actual = transform_eri_kpts_to_wannier(blocks, phase, momenta)
+                    np.testing.assert_allclose(actual, reference, atol=2e-10, rtol=2e-12)
 
 
 class CumulantCacheTests(unittest.TestCase):

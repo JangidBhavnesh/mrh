@@ -268,3 +268,34 @@ def build_cas_eris(mc, mo_cas_kpts, kconserv=None):
         return output
     finally:
         cache.close()
+
+
+
+def transform_eri_kpts_to_wannier(eri_kpts, mo_phase, kconserv):
+    """Sum conserving Bloch ERI blocks into a full Wannier tensor at once.
+
+    Blocks have layout (k1,k2,k3,a,b,c,d), with implicit fourth momentum
+    kconserv[k1,k2,k3]. Factors on the four ERI indices are U*, U, U*, U;
+    no extra normalization is applied. Arbitrary phase matrices are supported.
+    Each tensor axis is transformed once instead of expanding every block
+    into its own full Wannier tensor.
+    """
+    blocks = np.asarray(eri_kpts)
+    phase = np.asarray(mo_phase)
+    nkpts, ncas, nactive = phase.shape
+    if blocks.shape != (nkpts,)*3 + (ncas,)*4:
+        raise ValueError('ERI blocks must have shape (nkpts,nkpts,nkpts,ncas,ncas,ncas,ncas)')
+    conservation = np.asarray(kconserv)
+    if conservation.shape != (nkpts,)*3 or not np.issubdtype(conservation.dtype, np.integer):
+        raise ValueError('kconserv must be an integer array of shape (nkpts,nkpts,nkpts)')
+    if np.any(conservation < 0) or np.any(conservation >= nkpts):
+        raise ValueError('kconserv contains an invalid momentum index')
+    nblock = nkpts*ncas
+    full = np.zeros((nblock,)*4, dtype=np.result_type(blocks, phase))
+    view = full.reshape((nkpts,ncas)*4).transpose(0,2,4,6,1,3,5,7)
+    k1, k2, k3 = np.ogrid[:nkpts, :nkpts, :nkpts]
+    view[k1,k2,k3,conservation] = blocks
+    matrix = phase.reshape(nblock, nactive)
+    for axis, factor in enumerate((matrix.conj().T, matrix.T, matrix.conj().T, matrix.T)):
+        full = np.moveaxis(np.tensordot(factor, full, axes=(1, axis)), 0, axis)
+    return full
