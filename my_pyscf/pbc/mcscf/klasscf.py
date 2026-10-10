@@ -37,6 +37,21 @@ from mrh.my_pyscf.pbc.mcscf.active_active_rotation_map import (
 
 _ENERGY_COMPARISON_TOL = 1e-12  # Hartree per cell
 
+def _response_matrix_blocks(eri, effective):
+    """Contract ERI rows (leading index p) with the effective density.
+
+    Returns the direct and conjugate response blocks, each with layout
+    (p, t, x, y) for the kappa[x, y] (or conjugate) multiplying them.
+    """
+    # E[p,b,r,s] D[t,q,r,s] kappa[b,q].
+    direct = np.einsum("pbrs,tqrs->ptbq", eri, effective, optimize=True)
+    # E[p,q,r,d] D[t,q,r,s] kappa[d,s].
+    direct += np.einsum("pqrd,tqrs->ptds", eri, effective, optimize=True)
+    # E[p,q,c,s] D[t,q,r,s] kappa[c,r].conj().
+    conjugate = np.einsum("pqcs,tqrs->ptcr", eri, effective, optimize=True)
+    return np.ascontiguousarray(direct), np.ascontiguousarray(conjugate)
+
+
 def _check_shape(mat, shape, label="array"):
     """Validate the shape of an array-like object.
 
@@ -799,6 +814,8 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
         self._Horb_diag_external_cache = None
         self._Horb_active_active_cache = None
         self._active_wannier_intermediates_cache = None
+        self._active_wannier_response_cache = None
+        self._active_wannier_response_file = None
         self._Horb_external_active_cross_cache = None
 
     def _init_dms_(self, casdm1frs, casdm2fr=None, dm1s_kpts=None):
@@ -2608,7 +2625,99 @@ class KLASSCF_HessianOperator(molLASSCF_HessianOperator):
         )
         return h1_wannier, fock1_wannier
 
-    def _orbital_hessian_response_active_active_wannier(
+    def _active_wannier_response_intermediates(self):
+        """Precontract the fixed densities with ERIs for repeated AA responses.
+
+        Combine the mean-field products and cumulant into the density tensor
+        entering the generalized Fock matrix. Contract the two unaffected ERI
+        indices once, leaving two N^2-by-N^2 response matrices. Subsequent
+        directions need matrix-vector products, without a four-index ERI
+        derivative. Both kappa and its conjugate are retained explicitly.
+
+        The matrices stay in memory when they and their construction workspace
+        fit in max_memory. Otherwise they are built in row blocks and written
+        to a temporary HDF5 file, and each matrix-vector product reads them
+        back block by block.
+        """
+        cached = getattr(self, "_active_wannier_response_cache", None)
+        if cached is not None:
+            return cached
+        eri = self.eri_cas
+        density = self.casdm1s.sum(axis=0)
+        dtype = np.result_type(eri, self.cascm2, self.casdm1s)
+        effective = np.array(self.cascm2, dtype=dtype, copy=True)
+        effective += np.einsum("tq,rs->tqrs", density, density)
+        effective -= np.einsum("xrq,xts->tqrs", self.casdm1s, self.casdm1s)
+        n = self.ncastot
+        base = np.tensordot(eri, effective, axes=((1, 2, 3), (1, 2, 3)))
+        if self._response_cache_fits_in_memory():
+            direct, conjugate = _response_matrix_blocks(eri, effective)
+            direct = direct.reshape(n*n, n*n)
+            conjugate = conjugate.reshape(n*n, n*n)
+        else:
+            self._active_wannier_response_file = lib.H5TmpFile()
+            direct = self._active_wannier_response_file.create_dataset(
+                "direct", shape=(n*n, n*n), dtype=dtype)
+            conjugate = self._active_wannier_response_file.create_dataset(
+                "conjugate", shape=(n*n, n*n), dtype=dtype)
+            # Temporaries per block: two results and einsum intermediates.
+            rows = max(1, min(n, int(
+                0.4 * self._available_memory_bytes()
+                // (4 * n**3 * np.dtype(dtype).itemsize))))
+            for start in range(0, n, rows):
+                stop = min(n, start + rows)
+                block_direct, block_conjugate = _response_matrix_blocks(
+                    eri[start:stop], effective)
+                direct[start*n:stop*n] = block_direct.reshape(-1, n*n)
+                conjugate[start*n:stop*n] = block_conjugate.reshape(-1, n*n)
+            self._active_wannier_response_file.flush()
+        self._active_wannier_response_cache = (base, direct, conjugate)
+        return self._active_wannier_response_cache
+
+    def _available_memory_bytes(self):
+        max_memory = getattr(getattr(self, "las", None), "max_memory", None)
+        if max_memory is None:
+            return np.inf
+        return max(0.0, max_memory - lib.current_memory()[0]) * 1e6
+
+    def _response_cache_fits_in_memory(self):
+        """Whether both response matrices and the build workspace fit in RAM."""
+        itemsize = np.dtype(
+            np.result_type(self.eri_cas, self.cascm2, self.casdm1s)
+        ).itemsize
+        return 6 * self.ncastot**4 * itemsize <= self._available_memory_bytes()
+
+    def _apply_response_matrix(self, matrix, vector):
+        """Return matrix @ vector, streaming row blocks when matrix is on disk."""
+        if isinstance(matrix, np.ndarray):
+            return matrix @ vector
+        rows = max(1, int(min(256e6, 0.25 * self._available_memory_bytes())
+                          // (matrix.shape[1] * matrix.dtype.itemsize)))
+        out = np.empty(matrix.shape[0], dtype=np.result_type(matrix.dtype, vector))
+        for start in range(0, matrix.shape[0], rows):
+            stop = min(matrix.shape[0], start + rows)
+            out[start:stop] = matrix[start:stop] @ vector
+        return out
+
+    def _orbital_hessian_response_active_active_wannier(self, kappa_wannier):
+        """Apply the exact Wannier AA response using cached density contractions."""
+        kappa = np.asarray(kappa_wannier)
+        _check_shape(kappa, (self.ncastot, self.ncastot), label="kappa_wannier")
+        h1, fock1 = self._active_wannier_intermediates()
+        base, direct, conjugate = self._active_wannier_response_intermediates()
+        h1_prime = h1 @ kappa - kappa @ h1
+        fock_prime = h1_prime @ self.casdm1s.sum(axis=0).T
+        fock_prime += kappa.conj().T @ base
+        fock_prime += self._apply_response_matrix(
+            direct, kappa.reshape(-1)).reshape(kappa.shape)
+        fock_prime += self._apply_response_matrix(
+            conjugate, kappa.conj().reshape(-1)).reshape(kappa.shape)
+        gradient_prime = fock_prime - fock_prime.conj().T
+        connection = (fock1 @ kappa - kappa @ fock1) / 2.0
+        connection -= connection.conj().T
+        return gradient_prime - connection
+
+    def _orbital_hessian_response_active_active_wannier_slow(
             self, kappa_wannier):
         """Apply the analytic active-active Hessian in Wannier form.
 
