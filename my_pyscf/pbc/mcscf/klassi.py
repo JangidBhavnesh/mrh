@@ -252,9 +252,9 @@ class KLASSI(lib.StreamObject):
         charged_spin_mult: Charged-fragment 2S+1, as in KLASCI.
 
     kernel() independently optimizes one charged LAS product for every cell,
-    then diagonalizes their full state-interaction matrix. No translation
-    adaptation or momentum labels are used. One local root per fragment and
-    one charged channel are supported initially.
+    then diagonalizes their full state-interaction matrix. kernel_kpts()
+    subsequently checks translation symmetry and solves total-momentum blocks.
+    One local root per fragment and one charged channel are supported initially.
 
     Results:
         charged_states: Separate converged KLASCI objects in reference-cell order.
@@ -265,16 +265,18 @@ class KLASSI(lib.StreamObject):
         si: Eigenvectors in columns; si.conj().T @ ovlp @ si is the identity.
         s2, spin_multiplicity: Root <S^2> and sqrt(1 + 4<S^2>). The latter
             is an effective 2S+1 for states that are not eigenstates of S^2.
+        k_results: Per-momentum result dictionaries from kernel_kpts(), in the
+            original k-point order; None until momentum blocks are solved.
 
     The contraction backend avoids full-supercell CI vectors but visits all
     two-electron fragment blocks. Large meshes will need a more efficient
-    screened backend; no translation reduction is performed here.
+    screened backend. Momentum blocking currently follows full H/S construction.
     """
 
     _keys = {'charge', 'charged_spin', 'charged_spin_mult', 'mo_coeff',
              'ncas_sub', 'nkpts', 'ref_cells', 'charged_states', 'ci',
              'nelec_frs', 'ham', 'ovlp', 'e_tot', 'e_tot_supercell', 'si',
-             's2', 'spin_multiplicity', 'converged'}
+             's2', 'spin_multiplicity', 'k_results', 'converged'}
 
     def __init__(self, las, charge=1, charged_spin=None, charged_spin_mult=None):
         if not isinstance(las, PBCLASCINoSymm):
@@ -295,6 +297,7 @@ class KLASSI(lib.StreamObject):
         self.ham = self.ovlp = self.si = None
         self.e_tot = self.e_tot_supercell = None
         self.s2 = self.spin_multiplicity = None
+        self.k_results = None
         self.converged = False
 
     def kernel(self, mo_coeff=None):
@@ -305,6 +308,7 @@ class KLASSI(lib.StreamObject):
         self.ham = self.ovlp = self.si = None
         self.e_tot = self.e_tot_supercell = None
         self.s2 = self.spin_multiplicity = None
+        self.k_results = None
         if mo_coeff is not None:
             self.mo_coeff = np.array(mo_coeff, copy=True)
         self.charged_states = make_charged_states(
@@ -327,21 +331,24 @@ class KLASSI(lib.StreamObject):
         self._finalize()
         return self.e_tot, self.si
 
-    def spin_square(self):
-        """Return total <S^2> and effective multiplicity for each SI root.
+    def spin_square(self, si=None):
+        """Return total <S^2> and effective multiplicity for each SI column.
 
+        Defaults to the full-space roots; optional si uses the same LAS basis.
         S^2 preserves every fragment's electron count, so its matrix is
         diagonal in this one-charged-state-per-cell basis. Each product has
         <S^2> = sum_f S_f(S_f+1) + 2 sum_{f<g} M_f M_g.
         """
-        if self.si is None:
+        if si is None:
+            si = self.si
+        if si is None:
             raise ValueError("run kLASSI before evaluating the root spins")
         smults = np.array([[box.fcisolvers[0].smult for box in state.fciboxes]
                            for state in self.charged_states])
         ms = (self.nelec_frs[:, :, 0] - self.nelec_frs[:, :, 1]).T / 2
         product_s2 = ((smults ** 2 - 1) / 4).sum(axis=1)
         product_s2 += ms.sum(axis=1) ** 2 - (ms ** 2).sum(axis=1)
-        weights = abs(self.si) ** 2 * self.ovlp.diagonal().real[:, None]
+        weights = abs(si) ** 2 * self.ovlp.diagonal().real[:, None]
         s2 = product_s2 @ weights / weights.sum(axis=0)
         return s2, np.sqrt(1 + 4 * s2)
 
@@ -365,6 +372,53 @@ class KLASSI(lib.StreamObject):
         The independent references and state-interaction results are unchanged.
         """
         return klassi_trans.check_translation_symmetry(self, tol, energy_tol, orbital_tol)
+
+    def kernel_kpts(self, tol=1e-5, energy_tol=1e-7, orbital_tol=1e-8):
+        """Resolve an existing kernel() result into total-momentum sectors.
+
+        Returns and stores k_results, a list in self._las.kpts order. Each
+        dict contains target_k, kpt (Cartesian), scaled_k (reciprocal lattice),
+        basis U_K, ham, ovlp, si (columns in the original LAS basis), e_tot
+        (Ha/cell), e_tot_supercell, s2, spin_multiplicity, charge, and nkpts.
+        Empty sectors have zero columns/roots. T_a has eigenvalue exp(-i K.a).
+
+        K is total many-electron momentum, not the added electron or hole
+        momentum; that conversion also requires the neutral reference's K.
+        Requires a complete unshifted mesh and translation-closed references.
+        Full-space results and independently optimized references are retained.
+        energy_tol is Ha/supercell; other tolerances are dimensionless.
+        """
+        self.k_results = None
+        checks = self.check_translation_symmetry(tol, energy_tol, orbital_tol)
+        generators = [checks[tuple(t)]['matrix'] for t in np.eye(3, dtype=int)]
+        kpts = np.asarray(self._las.kpts)
+        scaled = self._las.cell.get_scaled_kpts(kpts)
+        results = diagonalize_momentum(self.ham, self.ovlp, generators,
+                                       self._las.kmesh, scaled, tol, energy_tol)
+        for result, kpt in zip(results, kpts):
+            result['kpt'] = kpt.copy()
+            result['e_tot'] = result['e_tot_supercell'] / self.nkpts
+            result['s2'], result['spin_multiplicity'] = self.spin_square(result['si'])
+            result['charge'], result['nkpts'] = self.charge, self.nkpts
+        self.k_results = results
+        self._finalize_kpts()
+        return results
+
+    def _finalize_kpts(self):
+        log = lib.logger.new_logger(self)
+        active_space = f"({int(self.nelec_frs[:, 0].sum())}, {int(self.ncas_sub.sum())})"
+        log.info("\nk-LASSI charge %+d: total many-electron momentum blocks", self.charge)
+        log.info("K is in reciprocal-lattice coordinates; T_a = exp(-i K.a).")
+        log.info("%4s  %31s  %5s  %23s  %22s  %12s", "K id", "K (scaled)", "State",
+                 "Total Active Space (e,o)", "Energies (Ha/cell)", "Spin (2S+1)")
+        for result in self.k_results:
+            klabel = "(% .6f, % .6f, % .6f)" % tuple(result['scaled_k'])
+            for root, energy in enumerate(result['e_tot']):
+                log.info("%4d  %31s  %5d  %23s  %22.12f  %12.6f",
+                         result['target_k'], klabel, root, active_space,
+                         energy, result['spin_multiplicity'][root])
+        log.info("Spin (2S+1) is inferred from <S^2>; noninteger values indicate spin mixing.")
+        return self
 
     def _finalize(self):
         log = lib.logger.new_logger(self)

@@ -147,6 +147,8 @@ class ChargedReferenceTests(unittest.TestCase):
     def test_public_driver(self):
         for charge in (1, -1):
             lsi = mcscf.KLASSI(self.las, charge=charge)
+            with self.assertRaisesRegex(ValueError, 'run kLASSI'):
+                lsi.kernel_kpts()
             energies, si = lsi.kernel()
             self.assertTrue(lsi.converged)
             self.assertEqual(len(lsi.charged_states), 3)
@@ -175,6 +177,32 @@ class ChargedReferenceTests(unittest.TestCase):
             np.testing.assert_allclose(translation.conj().T @ lsi.ham @ translation,
                                        lsi.ham, atol=1e-8)
             np.testing.assert_array_equal(lsi.si, before)
+            with mock.patch.object(lsi, 'stdout', io.StringIO()) as output, \
+                    mock.patch.object(lsi, 'verbose', 4):
+                results = lsi.kernel_kpts()
+                table = output.getvalue()
+            self.assertIs(results, lsi.k_results)
+            self.assertIn('total many-electron momentum', table)
+            for heading in ('K (scaled)', 'Total Active Space (e,o)',
+                            'Energies (Ha/cell)', 'Spin (2S+1)'):
+                self.assertIn(heading, table)
+            np.testing.assert_allclose(np.sort(np.concatenate([r['e_tot'] for r in results])),
+                                       lsi.e_tot, atol=1e-10)
+            for index, result in enumerate(results):
+                self.assertEqual(result['target_k'], index)
+                self.assertEqual(result['charge'], charge)
+                self.assertEqual(result['nkpts'], 3)
+                self.assertEqual(len(result['e_tot']), 1)
+                np.testing.assert_allclose(result['kpt'], self.las.kpts[index])
+                np.testing.assert_allclose(result['spin_multiplicity'], 2., atol=1e-10)
+                np.testing.assert_allclose(lsi.ham @ result['si'],
+                                           (lsi.ovlp @ result['si']) * result['e_tot_supercell'],
+                                           atol=1e-8)
+                phase = np.exp(-2j * np.pi * result['scaled_k'][0])
+                np.testing.assert_allclose(translation @ result['si'],
+                                           phase * result['si'], atol=1e-8)
+            np.testing.assert_array_equal(lsi.si, before)
+            np.testing.assert_array_equal(lsi.e_tot, energies)
             # Independently chosen phases must produce the covariant T matrix.
             gauged = copy.copy(lsi)
             phases = np.exp(1j * np.array([.4, -.2, .8]))
@@ -184,6 +212,8 @@ class ChargedReferenceTests(unittest.TestCase):
             np.testing.assert_allclose(gauged.get_translation_matrix((1, 0, 0)),
                                        phases.conj()[:, None] * translation * phases[None, :],
                                        atol=1e-8)
+            for original, changed in zip(results, gauged.kernel_kpts()):
+                np.testing.assert_allclose(original['e_tot'], changed['e_tot'], atol=1e-10)
             # A changed spectator is not repaired or silently symmetrized.
             broken = copy.copy(lsi)
             broken.ci = copy.deepcopy(lsi.ci)
@@ -193,12 +223,13 @@ class ChargedReferenceTests(unittest.TestCase):
             other -= c * np.vdot(c, other)
             broken.ci[1][0] = (other / np.linalg.norm(other)).reshape(lsi.ci[1][0].shape)
             with self.assertRaisesRegex(ValueError, 'not closed under translation'):
-                broken.get_translation_matrix((1, 0, 0))
+                broken.kernel_kpts()
+            self.assertIsNone(broken.k_results)
             broken = copy.copy(lsi)
             broken.ham = lsi.ham.copy()
             broken.ham[0, 0] += .1
             with self.assertRaisesRegex(ValueError, 'hamiltonian_error'):
-                broken.get_translation_matrix((1, 0, 0))
+                broken.kernel_kpts()
             with self.assertRaisesRegex(ValueError, 'integer lattice indices'):
                 lsi.get_translation_matrix((.5, 0, 0))
             scaled = self.las.cell.get_scaled_kpts(self.las.kpts) + .1
@@ -224,6 +255,11 @@ class ChargedReferenceTests(unittest.TestCase):
         np.testing.assert_allclose(abs(si), [[1.]])
         for result in lsi.check_translation_symmetry().values():
             np.testing.assert_allclose(result['matrix'], [[1.]], atol=1e-10)
+        results = lsi.kernel_kpts()
+        np.testing.assert_allclose(results[0]['e_tot'], energies, atol=1e-10)
+        # A fresh kernel must discard results made in the previous LAS basis.
+        lsi.kernel()
+        self.assertIsNone(lsi.k_results)
 
     def test_total_spin_with_magnetic_fragments(self):
         source = mcscf.KLASCI(self.las._scf, 2, (1, 1), spin_mult=3, kmesh=(3, 1, 1))
