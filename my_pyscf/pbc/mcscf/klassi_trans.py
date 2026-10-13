@@ -1,4 +1,4 @@
-"""Many-electron translation checks for independently optimized LAS states."""
+"""Many-electron translations and momentum sectors of independent LAS states."""
 
 import numpy as np
 from scipy import linalg
@@ -172,3 +172,81 @@ def check_translation_symmetry(lsi, tol=1e-5, energy_tol=1e-7, orbital_tol=1e-8)
             if error > tol:
                 raise ValueError(f"translation generators {left} and {right} do not commute: {error:.3e}")
     return results
+
+
+def momentum_basis(translations, ovlp, kmesh, scaled_kpts, tol=1e-5):
+    """Return S-orthonormal bases for total many-electron momentum sectors.
+
+    translations[a] acts on product-basis coefficients for translation by
+    lattice vector a. The convention is T_a|K> = exp(-2*pi*i*K[a])|K>,
+    where scaled_kpts are reciprocal-lattice coordinates. Results follow the
+    supplied k-point order, including (nstates, 0) arrays for empty sectors.
+    Arbitrary product-state phases and positive-definite overlaps are allowed.
+    """
+    mesh = np.asarray(kmesh)
+    if (mesh.shape != (3,) or not np.issubdtype(mesh.dtype, np.integer)
+            or np.any(mesh < 1)):
+        raise ValueError("kmesh must contain three positive integers")
+    if not np.isfinite(tol) or tol <= 0 or tol >= .5:
+        raise ValueError("momentum tolerance must be finite and between zero and 0.5")
+    scaled = np.asarray(scaled_kpts)
+    if scaled.shape != (int(np.prod(mesh)), 3) or not np.all(np.isfinite(scaled)):
+        raise ValueError("scaled_kpts must contain one finite momentum per mesh cell")
+    grid = scaled * mesh
+    labels = np.mod(np.rint(grid).astype(int), mesh)
+    if (not np.allclose(grid, np.rint(grid), atol=tol, rtol=0)
+            or len(set(map(tuple, labels))) != len(scaled)):
+        raise ValueError("momenta must cover a complete unshifted mesh without duplicates")
+    ovlp = np.asarray(ovlp)
+    if (ovlp.ndim != 2 or ovlp.shape[0] != ovlp.shape[1] or not len(ovlp)
+            or not np.all(np.isfinite(ovlp))
+            or not np.allclose(ovlp, ovlp.conj().T, atol=1e-10, rtol=0)):
+        raise ValueError("overlap must be finite, square, and Hermitian")
+    values, vectors = linalg.eigh(ovlp)
+    if values[0] <= 1e-10:
+        raise ValueError("overlap must be positive definite for momentum projection")
+    x = (vectors / np.sqrt(values)) @ vectors.conj().T
+    xinv = (vectors * np.sqrt(values)) @ vectors.conj().T
+    translations = np.asarray(translations)
+    if translations.shape != (3, len(ovlp), len(ovlp)) or not np.all(np.isfinite(translations)):
+        raise ValueError("translations must contain three finite square generators")
+    unit = np.eye(len(ovlp))
+    generators = [xinv @ t @ x for t in translations]
+    for a, t in enumerate(generators):
+        if (np.max(abs(t.conj().T @ t - unit)) > tol
+                or np.max(abs(np.linalg.matrix_power(t, int(mesh[a])) - unit)) > tol):
+            raise ValueError("translations must be S-unitary finite-group generators")
+        for other in generators[:a]:
+            if np.max(abs(t @ other - other @ t)) > tol:
+                raise ValueError("translation generators must commute")
+
+    # Character projectors separate K even when energies are degenerate.
+    axis_projectors = []
+    for t, order in zip(generators, mesh):
+        powers = [unit]
+        for _ in range(1, order):
+            powers.append(powers[-1] @ t)
+        axis_projectors.append([
+            sum(np.exp(2j * np.pi * m * r / order) * p
+                for r, p in enumerate(powers)) / order for m in range(order)])
+    bases = []
+    for label, k in zip(labels, scaled):
+        projector = axis_projectors[0][label[0]] @ axis_projectors[1][label[1]]
+        projector = projector @ axis_projectors[2][label[2]]
+        if np.max(abs(projector - projector.conj().T)) > tol:
+            raise ValueError("momentum projector is not Hermitian")
+        weights, vecs = linalg.eigh((projector + projector.conj().T) / 2)
+        if np.max(np.minimum(abs(weights), abs(weights - 1))) > tol:
+            raise ValueError("momentum projector is not idempotent")
+        basis = x @ vecs[:, weights > .5]
+        for a, t in enumerate(generators):
+            white_basis = xinv @ basis
+            residual = t @ white_basis - np.exp(-2j * np.pi * k[a]) * white_basis
+            if residual.size and np.max(abs(residual)) > tol:
+                raise ValueError("momentum basis fails its translation eigenvalue check")
+        bases.append(basis)
+    combined = np.concatenate(bases, axis=1)
+    if (combined.shape != ovlp.shape
+            or np.max(abs(combined.conj().T @ ovlp @ combined - unit)) > tol):
+        raise ValueError("momentum sectors do not form a complete S-orthonormal basis")
+    return bases
