@@ -71,6 +71,17 @@ class MatrixTests(unittest.TestCase):
         self.assertAlmostEqual(overlap[0, 1], .6j)
         np.testing.assert_allclose(ham, 2 * overlap)
 
+    def test_generalized_diagonalization(self):
+        overlap = np.array([[1., .2j], [-.2j, 1.]])
+        ham = np.array([[1., .3j], [-.3j, 2.]])
+        energies, si = klassi.diagonalize(ham, overlap)
+        np.testing.assert_allclose(ham @ si, (overlap @ si) * energies, atol=1e-12)
+        np.testing.assert_allclose(si.conj().T @ overlap @ si, np.eye(2), atol=1e-12)
+        with self.assertRaisesRegex(ValueError, 'positive definite'):
+            klassi.diagonalize(ham, np.ones((2, 2)))
+        with self.assertRaisesRegex(ValueError, 'Hermitian'):
+            klassi.diagonalize(np.array([[1., 1.], [0., 2.]]), np.eye(2))
+
 
 class ChargedReferenceTests(unittest.TestCase):
     @classmethod
@@ -130,6 +141,36 @@ class ChargedReferenceTests(unittest.TestCase):
         with mock.patch.object(self.las, 'max_cycle_macro', 1):
             with self.assertRaisesRegex(RuntimeError, 'did not converge'):
                 klassi.make_charged_states(self.las, 1)
+
+    def test_public_driver(self):
+        for charge in (1, -1):
+            lsi = mcscf.KLASSI(self.las, charge=charge)
+            energies, si = lsi.kernel()
+            self.assertTrue(lsi.converged)
+            self.assertEqual(len(lsi.charged_states), 3)
+            np.testing.assert_array_equal(lsi.ref_cells, [0, 1, 2])
+            np.testing.assert_allclose(lsi.ham @ si,
+                                       (lsi.ovlp @ si) * (energies * 3), atol=1e-10)
+            np.testing.assert_allclose(si.conj().T @ lsi.ovlp @ si, np.eye(3), atol=1e-10)
+            self.assertLessEqual(energies[0], min(s.e_tot.real for s in lsi.charged_states))
+            self.assertIsNone(self.las.ci)
+        with self.assertRaisesRegex(ValueError, 'charge'):
+            mcscf.KLASSI(self.las, charge=0)
+        with self.assertRaisesRegex(TypeError, 'kLASCI or kLASSCF'):
+            mcscf.KLASSI(self.las._scf)
+
+    def test_one_cell_with_core(self):
+        kmf = scf.KRHF(self.las.cell, self.las.cell.make_kpts((1, 1, 1))).density_fit()
+        kmf.exxdiv = None
+        kmf.max_cycle = 0
+        kmf.kernel()
+        source = mcscf.KLASCI(kmf, 1, (0, 0), kmesh=(1, 1, 1))
+        source.mo_coeff = np.asarray(kmf.mo_coeff)
+        lsi = mcscf.KLASSI(source, charge=-1)
+        energies, si = lsi.kernel()
+        self.assertEqual(lsi.charged_states[0].ncore, 1)
+        np.testing.assert_allclose(energies, [lsi.charged_states[0].e_tot], atol=1e-10)
+        np.testing.assert_allclose(abs(si), [[1.]])
 
 
 if __name__ == '__main__':
