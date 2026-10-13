@@ -3,6 +3,9 @@
 import numpy as np
 from scipy import linalg
 
+from mrh.my_pyscf.pbc.util.transym import TranslationSymm
+from mrh.my_pyscf.pbc.util.wannier import get_wannier_orbs
+
 
 def translate_product(ci, nelec, permutation, orbital_phases=None):
     """Translate a fragment-major product, returning (CI, counts, phase).
@@ -85,3 +88,87 @@ def project_translation(ci, nelec_frs, permutation, orbital_phases=None):
     projected_norm = np.einsum('ij,ij->j', cross.conj(), matrix).real
     residuals = np.sqrt(np.maximum(0., 1. - projected_norm / overlap.diagonal().real))
     return {'matrix': matrix, 'overlap': overlap, 'closure_errors': residuals}
+
+
+def orbital_translation(lsi, translation, tol=1e-8):
+    """Return the cell permutation and T|f,p> orbital phases on a Gamma mesh.
+
+    General local orbital mixing and shifted/twisted meshes are not supported
+    in this first implementation. Doubly occupied frozen-core bands contribute
+    unit total translation phase on the supported unshifted complete meshes.
+    """
+    translation = np.asarray(translation)
+    if translation.shape != (3,) or not np.issubdtype(translation.dtype, np.integer):
+        raise ValueError("translation must contain three integer lattice indices")
+    las = lsi._las
+    mesh = np.asarray(las.kmesh)
+    ts = TranslationSymm(las.cell, mesh, kpts=las.kpts)
+    grid = las.cell.get_scaled_kpts(las.kpts) * mesh
+    if (not np.allclose(grid, np.rint(grid), atol=tol, rtol=0)
+            or len(set(map(tuple, np.mod(np.rint(grid).astype(int), mesh)))) != ts.ncell):
+        raise NotImplementedError("LAS translations require a complete unshifted Gamma-centered mesh")
+    permutation = np.array([ts.R_to_i[ts.mod_index(r + translation)] for r in ts.R_indices])
+    source_rows = np.argsort(permutation)
+    active = lsi.mo_coeff[:, :, las.ncore:las.ncore + las.ncas]
+    orbitals = get_wannier_orbs(las._scf, las.kmesh, active)[0]
+    phases = np.empty(ts.ncell, dtype=complex)
+    for source, target in enumerate(permutation):
+        translated = orbitals[source_rows, :, source, :]
+        expected = orbitals[:, :, target, :]
+        overlap = np.vdot(expected, translated)
+        if abs(overlap) < 1e-14:
+            raise ValueError(f"zero translated-orbital overlap for cell {source}")
+        phases[source] = overlap / abs(overlap)
+        error = np.linalg.norm(translated - phases[source] * expected) / np.linalg.norm(expected)
+        if error > tol:
+            raise ValueError(f"translated orbitals on cell {source} require a nonscalar "
+                             f"transformation (relative error {error:.3e})")
+    return permutation, phases
+
+
+def check_translation(lsi, translation, tol=1e-5, energy_tol=1e-7, orbital_tol=1e-8):
+    """Validate one translation and return its matrix and residual diagnostics.
+
+    tol bounds relative state leakage and dimensionless matrix errors;
+    energy_tol bounds max|T^dagger H T - H| in Hartree per supercell.
+    Failures do not alter the independently optimized LAS states or energies.
+    """
+    if not lsi.converged or lsi.ci is None:
+        raise ValueError("run kLASSI before checking translation symmetry")
+    if any(not np.isfinite(t) or t <= 0 for t in (tol, energy_tol, orbital_tol)):
+        raise ValueError("translation tolerances must be finite and positive")
+    permutation, phases = orbital_translation(lsi, translation, tol=orbital_tol)
+    result = project_translation(lsi.ci, lsi.nelec_frs, permutation, phases)
+    if not np.allclose(result['overlap'], lsi.ovlp, atol=1e-10, rtol=1e-10):
+        raise ValueError("stored overlap does not match the current LAS basis")
+    leakage = result['closure_errors'].max()
+    if leakage > tol:
+        ket = int(np.argmax(result['closure_errors']))
+        raise ValueError(f"LAS basis is not closed under translation {tuple(translation)}: "
+                         f"state {ket} has relative leakage {leakage:.3e} > {tol:.3e}")
+    matrix = result['matrix']
+    result['overlap_error'] = float(np.max(abs(matrix.conj().T @ lsi.ovlp @ matrix - lsi.ovlp)))
+    result['hamiltonian_error'] = float(np.max(abs(matrix.conj().T @ lsi.ham @ matrix - lsi.ham)))
+    mesh = np.asarray(lsi._las.kmesh)
+    order = int(np.lcm.reduce(mesh // np.gcd(mesh, np.asarray(translation))))
+    result['group_error'] = float(np.max(abs(np.linalg.matrix_power(matrix, order)
+                                             - np.eye(len(matrix)))))
+    for key, threshold in (('overlap_error', tol), ('group_error', tol),
+                           ('hamiltonian_error', energy_tol)):
+        if result[key] > threshold:
+            raise ValueError(f"translation {tuple(translation)} fails {key}: "
+                             f"{result[key]:.3e} > {threshold:.3e}")
+    return result
+
+
+def check_translation_symmetry(lsi, tol=1e-5, energy_tol=1e-7, orbital_tol=1e-8):
+    """Check all three primitive translations, including their commutation."""
+    generators = [tuple(row) for row in np.eye(3, dtype=int)]
+    results = {t: check_translation(lsi, t, tol, energy_tol, orbital_tol) for t in generators}
+    for i, left in enumerate(generators):
+        for right in generators[i+1:]:
+            a, b = results[left]['matrix'], results[right]['matrix']
+            error = float(np.max(abs(a @ b - b @ a)))
+            if error > tol:
+                raise ValueError(f"translation generators {left} and {right} do not commute: {error:.3e}")
+    return results

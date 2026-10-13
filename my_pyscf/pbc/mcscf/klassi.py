@@ -14,6 +14,7 @@ from pyscf import lib
 from pyscf.fci import addons, cistring
 
 from mrh.my_pyscf.pbc.mcscf.klasci import PBCLASCINoSymm, kLASCI
+from mrh.my_pyscf.pbc.mcscf import klassi_trans
 
 
 def _apply_local(ci, norb, nelec, spin, create, orbital):
@@ -306,6 +307,27 @@ class KLASSI(lib.StreamObject):
         weights = abs(self.si) ** 2 * self.ovlp.diagonal().real[:, None]
         s2 = product_s2 @ weights / weights.sum(axis=0)
         return s2, np.sqrt(1 + 4 * s2)
+
+    def get_translation_matrix(self, translation, tol=1e-5, energy_tol=1e-7,
+                               orbital_tol=1e-8):
+        """Return a validated many-electron translation in lattice units.
+
+        Example: get_translation_matrix((1, 0, 0)) translates one cell along
+        the first lattice vector. This checks basis closure, H/S invariance,
+        and the finite translation-group cycle. It does not assign momenta.
+        """
+        return klassi_trans.check_translation(
+            self, translation, tol, energy_tol, orbital_tol)['matrix']
+
+    def check_translation_symmetry(self, tol=1e-5, energy_tol=1e-7, orbital_tol=1e-8):
+        """Return generator matrices and errors after checking all translations.
+
+        Each lattice-generator key maps to matrix, overlap, closure_errors,
+        overlap_error, hamiltonian_error, and group_error. energy_tol is in
+        Hartree per supercell; the other error thresholds are dimensionless.
+        The independent references and state-interaction results are unchanged.
+        """
+        return klassi_trans.check_translation_symmetry(self, tol, energy_tol, orbital_tol)
 
     def _finalize(self):
         log = lib.logger.new_logger(self)
