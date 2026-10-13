@@ -9,10 +9,11 @@ the product states into the full-supercell determinant space.
 from itertools import product
 
 import numpy as np
+from scipy import linalg
 from pyscf import lib
 from pyscf.fci import addons, cistring
 
-from mrh.my_pyscf.pbc.mcscf.klasci import kLASCI
+from mrh.my_pyscf.pbc.mcscf.klasci import PBCLASCINoSymm, kLASCI
 
 
 def _apply_local(ci, norb, nelec, spin, create, orbital):
@@ -184,3 +185,106 @@ def build_hamiltonian(h1, h2, ci, ncas_sub, nelec_frs, ecore=0):
                     (p, sigma, True, 0), (r, tau, True, 2),
                     (s, tau, False, 3), (q, sigma, False, 1)])
     return ham + ecore * ovlp, ovlp
+
+
+def diagonalize(ham, ovlp):
+    """Solve H C = S C E, rejecting invalid or linearly dependent bases."""
+    ham, ovlp = np.asarray(ham), np.asarray(ovlp)
+    if (ham.ndim != 2 or ham.shape[0] != ham.shape[1]
+            or ovlp.shape != ham.shape or not ham.size):
+        raise ValueError("H and S must be nonempty square matrices of equal shape")
+    for name, matrix in (('Hamiltonian', ham), ('overlap', ovlp)):
+        if (not np.all(np.isfinite(matrix))
+                or not np.allclose(matrix, matrix.conj().T, atol=1e-9, rtol=1e-10)):
+            raise ValueError(f"{name} must be finite and Hermitian")
+    if np.min(linalg.eigvalsh(ovlp)) <= 1e-10:
+        raise ValueError("LAS overlap is not positive definite; remove dependent states")
+    return linalg.eigh(ham, ovlp)
+
+
+class KLASSI(lib.StreamObject):
+    """Charged periodic LAS state interaction in common, fixed orbitals.
+
+    Args:
+        las: Neutral single-root kLASCI or kLASSCF object defining orbitals,
+            fragment sectors, and convergence settings for the charged solves.
+        charge: +1 (one hole) or -1 (one added electron) across the full mesh.
+        charged_spin: N_alpha - N_beta on the charged fragment; defaults as
+            in KLASCI. This is not the total supercell spin projection.
+        charged_spin_mult: Charged-fragment 2S+1, as in KLASCI.
+
+    kernel() independently optimizes one charged LAS product for every cell,
+    then diagonalizes their full state-interaction matrix. No translation
+    adaptation or momentum labels are used. One local root per fragment and
+    one charged channel are supported initially.
+
+    Results:
+        charged_states: Separate converged KLASCI objects in reference-cell order.
+        ci, nelec_frs: Fragment CI vectors and counts, indexed [fragment][state].
+        ham, ovlp: Full-supercell Hamiltonian and overlap in the product basis.
+        e_tot: Sorted state-interaction energies per primitive cell.
+        e_tot_supercell: The corresponding full-supercell energies.
+        si: Eigenvectors in columns; si.conj().T @ ovlp @ si is the identity.
+
+    The contraction backend avoids full-supercell CI vectors but visits all
+    two-electron fragment blocks. Large meshes will need a more efficient
+    screened backend; no translation reduction is performed here.
+    """
+
+    _keys = {'charge', 'charged_spin', 'charged_spin_mult', 'mo_coeff',
+             'ncas_sub', 'nkpts', 'ref_cells', 'charged_states', 'ci',
+             'nelec_frs', 'ham', 'ovlp', 'e_tot', 'e_tot_supercell', 'si',
+             'converged'}
+
+    def __init__(self, las, charge=1, charged_spin=None, charged_spin_mult=None):
+        if not isinstance(las, PBCLASCINoSymm):
+            raise TypeError("KLASSI requires a neutral kLASCI or kLASSCF object")
+        if not isinstance(charge, (int, np.integer)) or charge not in (-1, 1):
+            raise ValueError("charged kLASSI requires charge +1 or -1")
+        self._las = las
+        self.charge = int(charge)
+        self.charged_spin = charged_spin
+        self.charged_spin_mult = charged_spin_mult
+        self.verbose, self.stdout, self.max_memory = las.verbose, las.stdout, las.max_memory
+        self.mo_coeff = np.array(las.mo_coeff, copy=True)
+        self.ncas_sub = las.ncas_sub.copy()
+        self.nkpts = las.nkpts
+        self.ref_cells = np.arange(las.nfrags)
+        self.charged_states = []
+        self.ci = self.nelec_frs = None
+        self.ham = self.ovlp = self.si = None
+        self.e_tot = self.e_tot_supercell = None
+        self.converged = False
+
+    def kernel(self, mo_coeff=None):
+        """Return (energies per cell, SI coefficients) for one charge sector."""
+        self.converged = False
+        self.charged_states = []
+        self.ci = self.nelec_frs = None
+        self.ham = self.ovlp = self.si = None
+        self.e_tot = self.e_tot_supercell = None
+        if mo_coeff is not None:
+            self.mo_coeff = np.array(mo_coeff, copy=True)
+        self.charged_states = make_charged_states(
+            self._las, self.charge, mo_coeff=self.mo_coeff,
+            charged_spin=self.charged_spin, charged_spin_mult=self.charged_spin_mult)
+        self.ci = [[state.ci[f][0] for state in self.charged_states]
+                   for f in range(len(self.ncas_sub))]
+        self.nelec_frs = np.stack(
+            [state.get_nelec_frs()[:, 0] for state in self.charged_states], axis=1)
+        ecore, h1, h2 = ham_2q(self._las, self.mo_coeff)
+        self.ham, self.ovlp = build_hamiltonian(
+            h1, h2, self.ci, self.ncas_sub, self.nelec_frs, ecore)
+        reference_energies = np.asarray([s.e_tot for s in self.charged_states]) * self.nkpts
+        if not np.allclose(np.diag(self.ham), reference_energies, atol=1e-8, rtol=1e-10):
+            raise RuntimeError("LASSI diagonal does not reproduce the charged LAS energies")
+        self.e_tot_supercell, self.si = diagonalize(self.ham, self.ovlp)
+        self.e_tot = self.e_tot_supercell / self.nkpts
+        self.converged = True
+        for root, energy in enumerate(self.e_tot):
+            lib.logger.info(self, "k-LASSI charge %+d root %d energy/cell = %.12f",
+                            self.charge, root, energy)
+        return self.e_tot, self.si
+
+
+kLASSI = KLASSI
