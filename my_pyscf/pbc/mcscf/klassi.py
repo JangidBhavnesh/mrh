@@ -225,6 +225,8 @@ class KLASSI(lib.StreamObject):
         e_tot: Sorted state-interaction energies per primitive cell.
         e_tot_supercell: The corresponding full-supercell energies.
         si: Eigenvectors in columns; si.conj().T @ ovlp @ si is the identity.
+        s2, spin_multiplicity: Root <S^2> and sqrt(1 + 4<S^2>). The latter
+            is an effective 2S+1 for states that are not eigenstates of S^2.
 
     The contraction backend avoids full-supercell CI vectors but visits all
     two-electron fragment blocks. Large meshes will need a more efficient
@@ -234,7 +236,7 @@ class KLASSI(lib.StreamObject):
     _keys = {'charge', 'charged_spin', 'charged_spin_mult', 'mo_coeff',
              'ncas_sub', 'nkpts', 'ref_cells', 'charged_states', 'ci',
              'nelec_frs', 'ham', 'ovlp', 'e_tot', 'e_tot_supercell', 'si',
-             'converged'}
+             's2', 'spin_multiplicity', 'converged'}
 
     def __init__(self, las, charge=1, charged_spin=None, charged_spin_mult=None):
         if not isinstance(las, PBCLASCINoSymm):
@@ -254,6 +256,7 @@ class KLASSI(lib.StreamObject):
         self.ci = self.nelec_frs = None
         self.ham = self.ovlp = self.si = None
         self.e_tot = self.e_tot_supercell = None
+        self.s2 = self.spin_multiplicity = None
         self.converged = False
 
     def kernel(self, mo_coeff=None):
@@ -263,6 +266,7 @@ class KLASSI(lib.StreamObject):
         self.ci = self.nelec_frs = None
         self.ham = self.ovlp = self.si = None
         self.e_tot = self.e_tot_supercell = None
+        self.s2 = self.spin_multiplicity = None
         if mo_coeff is not None:
             self.mo_coeff = np.array(mo_coeff, copy=True)
         self.charged_states = make_charged_states(
@@ -280,11 +284,42 @@ class KLASSI(lib.StreamObject):
             raise RuntimeError("LASSI diagonal does not reproduce the charged LAS energies")
         self.e_tot_supercell, self.si = diagonalize(self.ham, self.ovlp)
         self.e_tot = self.e_tot_supercell / self.nkpts
+        self.s2, self.spin_multiplicity = self.spin_square()
         self.converged = True
-        for root, energy in enumerate(self.e_tot):
-            lib.logger.info(self, "k-LASSI charge %+d root %d energy/cell = %.12f",
-                            self.charge, root, energy)
+        self._finalize()
         return self.e_tot, self.si
+
+    def spin_square(self):
+        """Return total <S^2> and effective multiplicity for each SI root.
+
+        S^2 preserves every fragment's electron count, so its matrix is
+        diagonal in this one-charged-state-per-cell basis. Each product has
+        <S^2> = sum_f S_f(S_f+1) + 2 sum_{f<g} M_f M_g.
+        """
+        if self.si is None:
+            raise ValueError("run kLASSI before evaluating the root spins")
+        smults = np.array([[box.fcisolvers[0].smult for box in state.fciboxes]
+                           for state in self.charged_states])
+        ms = (self.nelec_frs[:, :, 0] - self.nelec_frs[:, :, 1]).T / 2
+        product_s2 = ((smults ** 2 - 1) / 4).sum(axis=1)
+        product_s2 += ms.sum(axis=1) ** 2 - (ms ** 2).sum(axis=1)
+        weights = abs(self.si) ** 2 * self.ovlp.diagonal().real[:, None]
+        s2 = product_s2 @ weights / weights.sum(axis=0)
+        return s2, np.sqrt(1 + 4 * s2)
+
+    def _finalize(self):
+        log = lib.logger.new_logger(self)
+        # Use actual supercell counts: positive charge removes an electron.
+        nelec = int(self.nelec_frs[:, 0].sum())
+        active_space = f"({nelec}, {int(self.ncas_sub.sum())})"
+        log.info("\nk-LASSI charge %+d", self.charge)
+        log.info("%5s  %23s  %22s  %12s", "State", "Total Active Space (e,o)",
+                 "Energies (Ha/cell)", "Spin (2S+1)")
+        for root, energy in enumerate(self.e_tot):
+            log.info("%5d  %23s  %22.12f  %12.6f", root, active_space,
+                     energy, self.spin_multiplicity[root])
+        log.info("Spin (2S+1) is inferred from <S^2>; noninteger values indicate spin mixing.")
+        return self
 
 
 kLASSI = KLASSI
