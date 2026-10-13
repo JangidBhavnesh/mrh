@@ -1,12 +1,16 @@
 """Check LAS translations, fermion signs, and closure of the model space."""
 
 import unittest
+from types import SimpleNamespace
 
 import numpy as np
 from pyscf.fci import cistring
+from pyscf.pbc import gto
 
 from mrh.my_pyscf.lassi.op_o0 import _ci_outer_product
-from mrh.my_pyscf.pbc.mcscf.klassi_trans import translate_product, project_translation
+from mrh.my_pyscf.pbc.mcscf.klassi_trans import (
+    translate_product, project_translation, check_translation_symmetry,
+)
 
 
 def full_product(ci, norb, nelec):
@@ -119,6 +123,28 @@ class TranslationProjectionTests(unittest.TestCase):
         self.assertAlmostEqual(result['overlap'][0, 1], .6j)
         with self.assertRaisesRegex(ValueError, 'positive definite'):
             project_translation([[ci[0][0], ci[0][0]]], counts, [0])
+
+    def test_two_dimensional_generator_group(self):
+        cell = gto.Cell()
+        cell.a = np.eye(3) * 4
+        cell.atom, cell.basis, cell.verbose = 'He 0 0 0', 'sto-3g', 0
+        cell.build()
+        mesh = (2, 2, 1)
+        kpts = cell.make_kpts(mesh, wrap_around=True)
+        kmf = SimpleNamespace(cell=cell, kpts=kpts, get_ovlp=lambda **kw: np.ones((4, 1, 1)))
+        las = SimpleNamespace(cell=cell, kmesh=mesh, kpts=kpts, _scf=kmf, ncore=0, ncas=1)
+        nelec = np.zeros((4, 4, 2), dtype=int)
+        nelec[np.arange(4), np.arange(4), 0] = 1
+        lsi = SimpleNamespace(_las=las, converged=True, mo_coeff=np.ones((4, 1, 1)),
+                              ci=[[np.ones((1, 1)) for _ in range(4)] for _ in range(4)],
+                              nelec_frs=nelec, ovlp=np.eye(4), ham=np.eye(4))
+        checks = check_translation_symmetry(lsi)
+        tx, ty = checks[(1, 0, 0)]['matrix'], checks[(0, 1, 0)]['matrix']
+        np.testing.assert_allclose(tx @ ty, ty @ tx, atol=1e-12)
+        np.testing.assert_allclose(tx @ tx, np.eye(4), atol=1e-12)
+        np.testing.assert_allclose(ty @ ty, np.eye(4), atol=1e-12)
+        np.testing.assert_array_equal(np.argmax(tx, axis=0), [2, 3, 0, 1])
+        np.testing.assert_array_equal(np.argmax(ty, axis=0), [1, 0, 3, 2])
 
 
 if __name__ == '__main__':

@@ -2,6 +2,7 @@
 
 import unittest
 import io
+import copy
 from unittest import mock
 
 import numpy as np
@@ -166,6 +167,44 @@ class ChargedReferenceTests(unittest.TestCase):
             self.assertIn('Spin (2S+1)', table)
             self.assertIn(f'({6 - charge}, 6)', table)
             self.assertIn(f'{energies[0]:.12f}', table)
+            before = lsi.si.copy()
+            checks = lsi.check_translation_symmetry()
+            translation = lsi.get_translation_matrix((1, 0, 0))
+            np.testing.assert_allclose(translation, checks[(1, 0, 0)]['matrix'], atol=1e-12)
+            np.testing.assert_allclose(np.linalg.matrix_power(translation, 3), np.eye(3), atol=1e-8)
+            np.testing.assert_allclose(translation.conj().T @ lsi.ham @ translation,
+                                       lsi.ham, atol=1e-8)
+            np.testing.assert_array_equal(lsi.si, before)
+            # Independently chosen phases must produce the covariant T matrix.
+            gauged = copy.copy(lsi)
+            phases = np.exp(1j * np.array([.4, -.2, .8]))
+            gauged.ci = copy.deepcopy(lsi.ci)
+            gauged.ci[0] = [c * phase for c, phase in zip(gauged.ci[0], phases)]
+            gauged.ham = phases.conj()[:, None] * lsi.ham * phases[None, :]
+            np.testing.assert_allclose(gauged.get_translation_matrix((1, 0, 0)),
+                                       phases.conj()[:, None] * translation * phases[None, :],
+                                       atol=1e-8)
+            # A changed spectator is not repaired or silently symmetrized.
+            broken = copy.copy(lsi)
+            broken.ci = copy.deepcopy(lsi.ci)
+            c = broken.ci[1][0].ravel()
+            other = np.zeros_like(c)
+            other[np.argmin(abs(c))] = 1
+            other -= c * np.vdot(c, other)
+            broken.ci[1][0] = (other / np.linalg.norm(other)).reshape(lsi.ci[1][0].shape)
+            with self.assertRaisesRegex(ValueError, 'not closed under translation'):
+                broken.get_translation_matrix((1, 0, 0))
+            broken = copy.copy(lsi)
+            broken.ham = lsi.ham.copy()
+            broken.ham[0, 0] += .1
+            with self.assertRaisesRegex(ValueError, 'hamiltonian_error'):
+                broken.get_translation_matrix((1, 0, 0))
+            with self.assertRaisesRegex(ValueError, 'integer lattice indices'):
+                lsi.get_translation_matrix((.5, 0, 0))
+            scaled = self.las.cell.get_scaled_kpts(self.las.kpts) + .1
+            with mock.patch.object(self.las.cell, 'get_scaled_kpts', return_value=scaled):
+                with self.assertRaisesRegex(NotImplementedError, 'Gamma-centered'):
+                    lsi.get_translation_matrix((1, 0, 0))
         with self.assertRaisesRegex(ValueError, 'charge'):
             mcscf.KLASSI(self.las, charge=0)
         with self.assertRaisesRegex(TypeError, 'kLASCI or kLASSCF'):
@@ -183,6 +222,8 @@ class ChargedReferenceTests(unittest.TestCase):
         self.assertEqual(lsi.charged_states[0].ncore, 1)
         np.testing.assert_allclose(energies, [lsi.charged_states[0].e_tot], atol=1e-10)
         np.testing.assert_allclose(abs(si), [[1.]])
+        for result in lsi.check_translation_symmetry().values():
+            np.testing.assert_allclose(result['matrix'], [[1.]], atol=1e-10)
 
     def test_total_spin_with_magnetic_fragments(self):
         source = mcscf.KLASCI(self.las._scf, 2, (1, 1), spin_mult=3, kmesh=(3, 1, 1))
