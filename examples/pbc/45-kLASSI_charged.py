@@ -51,6 +51,11 @@ hole = mcscf.KLASSI(neutral_ci, charge=+1)
 particle = mcscf.KLASSI(neutral_ci, charge=-1)
 for lsi in (hole, particle):
     lsi.kernel()
+    # Check that the independent references form a translation-closed basis.
+    checks = lsi.check_translation_symmetry()
+    print('One-cell translation matrix along the first lattice vector:')
+    print(checks[(1, 0, 0)]['matrix'])
+    print('Relative translation leakage:', checks[(1, 0, 0)]['closure_errors'])
     print(f'Charge {lsi.charge:+d}: independent LAS energies/cell (Ha)')
     print([state.e_tot.real for state in lsi.charged_states])
     print('LASSI energies/cell (Ha):', lsi.e_tot)
