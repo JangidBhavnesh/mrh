@@ -6,8 +6,13 @@ roots. All calculations use the same geometry, orbitals, and k-mesh.
 The bands use electron-removal (-IP) and electron-addition (-EA) energies.
 The gap is IP - EA, not an optical excitation energy. Increase kmesh[0] for
 denser sampling along this one-dimensional chain; full LAS matrices are built.
+PNG and PDF plots are saved in the working directory, with the valence maximum
+at zero. Markers are computed mesh points; connecting lines only guide the eye.
 """
 
+from pathlib import Path
+
+import matplotlib.pyplot as plt
 import numpy as np
 from pyscf import lib
 from pyscf.data import nist
@@ -103,3 +108,36 @@ print(f'E(N+1) = {e_np1:.12f}')
 print('\nEnergy differences against the neutral LAS reference:')
 for label, energy in (('IP', ip), ('EA', ea), ('Gap', gap)):
     print(f'{label:3s} = {energy:16.12f} Ha = {energy * nist.HARTREE2EV:12.6f} eV')
+
+# Sort physical band momenta along the chain, wrapping into [-1/2, 1/2).
+kx = (scaled_kpts[:, 0] + .5) % 1 - .5
+order = np.argsort(kx)
+vbm = valence.max()
+valence_ev = (valence - vbm) * nist.HARTREE2EV
+conduction_ev = (conduction - vbm) * nist.HARTREE2EV
+gap_ev = gap * nist.HARTREE2EV
+
+fig, ax = plt.subplots(figsize=(7, 4.8), constrained_layout=True)
+ax.plot(kx[order], valence_ev[order], 'o-', color='tab:blue',
+        label='Electron removal (valence)')
+ax.plot(kx[order], conduction_ev[order], 's-', color='tab:orange',
+        label='Electron addition (conduction)')
+ax.axhline(0, color='0.6', linewidth=.8, linestyle=':')
+ax.axhline(gap_ev, color='0.6', linewidth=.8, linestyle=':')
+ax.text(.5, gap_ev / 2, f'Finite-mesh gap: {gap_ev:.4f} eV',
+        transform=ax.get_yaxis_transform(), ha='center', va='center')
+ax.set_xticks(kx[order], [r'$\Gamma$' if abs(k) < 1e-10 else f'{k:.3f}'
+                          for k in kx[order]])
+ax.set_xlabel(r'Crystal momentum $k_x a / (2\pi)$')
+ax.set_ylabel('Energy relative to valence maximum (eV)')
+ax.set_title(r'Charged kLASSI bands: periodic H$_2$')
+ax.legend(loc='upper center')
+ax.margins(x=.08, y=.2)
+ax.grid(axis='x', alpha=.2)
+
+# Save both a preview and a vector figure without opening a GUI window.
+for suffix in ('.png', '.pdf'):
+    output = Path(Path(__file__).stem + suffix)
+    fig.savefig(output, dpi=180)
+    print('Saved band structure:', output.resolve())
+plt.close(fig)
