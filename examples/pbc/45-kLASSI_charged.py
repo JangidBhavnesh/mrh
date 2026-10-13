@@ -1,9 +1,9 @@
 #!/usr/bin/env python
-"""Interact independently optimized charged LAS states in kLASSCF orbitals.
+"""Resolve charged kLASSI states into total-momentum blocks in kLASSCF orbitals.
 
 Each reference cell gets a separate charged LASCI calculation. The resulting
-states are coupled directly; no translation adaptation or momentum assignment
-is performed in this example.
+states are coupled in the Wannier product basis, then adapted to translations.
+The momentum blocks must reproduce the full state-interaction spectrum.
 """
 
 import numpy as np
@@ -51,16 +51,22 @@ hole = mcscf.KLASSI(neutral_ci, charge=+1)
 particle = mcscf.KLASSI(neutral_ci, charge=-1)
 for lsi in (hole, particle):
     lsi.kernel()
-    # Check that the independent references form a translation-closed basis.
-    checks = lsi.check_translation_symmetry()
-    print('One-cell translation matrix along the first lattice vector:')
-    print(checks[(1, 0, 0)]['matrix'])
-    print('Relative translation leakage:', checks[(1, 0, 0)]['closure_errors'])
     print(f'Charge {lsi.charge:+d}: independent LAS energies/cell (Ha)')
     print([state.e_tot.real for state in lsi.charged_states])
     print('LASSI energies/cell (Ha):', lsi.e_tot)
     print('SI coefficients (rows = charged cells, columns = roots):')
     print(lsi.si)
+
+    # Check translations, form U_K, and solve H_K C_K = S_K C_K E_K.
+    # K labels total many-electron momentum, with T_a = exp(-i K.a).
+    results = lsi.kernel_kpts()
+    block_energies = np.sort(np.concatenate([r['e_tot'] for r in results]))
+    np.testing.assert_allclose(block_energies, lsi.e_tot, atol=1e-8, rtol=0)
+    print('Maximum block/full energy difference (Ha/cell):',
+          np.max(abs(block_energies - lsi.e_tot)))
+    for result in results:
+        print(f"K index {result['target_k']}: H_K (Ha/supercell)")
+        print(result['ham'])
 
 # Full-mesh energy differences against the neutral LAS reference.
 ip = len(kpts) * (hole.e_tot[0] - neutral_ci.e_tot.real)
