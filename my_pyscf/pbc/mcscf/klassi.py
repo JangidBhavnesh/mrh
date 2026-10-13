@@ -203,6 +203,43 @@ def diagonalize(ham, ovlp):
     return linalg.eigh(ham, ovlp)
 
 
+def diagonalize_momentum(ham, ovlp, translations, kmesh, scaled_kpts,
+                         tol=1e-5, energy_tol=1e-7):
+    """Solve H_K C_K = S_K C_K E_K in every total-momentum sector.
+
+    Each returned dict contains target_k (input k-point index), scaled_k,
+    basis U_K, ham = U_K^dagger H U_K, ovlp = U_K^dagger S U_K,
+    e_tot_supercell, and si (eigenvectors in the original product basis).
+    Empty sectors are retained. energy_tol is absolute Ha per supercell.
+    Off-block couplings and the combined spectrum are checked against H;
+    a nonsymmetric Hamiltonian is never silently averaged or truncated.
+    """
+    if not np.isfinite(energy_tol) or energy_tol <= 0:
+        raise ValueError("energy_tol must be finite and positive")
+    full_energies, _ = diagonalize(ham, ovlp)
+    ham, ovlp = np.asarray(ham), np.asarray(ovlp)
+    bases = klassi_trans.momentum_basis(translations, ovlp, kmesh, scaled_kpts, tol)
+    results = []
+    for target_k, (k, basis) in enumerate(zip(scaled_kpts, bases)):
+        hk = basis.conj().T @ ham @ basis
+        sk = basis.conj().T @ ovlp @ basis
+        if basis.shape[1]:
+            energies, vectors = diagonalize(hk, sk)
+        else:
+            energies, vectors = np.empty(0), np.empty((0, 0), dtype=complex)
+        results.append(dict(target_k=target_k, scaled_k=np.array(k, copy=True),
+                            basis=basis, ham=hk, ovlp=sk,
+                            e_tot_supercell=energies, si=basis @ vectors))
+    combined = np.concatenate(bases, axis=1)
+    blocked = linalg.block_diag(*(r['ham'] for r in results))
+    if np.max(abs(combined.conj().T @ ham @ combined - blocked)) > energy_tol:
+        raise ValueError("Hamiltonian couples distinct momentum sectors above energy_tol")
+    energies = np.sort(np.concatenate([r['e_tot_supercell'] for r in results]))
+    if not np.allclose(energies, full_energies, atol=energy_tol, rtol=0):
+        raise ValueError("momentum-block spectrum does not reproduce the full LASSI spectrum")
+    return results
+
+
 class KLASSI(lib.StreamObject):
     """Charged periodic LAS state interaction in common, fixed orbitals.
 
