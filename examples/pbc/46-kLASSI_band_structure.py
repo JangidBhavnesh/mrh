@@ -10,13 +10,9 @@ import numpy as np
 from pyscf import lib
 from pyscf.data import nist
 from pyscf.pbc import gto, scf
-from pyscf.lib import misc
 
 from mrh.my_pyscf.pbc import mcscf
 from mrh.my_pyscf.pbc.mcscf import avas
-
-# Disable asynchronous integral prefetch.
-misc.ASYNC_IO = False
 
 # Build the neutral periodic H2 reference.
 cell = gto.Cell()
