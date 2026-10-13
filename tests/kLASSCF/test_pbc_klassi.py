@@ -1,13 +1,14 @@
 """Complex charged LAS matrix elements and independent-fragment references."""
 
 import unittest
+import io
 from unittest import mock
 
 import numpy as np
 from pyscf.pbc import gto, scf
 
 from mrh.my_pyscf.lassi.op_o0 import _ci_outer_product
-from mrh.my_pyscf.pbc.fci import direct_spin1_cplx
+from mrh.my_pyscf.pbc.fci import direct_spin1_cplx, spin_op
 from mrh.my_pyscf.pbc.mcscf.klassi import build_hamiltonian
 from mrh.my_pyscf.pbc import mcscf
 from mrh.my_pyscf.pbc.mcscf import klassi
@@ -154,6 +155,17 @@ class ChargedReferenceTests(unittest.TestCase):
             np.testing.assert_allclose(si.conj().T @ lsi.ovlp @ si, np.eye(3), atol=1e-10)
             self.assertLessEqual(energies[0], min(s.e_tot.real for s in lsi.charged_states))
             self.assertIsNone(self.las.ci)
+            np.testing.assert_allclose(lsi.s2, .75, atol=1e-10)
+            np.testing.assert_allclose(lsi.spin_multiplicity, 2., atol=1e-10)
+            with mock.patch.object(lsi, 'stdout', io.StringIO()) as output, \
+                    mock.patch.object(lsi, 'verbose', 4):
+                lsi._finalize()
+                table = output.getvalue()
+            self.assertIn('Energies (Ha/cell)', table)
+            self.assertIn('Total Active Space (e,o)', table)
+            self.assertIn('Spin (2S+1)', table)
+            self.assertIn(f'({6 - charge}, 6)', table)
+            self.assertIn(f'{energies[0]:.12f}', table)
         with self.assertRaisesRegex(ValueError, 'charge'):
             mcscf.KLASSI(self.las, charge=0)
         with self.assertRaisesRegex(TypeError, 'kLASCI or kLASSCF'):
@@ -171,6 +183,21 @@ class ChargedReferenceTests(unittest.TestCase):
         self.assertEqual(lsi.charged_states[0].ncore, 1)
         np.testing.assert_allclose(energies, [lsi.charged_states[0].e_tot], atol=1e-10)
         np.testing.assert_allclose(abs(si), [[1.]])
+
+    def test_total_spin_with_magnetic_fragments(self):
+        source = mcscf.KLASCI(self.las._scf, 2, (1, 1), spin_mult=3, kmesh=(3, 1, 1))
+        source.mo_coeff = self.las.mo_coeff.copy()
+        lsi = mcscf.KLASSI(source, charge=1)
+        lsi.kernel()
+        vectors = explicit_products(lsi.ci, lsi.ncas_sub, lsi.nelec_frs)
+        nelec = tuple(lsi.nelec_frs[:, 0].sum(axis=0))
+        for root in range(len(lsi.e_tot)):
+            full_ci = sum(c * v for c, v in zip(lsi.si[:, root], vectors))
+            s2, multiplicity = spin_op.spin_square0(full_ci, 6, nelec)
+            self.assertAlmostEqual(lsi.s2[root], s2, places=10)
+            self.assertAlmostEqual(lsi.spin_multiplicity[root], multiplicity, places=10)
+        # The full product's spin is not just the charged fragment's doublet.
+        self.assertTrue(np.all(lsi.spin_multiplicity > 2))
 
 
 if __name__ == '__main__':
