@@ -1,9 +1,11 @@
 #!/usr/bin/env python
-"""Compute IP, EA, and the finite-mesh charge gap in neutral kLASSCF orbitals.
+"""Plot charged kLASSI bands and compute the finite-mesh IP, EA, and gap.
 
 The neutral energy is from LASCI; N-1 and N+1 energies are the lowest LASSI
 roots. All calculations use the same geometry, orbitals, and k-mesh.
-The gap is IP - EA, not an optical excitation energy.
+The bands use electron-removal (-IP) and electron-addition (-EA) energies.
+The gap is IP - EA, not an optical excitation energy. Increase kmesh[0] for
+denser sampling along this one-dimensional chain; full LAS matrices are built.
 """
 
 import numpy as np
@@ -13,6 +15,10 @@ from pyscf.pbc import gto, scf
 
 from mrh.my_pyscf.pbc import mcscf
 from mrh.my_pyscf.pbc.mcscf import avas
+from mrh.my_pyscf.pbc.mcscf.kcasci import compute_band_energies
+from mrh.my_pyscf.pbc.mcscf.klassi_trans import (
+    orbital_translation, project_translation, momentum_basis,
+)
 
 # Build the neutral periodic H2 reference.
 cell = gto.Cell()
@@ -51,6 +57,34 @@ hole = mcscf.KLASSI(neutral_ci, charge=+1)
 hole.kernel()
 particle = mcscf.KLASSI(neutral_ci, charge=-1)
 particle.kernel()
+hole_results = hole.kernel_kpts()
+particle_results = particle.kernel_kpts()
+
+# Determine K0 from the neutral product, including fermion and orbital phases.
+neutral_translations = []
+for direction in np.eye(3, dtype=int):
+    permutation, phases = orbital_translation(hole, direction)
+    translated = project_translation(neutral_ci.ci, neutral_ci.get_nelec_frs(),
+                                     permutation, phases)
+    if np.max(translated['closure_errors']) > 1e-5:
+        raise RuntimeError('Neutral LAS reference is not a translation eigenstate')
+    neutral_translations.append(translated['matrix'])
+scaled_kpts = cell.get_scaled_kpts(kpts)
+neutral_bases = momentum_basis(neutral_translations, translated['overlap'],
+                               kmesh, scaled_kpts)
+reference_k = next(i for i, basis in enumerate(neutral_bases) if basis.shape[1])
+print('Neutral total momentum K0 (scaled):', scaled_kpts[reference_k])
+
+# k_removal = K0 - K(N-1); k_addition = K(N+1) - K0.
+hole_bands = compute_band_energies(hole_results, neutral_ci.e_tot.real, root=0,
+                                  kpts=kpts, cell=cell, reference_target_k=reference_k)
+particle_bands = compute_band_energies(particle_results, neutral_ci.e_tot.real, root=0,
+                                      kpts=kpts, cell=cell, reference_target_k=reference_k)
+valence = np.empty(len(kpts))
+conduction = np.empty(len(kpts))
+for bands, energies in ((hole_bands, valence), (particle_bands, conduction)):
+    for band in bands:
+        energies[band['momentum_index']] = band['energy'].real
 
 # Convert per-cell energies to full-mesh energies before taking differences.
 nkpts = len(kpts)
@@ -60,6 +94,7 @@ e_np1 = nkpts * particle.e_tot[0]
 ip = e_nm1 - e_n
 ea = e_n - e_np1
 gap = ip - ea  # E(N-1) + E(N+1) - 2 E(N).
+np.testing.assert_allclose(conduction.min() - valence.max(), gap, atol=1e-8, rtol=0)
 
 print('\nFull-mesh energies (Ha):')
 print(f'E(N)   = {e_n:.12f}')
