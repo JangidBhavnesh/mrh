@@ -6,7 +6,7 @@ import numpy as np
 from pyscf.fci import cistring
 
 from mrh.my_pyscf.lassi.op_o0 import _ci_outer_product
-from mrh.my_pyscf.pbc.mcscf.klassi_trans import translate_product
+from mrh.my_pyscf.pbc.mcscf.klassi_trans import translate_product, project_translation
 
 
 def full_product(ci, norb, nelec):
@@ -75,6 +75,50 @@ class ProductTranslationTests(unittest.TestCase):
                 translate_product(ci, nelec, bad)
         with self.assertRaisesRegex(ValueError, 'unit-modulus'):
             translate_product(ci, nelec, [1, 0], [1, 2])
+
+
+def translated_basis():
+    permutation = [1, 2, 0]
+    counts = np.array([(0, 0), (1, 0), (1, 0)])
+    ci = [np.ones((1, 1)), np.array([[1.], [0.]]), np.array([[1.], [0.]])]
+    states, sectors = [], []
+    for _ in range(3):
+        states.append(ci)
+        sectors.append(counts)
+        ci, counts, phase = translate_product(ci, counts, permutation)
+        ci[0] = ci[0] * phase
+    return [[state[f] for state in states] for f in range(3)], np.stack(sectors, axis=1)
+
+
+class TranslationProjectionTests(unittest.TestCase):
+    def test_complex_gauge_and_group(self):
+        ci, counts = translated_basis()
+        phases = np.exp(1j * np.array([.4, -.7, 1.1]))
+        ci[0] = [c * phase for c, phase in zip(ci[0], phases)]
+        result = project_translation(ci, counts, [1, 2, 0])
+        expected = np.zeros((3, 3), dtype=complex)
+        for source in range(3):
+            target = (source + 1) % 3
+            expected[target, source] = phases[source] / phases[target]
+        np.testing.assert_allclose(result['matrix'], expected, atol=1e-12)
+        np.testing.assert_allclose(np.linalg.matrix_power(result['matrix'], 3), np.eye(3), atol=1e-12)
+        self.assertLess(result['closure_errors'].max(), 1e-7)
+
+    def test_spectator_response_must_translate(self):
+        ci, counts = translated_basis()
+        ci[1][0] = np.array([[0.], [1.]])
+        result = project_translation(ci, counts, [1, 2, 0])
+        self.assertGreater(result['closure_errors'].max(), .9)
+
+    def test_projection_uses_overlap_metric(self):
+        # A complete, nonorthogonal one-fragment basis is closed under identity.
+        ci = [[np.array([[1.], [0.]]), np.array([[.6j], [.8]])]]
+        counts = np.array([[(1, 0), (1, 0)]])
+        result = project_translation(ci, counts, [0])
+        np.testing.assert_allclose(result['matrix'], np.eye(2), atol=1e-12)
+        self.assertAlmostEqual(result['overlap'][0, 1], .6j)
+        with self.assertRaisesRegex(ValueError, 'positive definite'):
+            project_translation([[ci[0][0], ci[0][0]]], counts, [0])
 
 
 if __name__ == '__main__':
