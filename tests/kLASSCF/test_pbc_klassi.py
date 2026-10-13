@@ -1,12 +1,16 @@
 """Complex charged LAS matrix elements and independent-fragment references."""
 
 import unittest
+from unittest import mock
 
 import numpy as np
+from pyscf.pbc import gto, scf
 
 from mrh.my_pyscf.lassi.op_o0 import _ci_outer_product
 from mrh.my_pyscf.pbc.fci import direct_spin1_cplx
 from mrh.my_pyscf.pbc.mcscf.klassi import build_hamiltonian
+from mrh.my_pyscf.pbc import mcscf
+from mrh.my_pyscf.pbc.mcscf import klassi
 
 
 def explicit_products(ci, norb, nelec):
@@ -66,6 +70,66 @@ class MatrixTests(unittest.TestCase):
                                         ci, [2], nelec, ecore=2.)
         self.assertAlmostEqual(overlap[0, 1], .6j)
         np.testing.assert_allclose(ham, 2 * overlap)
+
+
+class ChargedReferenceTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cell = gto.Cell()
+        cell.a = np.diag([3., 10., 10.])
+        cell.atom = 'H 0 0 0; H .74 0 0'
+        cell.basis = 'sto-3g'
+        cell.precision = 1e-8
+        cell.ke_cutoff = 20
+        cell.verbose = 0
+        cell.build()
+        kmf = scf.KRHF(cell, cell.make_kpts((3, 1, 1), wrap_around=True)).density_fit()
+        kmf.exxdiv = None
+        kmf.max_cycle = 0
+        kmf.kernel()
+        cls.las = mcscf.KLASCI(kmf, 2, (1, 1), kmesh=(3, 1, 1))
+        cls.las.mo_coeff = cls.las.localize_init_guess(
+            ['H 1s'], mo_coeff=np.asarray(kmf.mo_coeff))
+
+    def test_independent_states_and_diagonal_energies(self):
+        before = self.las.mo_coeff.copy()
+        h0, h1, h2 = klassi.ham_2q(self.las)
+        for charge in (1, -1):
+            with mock.patch.object(klassi, 'kLASCI', wraps=mcscf.KLASCI) as factory:
+                states = klassi.make_charged_states(self.las, charge)
+            self.assertEqual([c.kwargs['ref_cell'] for c in factory.call_args_list], [0, 1, 2])
+            nelec = np.stack([s.get_nelec_frs()[:, 0] for s in states], axis=1)
+            ci = [[s.ci[f][0] for s in states] for f in range(3)]
+            ham, overlap = build_hamiltonian(h1, h2, ci, self.las.ncas_sub, nelec, h0)
+            np.testing.assert_allclose(np.diag(ham), [3 * s.e_tot for s in states], atol=1e-9)
+            np.testing.assert_allclose(overlap, np.eye(3), atol=1e-10)
+            np.testing.assert_allclose(ham, ham.conj().T, atol=1e-10)
+            self.assertGreater(np.max(np.abs(ham - np.diag(np.diag(ham)))), 1e-4)
+            for ref, state in enumerate(states):
+                self.assertEqual(nelec[:, ref].sum(), 6 - charge)
+                self.assertEqual(nelec[ref, ref].sum(), 2 - charge)
+                np.testing.assert_array_equal(state.mo_coeff, before)
+                self.assertIsNot(state.fciboxes[0], self.las.fciboxes[0])
+            self.assertFalse(np.shares_memory(states[0].ci[0][0], states[1].ci[0][0]))
+            # A three-fragment explicit projection checks spectator parity signs.
+            vecs = explicit_products(ci, self.las.ncas_sub, nelec)
+            ne = tuple(nelec[:, 0].sum(axis=0))
+            eri = direct_spin1_cplx.absorb_h1e(h1, h2, 6, ne, .5)
+            hvecs = [direct_spin1_cplx.contract_2e(eri, v, 6, ne) for v in vecs]
+            expected = np.array([[np.vdot(b, k) for k in hvecs] for b in vecs])
+            np.testing.assert_allclose(ham, expected + h0 * overlap, atol=1e-9)
+        np.testing.assert_array_equal(self.las.mo_coeff, before)
+        self.assertIsNone(self.las.ci)
+
+    def test_reference_validation_and_nonconvergence(self):
+        for charge in (0, 2, .5):
+            with self.assertRaisesRegex(ValueError, 'charge'):
+                klassi.make_charged_states(self.las, charge)
+        with self.assertRaisesRegex(ValueError, 'mo_coeff'):
+            klassi.make_charged_states(self.las, 1, mo_coeff=self.las.mo_coeff[0])
+        with mock.patch.object(self.las, 'max_cycle_macro', 1):
+            with self.assertRaisesRegex(RuntimeError, 'did not converge'):
+                klassi.make_charged_states(self.las, 1)
 
 
 if __name__ == '__main__':
