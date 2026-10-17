@@ -19,6 +19,7 @@ from mrh.my_pyscf.pbc.mcscf.klasscf import (
     PBCLASSCFNoSymm,
     kLASSCF,
 )
+from mrh.my_pyscf.pbc.mcscf.klassi import KLASSI, kLASSI
 from mrh.my_pyscf.pbc.mcscf.real_linear_solvers import (
     SolveScipyCGForCplx,
     SolveScipyMINRESForCplx,
