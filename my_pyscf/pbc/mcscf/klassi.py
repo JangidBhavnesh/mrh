@@ -408,7 +408,7 @@ class KLASSI(lib.StreamObject):
         log = lib.logger.new_logger(self)
         active_space = f"({int(self.nelec_frs[:, 0].sum())}, {int(self.ncas_sub.sum())})"
         log.info("\nk-LASSI charge %+d: total many-electron momentum blocks", self.charge)
-        log.info("K is in reciprocal-lattice coordinates; T_a = exp(-i K.a).")
+        log.debug("K is in reciprocal-lattice coordinates; T_a = exp(-i K.a).")
         log.info("%4s  %31s  %5s  %23s  %22s  %12s", "K id", "K (scaled)", "State",
                  "Total Active Space (e,o)", "Energies (Ha/cell)", "Spin (2S+1)")
         for result in self.k_results:
@@ -417,7 +417,6 @@ class KLASSI(lib.StreamObject):
                 log.info("%4d  %31s  %5d  %23s  %22.12f  %12.6f",
                          result['target_k'], klabel, root, active_space,
                          energy, result['spin_multiplicity'][root])
-        log.info("Spin (2S+1) is inferred from <S^2>; noninteger values indicate spin mixing.")
         return self
 
     def _finalize(self):
@@ -431,7 +430,6 @@ class KLASSI(lib.StreamObject):
         for root, energy in enumerate(self.e_tot):
             log.info("%5d  %23s  %22.12f  %12.6f", root, active_space,
                      energy, self.spin_multiplicity[root])
-        log.info("Spin (2S+1) is inferred from <S^2>; noninteger values indicate spin mixing.")
         return self
 
 
