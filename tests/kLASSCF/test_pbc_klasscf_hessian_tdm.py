@@ -1,3 +1,4 @@
+import sys
 import unittest
 from unittest.mock import patch
 
@@ -166,7 +167,7 @@ class KnownValues(unittest.TestCase):
             tdm1rs_one_sided[0, :, i:j, i:j] = (
                 amplitude * np.stack(
                     (box.dm1a_operator, box.dm1b_operator), axis=0,
-                )
+                ).swapaxes(-1, -2)
                 - overlap * operator.casdm1frs[cell][0]
             )
             transition_dm2 = (
@@ -256,7 +257,7 @@ class KnownValues(unittest.TestCase):
         c1 -= np.vdot(c0, c1) * c0
         c1 /= np.linalg.norm(c1)
 
-        dm1s_ref = np.asarray(box.solver.make_rdm1s(c0, norb, nelec))
+        dm1s_ref = np.asarray(box.solver.make_rdm1s(c0, norb, nelec)).swapaxes(-1, -2)
         dm2_ref = np.asarray(box.solver.make_rdm12(c0, norb, nelec)[1])
         operator.nroots = 1
         operator.ncastot = norb
@@ -274,7 +275,7 @@ class KnownValues(unittest.TestCase):
         tdm1rs, tcm2 = operator.make_tdm1s2c_sub([[c1]])
 
         def make_cumulant(c):
-            dm1s = np.asarray(box.solver.make_rdm1s(c, norb, nelec))
+            dm1s = np.asarray(box.solver.make_rdm1s(c, norb, nelec)).swapaxes(-1, -2)
             dm2 = np.asarray(box.solver.make_rdm12(c, norb, nelec)[1])
             dm1 = dm1s.sum(axis=0)
             cumulant = dm2 - np.multiply.outer(dm1, dm1)
@@ -451,6 +452,7 @@ class KnownValues(unittest.TestCase):
         operator.kpts = np.zeros((nkpts, 3))
         operator.las = type("LAS", (), {
             "_scf": type("SCF", (), {"cell": object()})(),
+            "stdout": sys.stdout, "verbose": 0,
         })()
         phase = np.exp(
             2j * np.pi * np.arange(nkpts)[:, None]
